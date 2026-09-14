@@ -301,6 +301,22 @@ class WebStorage(Storage):
                     result = obj.__dict__["result"]
                 if result is not None:
                     result_str = result.to_json()
+                    experiment_ws = getattr(obj, "experiment_workspace", None)
+                    factors = []
+                    for ws in getattr(obj, "sub_workspace_list", []) or []:
+                        if ws is None or getattr(ws, "target_task", None) is None:
+                            continue
+                        task = ws.target_task
+                        factors.append(
+                            {
+                                "name": getattr(task, "factor_name", None) or task.name,
+                                "path": str(ws.workspace_path),
+                            }
+                        )
+                    workspaces = {
+                        "experiment": str(experiment_ws.workspace_path) if experiment_ws is not None else None,
+                        "factors": factors,
+                    }
                     data = {
                         "id": id,
                         "msg": {
@@ -310,6 +326,7 @@ class WebStorage(Storage):
                             "loop_id": li,
                             "content": {
                                 "result": result_str,
+                                "workspaces": workspaces,
                             },
                         },
                     }
