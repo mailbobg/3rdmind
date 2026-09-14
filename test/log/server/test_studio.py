@@ -182,3 +182,30 @@ def test_backtest_rejects_paths_outside_workspace_root(studio_client, tmp_path: 
 @pytest.mark.offline
 def test_research_reports_route_removed(studio_client) -> None:
     assert studio_client.get("/studio/research-reports").status_code == 404
+
+
+@pytest.mark.offline
+def test_backtest_accepts_string_loop_id(studio_client, tmp_path: Path) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": "0",
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    job = response.get_json()["id"]
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / job / "config.json").read_text())
+    assert config["loop_id"] == 0
+
+
+@pytest.mark.offline
+def test_backtest_rejects_non_numeric_loop_id(studio_client, tmp_path: Path) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": "x",
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 400
+    assert "loop_id" in response.get_json()["error"]

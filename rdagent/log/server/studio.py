@@ -112,7 +112,12 @@ def backtests():
         messages = trace_messages(str(body.get("trace", "")))
         if messages is None:
             raise ValueError("Trace is not loaded on this server")
-        body["factors"] = resolve_factor_paths(messages, body.get("loop_id"), body.get("factors") or [])
+        loop_id = body.get("loop_id")
+        if isinstance(loop_id, bool) or not (isinstance(loop_id, int) or (isinstance(loop_id, str) and loop_id.strip().lstrip("-").isdigit())):
+            raise ValueError("loop_id must be an integer")
+        loop_id = int(loop_id)
+        body["loop_id"] = loop_id
+        body["factors"] = resolve_factor_paths(messages, loop_id, body.get("factors") or [])
         config = validate_config(body)
         config["provider_uri"] = str(Path(config.get("provider_uri") or os.environ.get(
             "QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
