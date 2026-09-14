@@ -1,6 +1,6 @@
 <template>
   <div id="app">
-    <Header />
+    <Header v-if="route.name !== 'Studio'" />
     <router-view v-slot="{ Component }" class="component">
       <keep-alive>
         <component
@@ -15,7 +15,7 @@
         v-if="!$route.meta.keepAlive"
       />
     </router-view>
-    <Footer :color="color" />
+    <Footer v-if="route.name !== 'Studio'" :color="color" />
   </div>
 </template>
 <script setup>

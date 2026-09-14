@@ -20,6 +20,8 @@ class FactorCoSTEER(CoSTEER):
         eva = CoSTEERMultiEvaluator(FactorEvaluatorForCoder(scen=scen), scen=scen)
         es = FactorMultiProcessEvolvingStrategy(scen=scen, settings=FACTOR_COSTEER_SETTINGS)
 
+        kwargs.setdefault("with_knowledge", setting.with_knowledge)
+        kwargs.setdefault("knowledge_self_gen", setting.knowledge_self_gen)
         super().__init__(*args, settings=setting, eva=eva, es=es, evolving_version=2, scen=scen, **kwargs)
 
     def develop(self, exp: Experiment) -> Experiment:

@@ -21,6 +21,7 @@ declare module 'vue' {
     ElTabs: typeof import('element-plus/es')['ElTabs']
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
     ElUpload: typeof import('element-plus/es')['ElUpload']
+    EquityChart: typeof import('./src/components/studio/EquityChart.vue')['default']
     Feedback: typeof import('./src/components/feedback.vue')['default']
     Footer: typeof import('./src/components/footer.vue')['default']
     KateX: typeof import('./src/components/kateX.vue')['default']

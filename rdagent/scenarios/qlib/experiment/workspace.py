@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-from rdagent.components.coder.model_coder.conf import MODEL_COSTEER_SETTINGS
+from rdagent.components.coder.model_coder.conf import MODEL_COSTEER_SETTINGS, get_model_env
 from rdagent.core.experiment import FBWorkspace
 from rdagent.log import rdagent_logger as logger
 from rdagent.utils.env import QlibCondaConf, QlibCondaEnv, QTDockerEnv
@@ -20,6 +20,8 @@ class QlibFBWorkspace(FBWorkspace):
             qtde = QTDockerEnv()
         elif MODEL_COSTEER_SETTINGS.env_type == "conda":
             qtde = QlibCondaEnv(conf=QlibCondaConf())
+        elif MODEL_COSTEER_SETTINGS.env_type == "venv":
+            qtde = get_model_env(enable_cache=False, running_timeout_period=3600)
         else:
             logger.error(f"Unknown env_type: {MODEL_COSTEER_SETTINGS.env_type}")
             return None, "Unknown environment type"

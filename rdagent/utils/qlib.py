@@ -199,7 +199,9 @@ df = D.features(["SH600000"], expressions, start_time="2008-01-01", end_time="20
 def validate_qlib_features(expressions: list[str]) -> bool:
     _TFW.inject_files(**{"test_fea.py": TEST_FEATURE_CODE.format(experessions=str(expressions))})
 
-    qlib_env = QlibCondaEnv(conf=QlibCondaConf())
+    from rdagent.components.coder.model_coder.conf import get_model_env
+
+    qlib_env = get_model_env(enable_cache=False)
     qlib_env.prepare()
     res = _TFW.run(
         env=qlib_env,

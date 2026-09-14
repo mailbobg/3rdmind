@@ -1,9 +1,11 @@
 from typing import Optional
+import sys
+from pathlib import Path
 
 from pydantic_settings import SettingsConfigDict
 
 from rdagent.components.coder.CoSTEER.config import CoSTEERSettings
-from rdagent.utils.env import Env, QlibCondaConf, QlibCondaEnv, QTDockerEnv
+from rdagent.utils.env import Env, LocalConf, LocalEnv, QlibCondaConf, QlibCondaEnv, QTDockerEnv
 
 
 class ModelCoSTEERSettings(CoSTEERSettings):
@@ -24,6 +26,8 @@ def get_model_env(
         env = QTDockerEnv()
     elif conf.env_type == "conda":
         env = QlibCondaEnv(conf=QlibCondaConf())
+    elif conf.env_type == "venv":
+        env = LocalEnv(conf=LocalConf(enable_cache=False, default_entry="python main.py", bin_path=str(Path(sys.executable).parent), live_output=False))
     else:
         raise ValueError(f"Unknown env type: {conf.env_type}")
 

@@ -3,6 +3,17 @@ import { createRouter, RouteRecordRaw, createWebHashHistory } from 'vue-router'
 const routes: Array<RouteRecordRaw> = [
   {
     path: '/',
+    alias: ['/Studio'],
+    name: 'Studio',
+    component: () => import('../views/FusionConsole.vue'),
+    meta: {
+      keepAlive: false,
+      requiresFrontEndAuth: true,
+      footerBg: "#F6FAFF"
+    },
+  },
+  {
+    path: '/Intro',
     name: 'Home',
     component: () => import('../views/Home.vue'),
     meta: {

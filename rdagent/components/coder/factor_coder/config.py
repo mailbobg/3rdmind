@@ -1,10 +1,12 @@
 import os
+import sys
+from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import SettingsConfigDict
 
 from rdagent.components.coder.CoSTEER.config import CoSTEERSettings
-from rdagent.utils.env import CondaConf, Env, LocalEnv
+from rdagent.utils.env import CondaConf, Env, LocalConf, LocalEnv
 
 
 class FactorCoSTEERSettings(CoSTEERSettings):
@@ -26,6 +28,9 @@ class FactorCoSTEERSettings(CoSTEERSettings):
     """Method for the selection of factors implementation"""
 
     python_bin: str = "python"
+    env_type: str = "conda"
+    with_knowledge: bool = True
+    knowledge_self_gen: bool = True
     """Path to the Python binary"""
 
 
@@ -36,8 +41,12 @@ def get_factor_env(
     enable_cache: Optional[bool] = None,
 ) -> Env:
     conf = FactorCoSTEERSettings()
-    if hasattr(conf, "python_bin"):
+    if conf.env_type == "venv":
+        env = LocalEnv(conf=LocalConf(enable_cache=False, default_entry="python main.py", bin_path=str(Path(sys.executable).parent), live_output=False))
+    elif conf.env_type == "conda":
         env = LocalEnv(conf=(CondaConf(conda_env_name=os.environ.get("CONDA_DEFAULT_ENV"))))
+    else:
+        raise ValueError(f"Unknown factor env type: {conf.env_type}")
     env.conf.extra_volumes = extra_volumes.copy()
     env.conf.running_timeout_period = running_timeout_period
     if enable_cache is not None:

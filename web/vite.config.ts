@@ -32,6 +32,11 @@ export default defineConfig({
     'global': 'window' // 设置 global 为 window 解决一些兼容问题
   },
   server: {
+    proxy: Object.fromEntries(
+      ['/studio', '/upload', '/trace', '/traces', '/control', '/user_interaction'].map(
+        (route) => [route, { target: 'http://127.0.0.1:19899', changeOrigin: true }]
+      )
+    ),
     host: true,
     port: 8080, // 使用的端口号
     open: true, // 是否自动打开浏览器
@@ -46,4 +51,3 @@ export default defineConfig({
     }
   }
 })
-

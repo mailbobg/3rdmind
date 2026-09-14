@@ -38,6 +38,9 @@ from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.ui.storage import WebStorage
 
 app = Flask(__name__, static_folder=str(Path(UI_SETTING.static_path).resolve()))
+from rdagent.log.server.studio import studio
+
+app.register_blueprint(studio)
 if UI_SETTING.cors_allowed_origins:
     CORS(app, origins=UI_SETTING.cors_allowed_origins, supports_credentials=True)
 app.config["UI_SERVER_PORT"] = 19899
@@ -153,6 +156,7 @@ class RDAgentTask:
     def _run(self) -> None:
         from rdagent.log.conf import LOG_SETTINGS
 
+        LOG_SETTINGS.trace_path = self.log_trace_path
         LOG_SETTINGS.set_ui_server_port(self.ui_server_port)
 
         from rdagent.log import rdagent_logger
@@ -203,6 +207,7 @@ class RDAgentTask:
                         raise ValueError(f"Unknown target: {self.target_name}")
                 except Exception:
                     traceback.print_exc()
+                    raise
 
 
 rdagent_processes: dict[str, RDAgentTask] = {}
@@ -376,6 +381,10 @@ def update_trace():
                 }
             )
             app.logger.warning(f"Process for {trace_id} has ended.")
+
+    # Studio restores full immutable views without moving legacy clients' cursors.
+    if data.get("snapshot") is True:
+        return jsonify(task.messages), 200
 
     user_ip = request.remote_addr
 

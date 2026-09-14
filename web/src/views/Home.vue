@@ -73,7 +73,7 @@ const moveMouse = (e) => {
   btn.value.style.setProperty("--y", y + "px");
 };
 const tryNow = () => {
-  router.push("/Playground");
+  router.push("/Studio");
 };
 const goToGitHub = () => {
   window.open("https://github.com/microsoft/R&D-Agent");
