@@ -37,6 +37,21 @@ def trace_messages(trace_id):
     return None if task is None else task.messages
 
 
+def normalize_loop_id(value):
+    """Coerce a loop_id to int; accepts int (not bool) or a string of digits (after strip).
+
+    Persisted trace events (see extract_loopid_func_name in rdagent/log/ui/storage.py) always carry
+    loop_id as a string, while live in-memory events may carry it as an int. Both /studio/rounds and
+    /studio/backtests must agree on one representation or `round_["loop_id"] == loop_id` silently
+    fails on a type mismatch (e.g. int 0 vs string "0").
+    """
+    if not isinstance(value, bool) and isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    raise ValueError("loop_id must be an integer")
+
+
 def metric_rounds(messages):
     rounds = []
     for message in messages:
@@ -47,8 +62,13 @@ def metric_rounds(messages):
             metrics = json.loads(content["result"]) if isinstance(content.get("result"), str) else content.get("result") or {}
         except (ValueError, TypeError):
             metrics = {}
+        raw_loop_id = message.get("loop_id")
+        try:
+            loop_id = normalize_loop_id(raw_loop_id)
+        except ValueError:
+            loop_id = raw_loop_id
         rounds.append({
-            "loop_id": message.get("loop_id"),
+            "loop_id": loop_id,
             "factors": [f["name"] for f in content.get("workspaces", {}).get("factors", [])],
             "paths": {f["name"]: f["path"] for f in content.get("workspaces", {}).get("factors", [])},
             "metrics": {k: v for k, v in metrics.items() if isinstance(v, (int, float))},
@@ -118,10 +138,7 @@ def backtests():
         messages = trace_messages(str(body.get("trace", "")))
         if messages is None:
             raise ValueError("Trace is not loaded on this server")
-        loop_id = body.get("loop_id")
-        if isinstance(loop_id, bool) or not (isinstance(loop_id, int) or (isinstance(loop_id, str) and loop_id.strip().lstrip("-").isdigit())):
-            raise ValueError("loop_id must be an integer")
-        loop_id = int(loop_id)
+        loop_id = normalize_loop_id(body.get("loop_id"))
         body["loop_id"] = loop_id
         body["factors"] = resolve_factor_paths(messages, loop_id, body.get("factors") or [])
         config = validate_config(body)

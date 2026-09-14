@@ -111,7 +111,7 @@ def _task_with_metric(trace_folder: Path, trace_id: str, factor_dir: Path):
     task.messages = [
         {"tag": "research.hypothesis", "loop_id": 0, "timestamp": "t", "content": {"hypothesis": "h"}},
         {
-            "tag": "feedback.metric", "loop_id": 0, "timestamp": "t",
+            "tag": "feedback.metric", "loop_id": "0", "timestamp": "t",
             "content": {
                 "result": json.dumps({"IC": 0.01, "Rank IC": 0.02}),
                 "workspaces": {"experiment": str(factor_dir / "exp"),
