@@ -7,8 +7,10 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    BacktestResult: typeof import('./src/components/studio/BacktestResult.vue')['default']
     ChartBox: typeof import('./src/components/chartBox.vue')['default']
     Code: typeof import('./src/components/code.vue')['default']
+    CodeViewer: typeof import('./src/components/studio/CodeViewer.vue')['default']
     Development: typeof import('./src/components/development.vue')['default']
     Dialog: typeof import('./src/components/dialog.vue')['default']
     ElInputNumber: typeof import('element-plus/es')['ElInputNumber']
@@ -24,7 +26,7 @@ declare module 'vue' {
     EquityChart: typeof import('./src/components/studio/EquityChart.vue')['default']
     Feedback: typeof import('./src/components/feedback.vue')['default']
     Footer: typeof import('./src/components/footer.vue')['default']
-    KateX: typeof import('./src/components/kateX.vue')['default']
+    InteractionPanel: typeof import('./src/components/studio/InteractionPanel.vue')['default']
     LineChart: typeof import('./src/components/lineChart.vue')['default']
     LineChartOne: typeof import('./src/components/lineChartOne.vue')['default']
     Loading: typeof import('./src/components/loading.vue')['default']
@@ -32,16 +34,16 @@ declare module 'vue' {
     LoopComponent: typeof import('./src/components/loop-component.vue')['default']
     Markdown: typeof import('./src/components/markdown.vue')['default']
     MarkdownToHtml: typeof import('./src/components/markdownToHtml.vue')['default']
+    MetricTable: typeof import('./src/components/studio/MetricTable.vue')['default']
     NavBar: typeof import('./src/components/navBar.vue')['default']
     Research: typeof import('./src/components/research.vue')['default']
+    RoundTimeline: typeof import('./src/components/studio/RoundTimeline.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
-    SaveImage: typeof import('./src/components/saveImage.vue')['default']
     SelectComponent: typeof import('./src/components/select-component.vue')['default']
     SmSelectComponent: typeof import('./src/components/sm-select-component.vue')['default']
     StepComponent: typeof import('./src/components/step-component.vue')['default']
     SvgIcon: typeof import('./src/components/svgIcon.vue')['default']
-    Swiper: typeof import('./src/components/swiper.vue')['default']
     UploadProgress: typeof import('./src/components/upload-progress.vue')['default']
   }
 }
