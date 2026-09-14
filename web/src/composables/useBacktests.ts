@@ -67,8 +67,8 @@ export function useBacktests() {
       jobs.value = await studio.backtests();
       selectedId.value = id;
       result.value = { id, status: "queued", config };
+      schedule();
     });
-    schedule();
   }
 
   function dispose() { disposed = true; clearTimeout(timer); }
