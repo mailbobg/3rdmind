@@ -307,9 +307,11 @@ class WebStorage(Storage):
                         if ws is None or getattr(ws, "target_task", None) is None:
                             continue
                         task = ws.target_task
+                        if not hasattr(task, "factor_name"):
+                            continue
                         factors.append(
                             {
-                                "name": getattr(task, "factor_name", None) or task.name,
+                                "name": task.factor_name or task.name,
                                 "path": str(ws.workspace_path),
                             }
                         )

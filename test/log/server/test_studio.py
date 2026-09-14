@@ -4,8 +4,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import rdagent.log.server.app as server
 from rdagent.core.experiment import Experiment, FBWorkspace, Task
-from rdagent.log.server.studio_worker import require_signal_coverage
+from rdagent.log.server import studio as studio_module
+from rdagent.log.server.studio_worker import (
+    load_factor_frame,
+    require_signal_coverage,
+    trading_day_on_or_before,
+    validate_config,
+)
 from rdagent.log.ui.storage import WebStorage
 
 
@@ -14,6 +21,11 @@ class _FactorTask(Task):
         super().__init__(name=name, description="")
         self.factor_name = name
 
+    def get_task_information(self) -> str:
+        return self.name
+
+
+class _ModelTask(Task):
     def get_task_information(self) -> str:
         return self.name
 
@@ -59,9 +71,6 @@ def test_metric_event_without_sub_workspaces(tmp_path: Path) -> None:
     assert data["msg"]["content"]["workspaces"] == {"experiment": None, "factors": []}
 
 
-from rdagent.log.server.studio_worker import validate_config, load_factor_frame
-
-
 def _config(**overrides):
     base = {
         "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
@@ -101,10 +110,6 @@ def test_load_factor_frame_reads_first_column(tmp_path: Path) -> None:
 def test_load_factor_frame_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="result.h5"):
         load_factor_frame({"name": "X", "path": str(tmp_path)}, pd.Timestamp("2025-01-01"), "2025-12-31")
-
-
-import rdagent.log.server.app as server
-from rdagent.log.server import studio as studio_module
 
 
 def _task_with_metric(trace_folder: Path, trace_id: str, factor_dir: Path):
@@ -255,3 +260,104 @@ def test_require_signal_coverage_rejects_window_past_signal_history() -> None:
 def test_require_signal_coverage_accepts_window_inside_signal_history() -> None:
     dates = pd.DatetimeIndex(["2025-01-01", "2025-06-15", "2025-12-31"])
     require_signal_coverage(dates, "2025-01-02", "2025-12-30")
+
+
+@pytest.mark.offline
+def test_trading_day_on_or_before_rolls_back_from_weekend() -> None:
+    calendar = pd.DatetimeIndex(["2025-01-01", "2025-01-02", "2025-01-03"])
+    # 2025-01-04 is a Saturday, one day after the last trading day above.
+    assert trading_day_on_or_before(calendar, "2025-01-04") == pd.Timestamp("2025-01-03")
+
+
+@pytest.mark.offline
+def test_trading_day_on_or_before_returns_exact_match() -> None:
+    calendar = pd.DatetimeIndex(["2025-01-01", "2025-01-02", "2025-01-03"])
+    assert trading_day_on_or_before(calendar, "2025-01-02") == pd.Timestamp("2025-01-02")
+
+
+@pytest.mark.offline
+def test_trading_day_on_or_before_rejects_date_before_calendar() -> None:
+    calendar = pd.DatetimeIndex(["2025-01-01", "2025-01-02", "2025-01-03"])
+    with pytest.raises(ValueError):
+        trading_day_on_or_before(calendar, "2024-12-31")
+
+
+@pytest.mark.offline
+def test_running_workspaces_only_include_factor_tasks(tmp_path: Path) -> None:
+    factor_task = _FactorTask("STR_5")
+    model_task = _ModelTask(name="LGBModel", description="")
+    exp = Experiment(sub_tasks=[factor_task, model_task])
+    exp.experiment_workspace = FBWorkspace()
+    exp.experiment_workspace.workspace_path = tmp_path / "exp"
+    for index, task in enumerate([factor_task, model_task]):
+        ws = FBWorkspace(target_task=task)
+        ws.workspace_path = tmp_path / f"ws{index}"
+        exp.sub_workspace_list[index] = ws
+    exp.result = pd.Series({"IC": 0.01})
+    data = WebStorage(port=1, path=tmp_path)._obj_to_json(
+        obj=exp, tag="Loop_0.running", id="trace", timestamp="2026-09-14T00:00:00"
+    )
+    factors = data["msg"]["content"]["workspaces"]["factors"]
+    assert [f["name"] for f in factors] == ["STR_5"]
+
+
+@pytest.mark.offline
+def test_metric_rounds_dedupes_keeping_latest_per_loop() -> None:
+    messages = [
+        {
+            "tag": "feedback.metric", "loop_id": 0, "timestamp": "t1",
+            "content": {"result": json.dumps({"IC": 0.01}),
+                        "workspaces": {"factors": [{"name": "OLD", "path": "/tmp/old"}]}},
+        },
+        {
+            "tag": "feedback.metric", "loop_id": 0, "timestamp": "t2",
+            "content": {"result": json.dumps({"IC": 0.02}),
+                        "workspaces": {"factors": [{"name": "NEW", "path": "/tmp/new"}]}},
+        },
+    ]
+    rounds = studio_module.metric_rounds(messages)
+    assert len(rounds) == 1
+    assert rounds[0]["factors"] == ["NEW"]
+    assert rounds[0]["metrics"] == {"IC": 0.02}
+
+
+@pytest.mark.offline
+def test_metric_rounds_excludes_bool_metrics() -> None:
+    messages = [
+        {
+            "tag": "feedback.metric", "loop_id": 0, "timestamp": "t1",
+            "content": {"result": json.dumps({"IC": 0.01, "ok": True}), "workspaces": {"factors": []}},
+        },
+    ]
+    rounds = studio_module.metric_rounds(messages)
+    assert rounds[0]["metrics"] == {"IC": 0.01}
+
+
+@pytest.mark.offline
+def test_resolve_factor_paths_rejects_non_dict_factor(studio_client) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0,
+            "factors": ["STR_5"],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 400
+    assert "object with name and weight" in response.get_json()["error"]
+
+
+@pytest.mark.offline
+def test_backtest_responses_omit_factor_paths(studio_client, tmp_path: Path) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0,
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    post_response = studio_client.post("/studio/backtests", json=body)
+    assert post_response.status_code == 202, post_response.get_json()
+    job = post_response.get_json()["id"]
+
+    for factor in studio_client.get("/studio/backtests").get_json()[0]["config"]["factors"]:
+        assert "path" not in factor
+    for factor in studio_client.get(f"/studio/backtests/{job}").get_json()["config"]["factors"]:
+        assert "path" not in factor

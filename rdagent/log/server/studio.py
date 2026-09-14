@@ -53,7 +53,9 @@ def normalize_loop_id(value):
 
 
 def metric_rounds(messages):
-    rounds = []
+    """One entry per loop_id, in first-seen order; a repeated loop_id keeps its LATEST metric event."""
+    order = []
+    by_loop = {}
     for message in messages:
         if message.get("tag") != "feedback.metric":
             continue
@@ -67,13 +69,15 @@ def metric_rounds(messages):
             loop_id = normalize_loop_id(raw_loop_id)
         except ValueError:
             loop_id = raw_loop_id
-        rounds.append({
+        if loop_id not in by_loop:
+            order.append(loop_id)
+        by_loop[loop_id] = {
             "loop_id": loop_id,
             "factors": [f["name"] for f in content.get("workspaces", {}).get("factors", [])],
             "paths": {f["name"]: f["path"] for f in content.get("workspaces", {}).get("factors", [])},
-            "metrics": {k: v for k, v in metrics.items() if isinstance(v, (int, float))},
-        })
-    return rounds
+            "metrics": {k: v for k, v in metrics.items() if isinstance(v, (int, float)) and not isinstance(v, bool)},
+        }
+    return [by_loop[loop_id] for loop_id in order]
 
 
 def resolve_factor_paths(messages, loop_id, factors):
@@ -86,6 +90,8 @@ def resolve_factor_paths(messages, loop_id, factors):
         raise ValueError(f"Round {loop_id} has no factor workspaces")
     resolved = []
     for factor in factors:
+        if not isinstance(factor, dict):
+            raise ValueError("Each factor must be an object with name and weight")
         name = factor.get("name")
         if name not in paths:
             raise ValueError(f"Unknown factor {name!r} in round {loop_id}")
@@ -96,6 +102,13 @@ def resolve_factor_paths(messages, loop_id, factors):
             raise ValueError(f"Factor {name} has no result.h5")
         resolved.append({"name": name, "weight": float(factor.get("weight", 1)), "path": str(path)})
     return resolved
+
+
+def public_config(config):
+    """A copy of ``config`` with each factor's on-disk workspace ``path`` stripped for API responses."""
+    public = dict(config)
+    public["factors"] = [{"name": f["name"], "weight": f["weight"]} for f in config.get("factors", [])]
+    return public
 
 
 @studio.get("/environment")
@@ -131,7 +144,7 @@ def backtests():
         for path in sorted(ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
             result_path = path.parent / "result.json"
             result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
-            jobs.append({"id": path.parent.name, "config": json.loads(path.read_text()), "status": result["status"]})
+            jobs.append({"id": path.parent.name, "config": public_config(json.loads(path.read_text())), "status": result["status"]})
         return jsonify(jobs)
     body = request.get_json() or {}
     try:
@@ -186,4 +199,4 @@ def backtest_result(job_id):
         with log.open("rb") as stream:
             stream.seek(max(0, log.stat().st_size - 16000))
             result["log"] = stream.read().decode("utf-8", errors="replace")
-    return jsonify({"id": job_id, "config": json.loads((folder / "config.json").read_text()), **result})
+    return jsonify({"id": job_id, "config": public_config(json.loads((folder / "config.json").read_text())), **result})

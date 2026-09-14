@@ -1,4 +1,9 @@
-"""Isolated Qlib expression-portfolio worker for the local research studio."""
+"""Isolated Qlib factor-portfolio worker for the local research studio.
+
+Reads each selected factor workspace's ``result.h5`` file, combines the
+factors into a single ranked signal, and runs a TopkDropoutStrategy backtest
+over the requested date range.
+"""
 import json
 import math
 import sys
@@ -50,6 +55,21 @@ def write_json(path, data):
     temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     temporary.replace(target)
+
+
+def trading_day_on_or_before(calendar, date):
+    """Return the latest trading day in ``calendar`` that is <= ``date``.
+
+    ``calendar`` is a sorted pandas DatetimeIndex of trading days. Raises
+    ValueError if ``date`` precedes the first entry in ``calendar``.
+    """
+    import pandas as pd
+
+    target = pd.Timestamp(date)
+    eligible = calendar[calendar <= target]
+    if not len(eligible):
+        raise ValueError(f"No trading day on or before {target.date()}")
+    return eligible[-1]
 
 
 def require_signal_coverage(score_index_dates, start, end):
@@ -129,7 +149,8 @@ def run(config):
     score = score.dropna().sort_index()
     if score.empty:
         raise ValueError("Selected factors have no complete observations")
-    require_signal_coverage(score.index.get_level_values("datetime"), prior[-1], config["end"])
+    end_day = trading_day_on_or_before(calendar, config["end"])
+    require_signal_coverage(score.index.get_level_values("datetime"), prior[-1], end_day)
     strategy = {"class": "TopkDropoutStrategy", "module_path": "qlib.contrib.strategy",
                 "kwargs": {"signal": score, "topk": config["topk"], "n_drop": config["n_drop"]}}
     portfolios, _ = backtest(
