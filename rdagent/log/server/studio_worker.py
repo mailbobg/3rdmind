@@ -33,8 +33,9 @@ def validate_config(config):
         raise ValueError("Select 1 to 20 factors")
     total = 0
     for factor in factors:
-        if not isinstance(factor.get("expression"), str) or not factor["expression"].strip():
-            raise ValueError("Missing factor expression")
+        for key in ("name", "path"):
+            if not isinstance(factor.get(key), str) or not factor[key].strip():
+                raise ValueError(f"Missing factor {key}")
         weight = float(factor["weight"])
         if not math.isfinite(weight):
             raise ValueError("Invalid factor weight")
@@ -49,6 +50,26 @@ def write_json(path, data):
     temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     temporary.replace(target)
+
+
+def load_factor_frame(factor, start, end):
+    """Read one factor workspace's result.h5 as a single-column frame named after the factor."""
+    import pandas as pd
+
+    source = Path(factor["path"]) / "result.h5"
+    if not source.is_file():
+        raise ValueError(f"Factor {factor['name']} has no result.h5 at {factor['path']}")
+    frame = pd.read_hdf(source)
+    if isinstance(frame, pd.Series):
+        frame = frame.to_frame()
+    if frame.empty or frame.shape[1] == 0:
+        raise ValueError(f"Factor {factor['name']} result is empty")
+    frame = frame.iloc[:, [0]]
+    frame.columns = [factor["name"]]
+    if list(frame.index.names) != ["datetime", "instrument"]:
+        raise ValueError(f"Factor {factor['name']} index must be (datetime, instrument)")
+    dates = frame.index.get_level_values("datetime")
+    return frame[(dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))]
 
 
 def run(config):
@@ -74,11 +95,15 @@ def run(config):
     if not len(prior):
         raise ValueError("At least one trading day of signal history is required")
     factors = config["factors"]
-    features = D.features(D.instruments(config["market"]),
-                          [f["expression"] for f in factors],
-                          start_time=prior[-1], end_time=config["end"], freq="day")
+    frames = [load_factor_frame(f, prior[-1], config["end"]) for f in factors]
+    features = pd.concat(frames, axis=1).sort_index()
     if features.empty:
-        raise ValueError("No factor observations for this universe and date range")
+        raise ValueError("No factor observations for this date range")
+    universe = set(D.list_instruments(D.instruments(config["market"]),
+                                      start_time=prior[-1], end_time=config["end"], as_list=True))
+    features = features[features.index.get_level_values("instrument").isin(universe)]
+    if features.empty:
+        raise ValueError("No factor observations inside the selected universe")
     # Require all selected factors on a row; do not silently treat missing data as zero.
     ranks = features.groupby(level="datetime").rank(pct=True)
     weights = np.array([float(f["weight"]) for f in factors])
