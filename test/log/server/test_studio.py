@@ -129,6 +129,7 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     (workspace_root / "f0").mkdir(parents=True)
     (workspace_root / "f0" / "result.h5").write_bytes(b"")
     monkeypatch.setattr(server, "log_folder_path", trace_folder)
+    monkeypatch.setitem(server.app.config, "LOG_FOLDER_PATH", trace_folder)
     monkeypatch.setattr(studio_module, "TRACE_ROOT", trace_folder)
     monkeypatch.setattr(studio_module, "ROOT", trace_folder / "studio_backtests")
     monkeypatch.setattr(studio_module, "WORKSPACE_ROOT", workspace_root)
@@ -209,3 +210,31 @@ def test_backtest_rejects_non_numeric_loop_id(studio_client, tmp_path: Path) -> 
     response = studio_client.post("/studio/backtests", json=body)
     assert response.status_code == 400
     assert "loop_id" in response.get_json()["error"]
+
+
+@pytest.mark.offline
+def test_trace_messages_reads_registry_from_current_app(tmp_path: Path) -> None:
+    """trace_messages must go through current_app.config, not `import rdagent.log.server.app`.
+
+    A plain dotted import of that module is wrong at runtime: the real server process is
+    started with `python -m rdagent.log.server.app`, which binds the running module to
+    sys.modules["__main__"] and leaves a second, never-populated copy under its normal
+    dotted name. Push a task into app.config["RDAGENT_PROCESSES"] directly (bypassing
+    `server.rdagent_processes` as a plain module attribute) and confirm trace_messages
+    still finds it purely via the Flask application context.
+    """
+    trace_folder = tmp_path / "traces"
+    fake_task = type("FakeTask", (), {"messages": [{"tag": "feedback.metric"}]})()
+    registry = {}
+    with server.app.app_context():
+        original_registry = server.app.config["RDAGENT_PROCESSES"]
+        original_folder = server.app.config["LOG_FOLDER_PATH"]
+        server.app.config["RDAGENT_PROCESSES"] = registry
+        server.app.config["LOG_FOLDER_PATH"] = trace_folder
+        try:
+            registry[str(trace_folder / "some/trace")] = fake_task
+            assert studio_module.trace_messages("some/trace") == fake_task.messages
+            assert studio_module.trace_messages("missing/trace") is None
+        finally:
+            server.app.config["RDAGENT_PROCESSES"] = original_registry
+            server.app.config["LOG_FOLDER_PATH"] = original_folder

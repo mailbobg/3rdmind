@@ -214,6 +214,15 @@ rdagent_processes: dict[str, RDAgentTask] = {}
 log_folder_path = Path(UI_SETTING.trace_folder).resolve()
 upload_folder_path = Path(UI_SETTING.upload_folder).resolve()
 
+# Expose these on app.config so blueprints (e.g. studio.py) can reach them via
+# flask.current_app instead of importing this module. When the server is launched
+# with `python -m rdagent.log.server.app`, this module is also bound to
+# sys.modules["__main__"]; a plain `import` from a blueprint creates a second,
+# empty copy of the module (and thus an empty rdagent_processes), so it must
+# always be reached through current_app.
+app.config["RDAGENT_PROCESSES"] = rdagent_processes
+app.config["LOG_FOLDER_PATH"] = log_folder_path
+
 
 def _drain_user_requests_into_messages(task: RDAgentTask) -> None:
     """Move a single pending user-interaction request into `task.messages`.

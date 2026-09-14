@@ -6,7 +6,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.server.studio_worker import validate_config, write_json
@@ -24,10 +24,16 @@ def job_folder(job_id):
 
 
 def trace_messages(trace_id):
-    """Messages of a loaded trace, or None when the server has not loaded it."""
-    from rdagent.log.server import app as server
+    """Messages of a loaded trace, or None when the server has not loaded it.
 
-    task = server.rdagent_processes.get(str(server.log_folder_path / trace_id))
+    Reached via flask.current_app rather than `import rdagent.log.server.app`: the
+    server is launched with `python -m rdagent.log.server.app`, which binds that
+    module to sys.modules["__main__"]; importing it by its normal dotted name here
+    would create a second, empty copy of the module (and an empty rdagent_processes
+    registry), so /studio endpoints would never see the loaded trace.
+    """
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    task = registry.get(str(Path(current_app.config["LOG_FOLDER_PATH"]) / trace_id))
     return None if task is None else task.messages
 
 
