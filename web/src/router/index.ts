@@ -2,15 +2,15 @@ import { createRouter, RouteRecordRaw, createWebHashHistory } from 'vue-router'
 
 const routes: Array<RouteRecordRaw> = [
   {
-    path: '/',
-    alias: ['/Studio'],
-    name: 'Studio',
-    component: () => import('../views/FusionConsole.vue'),
-    meta: {
-      keepAlive: false,
-      requiresFrontEndAuth: true,
-      footerBg: "#F6FAFF"
-    },
+    path: '/studio',
+    alias: ['/', '/Studio'],
+    component: () => import('../views/studio/StudioLayout.vue'),
+    meta: { keepAlive: false, requiresFrontEndAuth: true, footerBg: "#F6FAFF" },
+    children: [
+      { path: '', redirect: { name: 'studio-research' } },
+      { path: 'research', name: 'studio-research', component: () => import('../views/studio/Research.vue') },
+      { path: 'strategy', name: 'studio-strategy', component: () => import('../views/studio/Strategy.vue') },
+    ],
   },
   {
     path: '/Intro',

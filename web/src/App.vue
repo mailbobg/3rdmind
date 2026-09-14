@@ -1,11 +1,11 @@
 <template>
   <div id="app">
-    <Header v-if="route.name !== 'Studio'" />
+    <Header v-if="!route.path.startsWith('/studio') && route.path !== '/'" />
     <router-view v-slot="{ Component }" class="component">
       <keep-alive>
         <component
           :is="Component"
-          :key="$route.name"
+          :key="$route.matched[0]?.path"
           v-if="$route.meta.keepAlive"
         />
       </keep-alive>
@@ -15,7 +15,7 @@
         v-if="!$route.meta.keepAlive"
       />
     </router-view>
-    <Footer v-if="route.name !== 'Studio'" :color="color" />
+    <Footer v-if="!route.path.startsWith('/studio') && route.path !== '/'" :color="color" />
   </div>
 </template>
 <script setup>
