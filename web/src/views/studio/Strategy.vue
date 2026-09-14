@@ -58,7 +58,7 @@
       <ul class="job-list">
         <li v-for="job in jobs" :key="job.id">
           <button :class="{ selected: job.id === selectedId }" @click="select(job.id)">
-            <span class="tag" :class="{ ok: job.status === 'completed', bad: job.status === 'failed' }">{{ job.status }}</span>
+            <span class="tag" :class="{ ok: job.status === 'completed', bad: job.status === 'failed' }">{{ backtestStatusLabel(job.status) }}</span>
             {{ traceLabel(job.config.trace) }} · 第 {{ Number(job.config.loop_id) + 1 }} 轮 · {{ job.config.factors?.length ?? 0 }} 因子
             <small>{{ job.config.start }} → {{ job.config.end }}</small>
           </button>
@@ -76,14 +76,15 @@ import * as studio from "../../api/studio";
 import type { Environment, Round } from "../../api/studio";
 import { useBacktests } from "../../composables/useBacktests";
 import BacktestResult from "../../components/studio/BacktestResult.vue";
+import { backtestStatusLabel } from "../../components/studio/backtestStatus";
+import { persistStudioState, restoreStudioState } from "../../composables/studioStorage";
 
 const props = defineProps<{ env: Environment | null }>();
 const route = useRoute();
 const { jobs, selectedId, result, error, busy, load, select, run } = useBacktests();
 
-const STORAGE_KEY = "rd-studio-v3";
-function restore(): any { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch { return {}; } }
-function persist(patch: Record<string, unknown>) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...restore(), ...patch })); } catch { /* ignore */ } }
+function restore(): any { return restoreStudioState(); }
+function persist(patch: Record<string, unknown>) { persistStudioState(patch); }
 
 const saved = restore();
 const traceIds = ref<string[]>([]);
@@ -117,15 +118,20 @@ function defaultDates() {
 watch(() => props.env, defaultDates, { immediate: true });
 
 async function loadRounds() {
+  const id = traceId.value;
   roundList.value = [];
   selection.value = [];
-  if (!traceId.value) return;
+  if (!id) return;
+  let rounds: Round[];
   try {
-    roundList.value = (await studio.rounds(traceId.value)).filter((r) => r.factors.length);
+    rounds = (await studio.rounds(id)).filter((r) => r.factors.length);
   } catch (e: any) {
+    if (id !== traceId.value) return;
     pageError.value = e.message;
     return;
   }
+  if (id !== traceId.value) return;
+  roundList.value = rounds;
   if (!roundList.value.some((r) => r.loop_id === loopId.value)) {
     loopId.value = roundList.value.length ? roundList.value[roundList.value.length - 1].loop_id : 0;
   }

@@ -25,9 +25,9 @@
 import { computed } from "vue";
 import EquityChart from "./EquityChart.vue";
 import type { BacktestResult } from "../../api/studio";
+import { backtestStatusLabel } from "./backtestStatus";
 const props = defineProps<{ result: BacktestResult }>();
-const labels: Record<string, string> = { queued: "排队中", running: "运行中", completed: "已完成", failed: "失败" };
-const statusLabel = computed(() => labels[props.result.status] || props.result.status);
+const statusLabel = computed(() => backtestStatusLabel(props.result.status));
 const percent = (v?: number | null) => (typeof v === "number" && Number.isFinite(v) ? (v * 100).toFixed(2) + "%" : "—");
 const cards = computed(() => {
   const m = props.result.metrics!;

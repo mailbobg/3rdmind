@@ -1,6 +1,7 @@
 import { computed, getCurrentInstance, onBeforeUnmount, ref } from "vue";
 import * as studio from "../api/studio";
 import type { TraceEvent } from "../api/studio";
+import { persistStudioState, restoreStudioState } from "./studioStorage";
 
 export interface CodeFile { name: string; code: string; task: string; loop: string }
 export interface RoundView {
@@ -79,12 +80,11 @@ export function traceStatus(events: TraceEvent[]) {
   return code === 0 ? ("已完成" as const) : code === -1 ? ("已停止" as const) : ("执行失败" as const);
 }
 
-const STORAGE_KEY = "rd-studio-v3";
 function restore(): { traceId?: string; acknowledged?: string[] } {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch { return {}; }
+  return restoreStudioState();
 }
 function persist(patch: Record<string, unknown>) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...restore(), ...patch })); } catch { /* storage unavailable */ }
+  persistStudioState(patch);
 }
 
 export function useTrace() {
