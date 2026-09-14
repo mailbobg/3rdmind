@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from rdagent.core.experiment import Experiment, FBWorkspace, Task
+from rdagent.log.server.studio_worker import require_signal_coverage
 from rdagent.log.ui.storage import WebStorage
 
 
@@ -238,3 +239,19 @@ def test_trace_messages_reads_registry_from_current_app(tmp_path: Path) -> None:
         finally:
             server.app.config["RDAGENT_PROCESSES"] = original_registry
             server.app.config["LOG_FOLDER_PATH"] = original_folder
+
+
+@pytest.mark.offline
+def test_require_signal_coverage_rejects_window_past_signal_history() -> None:
+    dates = pd.DatetimeIndex(["2025-12-29", "2025-12-30", "2025-12-31"])
+    with pytest.raises(ValueError) as excinfo:
+        require_signal_coverage(dates, "2025-12-29", "2026-09-11")
+    message = str(excinfo.value)
+    assert "2025-12-29" in message
+    assert "2025-12-31" in message
+
+
+@pytest.mark.offline
+def test_require_signal_coverage_accepts_window_inside_signal_history() -> None:
+    dates = pd.DatetimeIndex(["2025-01-01", "2025-06-15", "2025-12-31"])
+    require_signal_coverage(dates, "2025-01-02", "2025-12-30")

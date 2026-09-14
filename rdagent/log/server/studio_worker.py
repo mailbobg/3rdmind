@@ -52,6 +52,24 @@ def write_json(path, data):
     temporary.replace(target)
 
 
+def require_signal_coverage(score_index_dates, start, end):
+    """Ensure the factor signal index actually spans the requested backtest window.
+
+    ``score_index_dates`` may be a pandas DatetimeIndex/Series of the datetime
+    level of the score index. Missing coverage is an error, never silently
+    patched (e.g. by holding the last book past the end of signal history).
+    """
+    import pandas as pd
+
+    dates = pd.DatetimeIndex(score_index_dates)
+    first = dates.min()
+    last = dates.max()
+    if last < pd.Timestamp(end) or first > pd.Timestamp(start):
+        raise ValueError(
+            f"Factor signals cover {first.date()} to {last.date()}; choose a window inside that range"
+        )
+
+
 def load_factor_frame(factor, start, end):
     """Read one factor workspace's result.h5 as a single-column frame named after the factor."""
     import pandas as pd
@@ -111,6 +129,7 @@ def run(config):
     score = score.dropna().sort_index()
     if score.empty:
         raise ValueError("Selected factors have no complete observations")
+    require_signal_coverage(score.index.get_level_values("datetime"), prior[-1], config["end"])
     strategy = {"class": "TopkDropoutStrategy", "module_path": "qlib.contrib.strategy",
                 "kwargs": {"signal": score, "topk": config["topk"], "n_drop": config["n_drop"]}}
     portfolios, _ = backtest(
