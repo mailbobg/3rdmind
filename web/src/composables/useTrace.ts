@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, getCurrentInstance, onBeforeUnmount, ref } from "vue";
 import * as studio from "../api/studio";
 import type { TraceEvent } from "../api/studio";
 
@@ -109,8 +109,10 @@ export function useTrace() {
       : null,
   );
 
+  // busy is purely a UI indicator for "a user action is in flight" — it never gates
+  // concurrent calls. Stale responses are handled by the `id !== traceId.value` check
+  // in refresh(), so a second select()/stop()/answer() while one is pending is safe.
   async function guarded(fn: () => Promise<void>) {
-    if (busy.value) return;
     busy.value = true;
     error.value = "";
     try { await fn(); } catch (e: any) { error.value = e.message; } finally { busy.value = false; }
@@ -124,6 +126,8 @@ export function useTrace() {
     events.value = data;
   }
 
+  // Background polling deliberately does not touch `busy`: it is not a user action,
+  // and buttons must stay enabled/clickable while polling runs in the background.
   function schedule() {
     clearTimeout(timer);
     if (disposed || !active.value) return;
@@ -158,6 +162,7 @@ export function useTrace() {
     });
   }
 
-  onBeforeUnmount(() => { disposed = true; clearTimeout(timer); });
-  return { traceId, traceIds, events, rounds, status, active, interaction, error, busy, loadTraces, select, refresh, stop, answer, schedule };
+  function dispose() { disposed = true; clearTimeout(timer); }
+  if (getCurrentInstance()) onBeforeUnmount(dispose);
+  return { traceId, traceIds, events, rounds, status, active, interaction, error, busy, loadTraces, select, refresh, stop, answer, schedule, dispose };
 }
