@@ -6,7 +6,8 @@
       <span class="tag" :class="{ ok: result.status === 'completed', bad: result.status === 'failed' }">{{ statusLabel }}</span>
     </div>
     <p class="hint">
-      来自 {{ result.config.trace }} · 第 {{ Number(result.config.loop_id) + 1 }} 轮 ·
+      <template v-if="result.config.loop_id === undefined || result.config.loop_id === null">旧格式回测</template>
+      <template v-else>来自 {{ result.config.trace }} · 第 {{ Number(result.config.loop_id) + 1 }} 轮</template> ·
       {{ result.config.factors.map((f) => `${f.name}×${f.weight}`).join("，") }} ·
       {{ result.config.start }} → {{ result.config.end }} · {{ result.config.market }} · topk {{ result.config.topk }} / n_drop {{ result.config.n_drop }}
     </p>

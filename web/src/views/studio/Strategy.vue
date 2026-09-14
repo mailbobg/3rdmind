@@ -59,7 +59,9 @@
         <li v-for="job in jobs" :key="job.id">
           <button :class="{ selected: job.id === selectedId }" @click="select(job.id)">
             <span class="tag" :class="{ ok: job.status === 'completed', bad: job.status === 'failed' }">{{ backtestStatusLabel(job.status) }}</span>
-            {{ traceLabel(job.config.trace) }} · 第 {{ Number(job.config.loop_id) + 1 }} 轮 · {{ job.config.factors?.length ?? 0 }} 因子
+            <template v-if="job.config.loop_id === undefined || job.config.loop_id === null">旧格式回测</template>
+            <template v-else>{{ traceLabel(job.config.trace) }} · 第 {{ Number(job.config.loop_id) + 1 }} 轮</template>
+            · {{ job.config.factors?.length ?? 0 }} 因子
             <small>{{ job.config.start }} → {{ job.config.end }}</small>
           </button>
         </li>
