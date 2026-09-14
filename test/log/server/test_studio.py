@@ -100,3 +100,85 @@ def test_load_factor_frame_reads_first_column(tmp_path: Path) -> None:
 def test_load_factor_frame_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="result.h5"):
         load_factor_frame({"name": "X", "path": str(tmp_path)}, pd.Timestamp("2025-01-01"), "2025-12-31")
+
+
+import rdagent.log.server.app as server
+from rdagent.log.server import studio as studio_module
+
+
+def _task_with_metric(trace_folder: Path, trace_id: str, factor_dir: Path):
+    task = server._get_or_create_task(str(trace_folder / trace_id))
+    task.messages = [
+        {"tag": "research.hypothesis", "loop_id": 0, "timestamp": "t", "content": {"hypothesis": "h"}},
+        {
+            "tag": "feedback.metric", "loop_id": 0, "timestamp": "t",
+            "content": {
+                "result": json.dumps({"IC": 0.01, "Rank IC": 0.02}),
+                "workspaces": {"experiment": str(factor_dir / "exp"),
+                               "factors": [{"name": "STR_5", "path": str(factor_dir / "f0")}]},
+            },
+        },
+    ]
+    return task
+
+
+@pytest.fixture
+def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    trace_folder = tmp_path / "traces"
+    workspace_root = tmp_path / "ws"
+    (workspace_root / "f0").mkdir(parents=True)
+    (workspace_root / "f0" / "result.h5").write_bytes(b"")
+    monkeypatch.setattr(server, "log_folder_path", trace_folder)
+    monkeypatch.setattr(studio_module, "TRACE_ROOT", trace_folder)
+    monkeypatch.setattr(studio_module, "ROOT", trace_folder / "studio_backtests")
+    monkeypatch.setattr(studio_module, "WORKSPACE_ROOT", workspace_root)
+    monkeypatch.setattr(studio_module.subprocess, "Popen", lambda *a, **k: type("P", (), {"poll": lambda self: None})())
+    server.rdagent_processes.clear()
+    _task_with_metric(trace_folder, "Finance Data Building/demo", workspace_root)
+    return server.app.test_client()
+
+
+@pytest.mark.offline
+def test_rounds_lists_factor_rounds(studio_client) -> None:
+    response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
+    assert response.status_code == 200
+    assert response.get_json() == [{"loop_id": 0, "factors": ["STR_5"], "metrics": {"IC": 0.01, "Rank IC": 0.02}}]
+    assert studio_client.get("/studio/rounds", query_string={"trace": "nope/none"}).status_code == 404
+
+
+@pytest.mark.offline
+def test_backtest_resolves_factor_paths(studio_client, tmp_path: Path) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0,
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    job = response.get_json()["id"]
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / job / "config.json").read_text())
+    assert config["factors"] == [{"name": "STR_5", "weight": 1.0, "path": str(tmp_path / "ws" / "f0")}]
+    assert config["trace"] == "Finance Data Building/demo"
+
+    bad = dict(body, factors=[{"name": "UNKNOWN", "weight": 1}])
+    assert studio_client.post("/studio/backtests", json=bad).status_code == 400
+
+
+@pytest.mark.offline
+def test_backtest_rejects_paths_outside_workspace_root(studio_client, tmp_path: Path) -> None:
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages[1]["content"]["workspaces"]["factors"][0]["path"] = str(tmp_path / "elsewhere")
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0,
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 400
+    assert "workspace" in response.get_json()["error"].lower()
+
+
+@pytest.mark.offline
+def test_research_reports_route_removed(studio_client) -> None:
+    assert studio_client.get("/studio/research-reports").status_code == 404

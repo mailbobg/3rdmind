@@ -1,4 +1,4 @@
-"""Local, persisted backtest jobs. Registered under the existing server's auth gate."""
+"""Local, persisted backtest jobs on top of RD-Agent research output. Registered under the server's auth gate."""
 import json
 import os
 import subprocess
@@ -7,13 +7,15 @@ import uuid
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request
+from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.server.studio_worker import validate_config, write_json
 
 studio = Blueprint("studio", __name__, url_prefix="/studio")
 PROCESSES = {}
-ROOT = Path(UI_SETTING.trace_folder).resolve() / "studio_backtests"
 TRACE_ROOT = Path(UI_SETTING.trace_folder).resolve()
+ROOT = TRACE_ROOT / "studio_backtests"
+WORKSPACE_ROOT = Path(RD_AGENT_SETTINGS.workspace_path).resolve()
 
 
 def job_folder(job_id):
@@ -21,99 +23,53 @@ def job_folder(job_id):
     return ROOT / job_id
 
 
-def research_report_path(report_id):
-    path = (TRACE_ROOT / report_id / "research-report.json").resolve()
-    if TRACE_ROOT not in path.parents:
-        raise ValueError("Invalid research report ID")
-    return path
+def trace_messages(trace_id):
+    """Messages of a loaded trace, or None when the server has not loaded it."""
+    from rdagent.log.server import app as server
+
+    task = server.rdagent_processes.get(str(server.log_folder_path / trace_id))
+    return None if task is None else task.messages
 
 
-def load_research_report(path):
-    report = json.loads(path.read_text())
-    workspace = Path(report.get("workspace", ""))
-    chart_path = workspace / "ret.parquet"
-    if chart_path.is_file():
-        import pandas as pd
-
-        frame = pd.read_parquet(chart_path)
-        daily = (frame["return"].fillna(0) - frame["cost"].fillna(0)).astype(float)
-        equity = (1 + daily).cumprod()
-        benchmark = (1 + frame["bench"].fillna(0).astype(float)).cumprod()
-        drawdown = equity / equity.cummax() - 1
-        report["rows"] = [
-            {
-                "date": str(index.date()),
-                "equity": float(equity.loc[index]),
-                "benchmark": float(benchmark.loc[index]),
-                "drawdown": float(drawdown.loc[index]),
-            }
-            for index in frame.index
-        ]
-    published_expressions = {
-        "STR_5": "-Log($close / Ref($close, 5))",
-        "RVOL_20": "Std(Log($close / Ref($close, 1)), 20)",
-        "VOLSURGE_5_20": "Log((Mean($volume, 5) + 1e-12) / (Mean($volume, 20) + 1e-12))",
-    }
-    factors = []
-    for factor_path in report.get("factor_workspaces", []):
-        source = Path(factor_path) / "factor.py"
-        if not source.is_file():
+def metric_rounds(messages):
+    rounds = []
+    for message in messages:
+        if message.get("tag") != "feedback.metric":
             continue
-        code = source.read_text()
-        name_match = __import__("re").search(r"calculate_([A-Za-z0-9_]+)", code)
-        factor_name = name_match.group(1) if name_match else source.parent.name
-        factors.append(
-            {
-                "name": factor_name,
-                "file": str(source),
-                "code": code,
-                "expression": published_expressions.get(factor_name),
-                "expression_note": "Qlib expression edition for independent portfolio backtests.",
-            }
-        )
-    report["factors"] = factors
-    report["id"] = path.parent.relative_to(TRACE_ROOT).as_posix()
-    report["status"] = "completed" if report.get("execution_success") else "failed"
-    report.setdefault("model", os.environ.get("LITELLM_CHAT_MODEL", os.environ.get("CHAT_MODEL", "")))
-    report.setdefault("dataset", "CSI300")
-    report.setdefault(
-        "periods",
-        {
-            "train": [os.environ.get("QLIB_FACTOR_TRAIN_START"), os.environ.get("QLIB_FACTOR_TRAIN_END")],
-            "valid": [os.environ.get("QLIB_FACTOR_VALID_START"), os.environ.get("QLIB_FACTOR_VALID_END")],
-            "test": [os.environ.get("QLIB_FACTOR_TEST_START"), os.environ.get("QLIB_FACTOR_TEST_END")],
-        },
-    )
-    return report
+        content = message.get("content", {})
+        try:
+            metrics = json.loads(content["result"]) if isinstance(content.get("result"), str) else content.get("result") or {}
+        except (ValueError, TypeError):
+            metrics = {}
+        rounds.append({
+            "loop_id": message.get("loop_id"),
+            "factors": [f["name"] for f in content.get("workspaces", {}).get("factors", [])],
+            "paths": {f["name"]: f["path"] for f in content.get("workspaces", {}).get("factors", [])},
+            "metrics": {k: v for k, v in metrics.items() if isinstance(v, (int, float))},
+        })
+    return rounds
 
 
-@studio.get("/research-reports")
-def research_reports():
-    reports = []
-    for path in sorted(
-        TRACE_ROOT.glob("*/*/research-report.json"),
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    ):
-        report = json.loads(path.read_text())
-        reports.append(
-            {
-                "id": path.parent.relative_to(TRACE_ROOT).as_posix(),
-                "status": "completed" if report.get("execution_success") else "failed",
-            }
-        )
-    return jsonify(reports)
-
-
-@studio.get("/research-reports/<path:report_id>")
-def research_report(report_id):
-    try:
-        path = research_report_path(report_id)
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    if not path.is_file():
-        return jsonify({"error": "Research report not found"}), 404
-    return jsonify(load_research_report(path))
+def resolve_factor_paths(messages, loop_id, factors):
+    """Attach workspace paths to the requested factor names; reject unknown names or paths outside the workspace root."""
+    paths = {}
+    for round_ in metric_rounds(messages):
+        if round_["loop_id"] == loop_id:
+            paths = round_["paths"]
+    if not paths:
+        raise ValueError(f"Round {loop_id} has no factor workspaces")
+    resolved = []
+    for factor in factors:
+        name = factor.get("name")
+        if name not in paths:
+            raise ValueError(f"Unknown factor {name!r} in round {loop_id}")
+        path = Path(paths[name]).resolve()
+        if WORKSPACE_ROOT not in path.parents:
+            raise ValueError(f"Factor {name} lives outside the RD-Agent workspace root")
+        if not (path / "result.h5").is_file():
+            raise ValueError(f"Factor {name} has no result.h5")
+        resolved.append({"name": name, "weight": float(factor.get("weight", 1)), "path": str(path)})
+    return resolved
 
 
 @studio.get("/environment")
@@ -132,6 +88,15 @@ def strategy_source():
     return jsonify({"name": "studio_worker.py", "code": Path(__file__).with_name("studio_worker.py").read_text()})
 
 
+@studio.get("/rounds")
+def rounds():
+    trace_id = request.args.get("trace", "")
+    messages = trace_messages(trace_id) if trace_id else None
+    if messages is None:
+        return jsonify({"error": "Trace is not loaded on this server"}), 404
+    return jsonify([{k: v for k, v in r.items() if k != "paths"} for r in metric_rounds(messages)])
+
+
 @studio.route("/backtests", methods=["GET", "POST"])
 def backtests():
     ROOT.mkdir(parents=True, exist_ok=True)
@@ -140,11 +105,15 @@ def backtests():
         for path in sorted(ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
             result_path = path.parent / "result.json"
             result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
-            jobs.append({"id": path.parent.name, "config": json.loads(path.read_text()),
-                         "status": result["status"]})
+            jobs.append({"id": path.parent.name, "config": json.loads(path.read_text()), "status": result["status"]})
         return jsonify(jobs)
+    body = request.get_json() or {}
     try:
-        config = validate_config(request.get_json() or {})
+        messages = trace_messages(str(body.get("trace", "")))
+        if messages is None:
+            raise ValueError("Trace is not loaded on this server")
+        body["factors"] = resolve_factor_paths(messages, body.get("loop_id"), body.get("factors") or [])
+        config = validate_config(body)
         config["provider_uri"] = str(Path(config.get("provider_uri") or os.environ.get(
             "QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
         if not (Path(config["provider_uri"]) / "calendars" / "day.txt").is_file():
