@@ -32,7 +32,7 @@ export function useBacktests() {
   async function guarded(fn: () => Promise<void>) {
     busy.value = true;
     error.value = "";
-    try { await fn(); } catch (e: any) { error.value = e.message; } finally { busy.value = false; }
+    try { await fn(); } catch (e) { error.value = e instanceof Error ? e.message : String(e); } finally { busy.value = false; }
   }
   async function load() { await guarded(async () => { jobs.value = await studio.backtests(); }); }
   async function fetchSelected() {
@@ -48,8 +48,10 @@ export function useBacktests() {
     clearTimeout(timer);
     if (disposed || !isActive(result.value?.status)) return;
     timer = setTimeout(async () => {
+      // Deliberately a 1-strike policy (stop on the first poll error), unlike useTrace's
+      // 3-strike tolerance: a single backtest job failing to poll is not worth retrying blind.
       try { await fetchSelected(); if (!isActive(result.value?.status)) jobs.value = await studio.backtests(); }
-      catch (e: any) { error.value = e.message; return; }
+      catch (e) { error.value = e instanceof Error ? e.message : String(e); return; }
       schedule();
     }, 3000);
   }

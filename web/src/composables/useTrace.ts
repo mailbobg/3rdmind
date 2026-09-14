@@ -115,7 +115,7 @@ export function useTrace() {
   async function guarded(fn: () => Promise<void>) {
     busy.value = true;
     error.value = "";
-    try { await fn(); } catch (e: any) { error.value = e.message; } finally { busy.value = false; }
+    try { await fn(); } catch (e) { error.value = e instanceof Error ? e.message : String(e); } finally { busy.value = false; }
   }
 
   async function refresh() {
@@ -133,7 +133,14 @@ export function useTrace() {
     if (disposed || !active.value) return;
     timer = setTimeout(async () => {
       try { await refresh(); failures = 0; }
-      catch (e: any) { if (++failures >= 3) { error.value = `轮询已停止：${e.message}`; return; } }
+      catch (e) {
+        // 3-strike tolerance here (vs. useBacktests' 1-strike): a live trace poll is worth
+        // retrying through transient blips before giving up.
+        if (++failures >= 3) {
+          error.value = `轮询已停止：${e instanceof Error ? e.message : String(e)}`;
+          return;
+        }
+      }
       schedule();
     }, 3000);
   }

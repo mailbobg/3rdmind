@@ -22,7 +22,9 @@ import type { TraceEvent } from "../../api/studio";
 const props = defineProps<{ event: TraceEvent; busy: boolean }>();
 const emit = defineEmits<{ submit: [payload: object] }>();
 const text = ref("");
-watch(() => props.event, (e) => { text.value = JSON.stringify(e.content, null, 2); }, { immediate: true });
+// Keyed on timestamp (part of the interaction key) rather than the whole event object, so a
+// poll refresh that replaces `events` with an equal-but-new object does not wipe in-progress edits.
+watch(() => props.event.timestamp, () => { text.value = JSON.stringify(props.event.content, null, 2); }, { immediate: true });
 const parsed = computed(() => { try { return { value: JSON.parse(text.value), error: "" }; } catch { return { value: null, error: "JSON 格式错误。" }; } });
 const parseError = computed(() => parsed.value.error);
 const labels: Record<string, string> = { user_instruction: "研究方向", hypothesis: "研究假设", reason: "依据与反馈", decision: "评估决定" };

@@ -33,7 +33,7 @@ export default defineConfig({
   },
   server: {
     proxy: Object.fromEntries(
-      ['/studio', '/upload', '/trace', '/traces', '/control', '/user_interaction'].map(
+      ['/studio', '/upload', '/trace', '/traces', '/control', '/user_interaction', '/stdout'].map(
         (route) => [route, { target: 'http://127.0.0.1:19899', changeOrigin: true }]
       )
     ),
