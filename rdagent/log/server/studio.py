@@ -370,7 +370,8 @@ def backtests():
         for path in sorted(ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
             result_path = path.parent / "result.json"
             result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
-            jobs.append({"id": path.parent.name, "config": public_config(json.loads(path.read_text())), "status": result["status"]})
+            jobs.append({"id": path.parent.name, "config": public_config(json.loads(path.read_text())), "status": result["status"],
+                         "total_return": (result.get("metrics") or {}).get("total_return")})
         return jsonify(jobs)
     body = request.get_json() or {}
     try:

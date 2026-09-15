@@ -663,3 +663,13 @@ def test_analysis_summary_on_synthetic_ic() -> None:
     summary = summarize(ic, rank_ic, days[0], days[-1], len(index))
     assert summary["days"] == 30 and summary["ic"]["mean"] == pytest.approx(1.0) and summary["rank_ic"]["positive_ratio"] == 1.0
     assert summary["monthly"][0]["month"] == "2025-01" and summary["coverage"] == {"start": "2025-01-01", "end": "2025-02-11"}
+
+
+@pytest.mark.offline
+def test_backtest_list_carries_total_return(studio_client, tmp_path: Path) -> None:
+    folder = tmp_path / "traces" / "studio_backtests" / "11111111-1111-1111-1111-111111111111"
+    folder.mkdir(parents=True)
+    (folder / "config.json").write_text(json.dumps({"factors": [], "start": "2025-01-01", "end": "2025-06-30"}))
+    (folder / "result.json").write_text(json.dumps({"status": "completed", "metrics": {"total_return": 0.05}}))
+    job = studio_client.get("/studio/backtests").get_json()[0]
+    assert job["total_return"] == 0.05
