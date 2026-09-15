@@ -19,7 +19,7 @@ export interface FactorAnalysis {
   coverage: { start: string; end: string }; days: number; rows: number;
   ic: IcStats; rank_ic: IcStats; monthly: { month: string; ic: number | null; rank_ic: number | null }[];
 }
-export interface LibraryFactor {
+export interface LibraryFactor extends Record<string, unknown> {
   trace: string; loop_id: number; name: string;
   description: string | null; formulation: string | null; variables: Record<string, string> | null;
   hypothesis: string | null; decision: boolean | null; reason: string | null;
@@ -48,9 +48,9 @@ export interface BacktestRow {
   date: string; equity: number; benchmark: number; drawdown: number;
   return: number; cost: number; turnover: number; account: number;
 }
-export interface Trade { date: string; instrument: string; direction: "buy" | "sell"; amount: number; price: number; value: number; cost: number }
-export interface Holding { instrument: string; amount: number; price: number; value: number; weight: number }
-export interface InstrumentSummary {
+export interface Trade extends Record<string, unknown> { date: string; instrument: string; direction: "buy" | "sell"; amount: number; price: number; value: number; cost: number }
+export interface Holding extends Record<string, unknown> { instrument: string; amount: number; price: number; value: number; weight: number }
+export interface InstrumentSummary extends Record<string, unknown> {
   instrument: string; trades: number; buy_value: number; sell_value: number; cost: number; holding_value: number; pnl: number; held: boolean;
 }
 export interface BacktestResult extends BacktestSummary {
