@@ -35,19 +35,19 @@ export function BacktestPage() {
   const [pageError, setPageError] = useState("");
   const [library, setLibrary] = useState<Record<string, LibraryFactor>>({});
   const info = (f: FactorWeight) => library[key(f)];
-  // Model predictions are not in the factor library; their date span comes from /studio/predictions/coverage.
-  const [predCoverage, setPredCoverage] = useState<Record<string, Coverage | null>>({});
+  // Every signal's date span: the library's cached analysis when a factor has one, otherwise read from its
+  // result.h5 (or a prediction's pred.pkl) through the coverage endpoints, so the date warnings always apply.
+  const [fetched, setFetched] = useState<Record<string, Coverage | null>>({});
   const coverageOf = (f: FactorWeight): Coverage | undefined =>
-    f.kind === "prediction" ? predCoverage[key(f)] || undefined : info(f)?.analysis?.coverage;
+    (f.kind === "prediction" ? undefined : info(f)?.analysis?.coverage) || fetched[key(f)] || undefined;
   useEffect(() => {
     for (const f of basket.items) {
-      if (f.kind !== "prediction" || key(f) in predCoverage) continue;
-      setPredCoverage((m) => ({ ...m, [key(f)]: null }));
-      studio.predictionCoverage(f.trace, f.loop_id)
-        .then((c) => setPredCoverage((m) => ({ ...m, [key(f)]: { start: c.start, end: c.end } })))
-        .catch(() => {});
+      if (coverageOf(f) || key(f) in fetched) continue;
+      setFetched((m) => ({ ...m, [key(f)]: null }));
+      const request = f.kind === "prediction" ? studio.predictionCoverage(f.trace, f.loop_id) : studio.factorCoverage(f);
+      request.then((c) => setFetched((m) => ({ ...m, [key(f)]: { start: c.start, end: c.end } }))).catch(() => {});
     }
-  }, [basket.items]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [basket.items, library]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Default windows once the environment is known: the last year of data, and 1 + 1 years before it for a model.
   useEffect(() => {
@@ -84,7 +84,7 @@ export function BacktestPage() {
     const spans = basket.items.map(coverageOf).filter((c): c is Coverage => !!c);
     if (!spans.length) return null;
     return { start: spans.reduce((a, c) => (c.start > a ? c.start : a), spans[0].start), end: spans.reduce((a, c) => (c.end < a ? c.end : a), spans[0].end) };
-  }, [basket.items, library, predCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [basket.items, library, fetched]); // eslint-disable-line react-hooks/exhaustive-deps
   const coverageUnknown = basket.items.filter((f) => !coverageOf(f)).length;
   const dateWarning = useMemo(() => {
     if (!coverage || !params.start || !params.end) return "";
@@ -92,10 +92,47 @@ export function BacktestPage() {
     if (params.end > coverage.end) return `回测结束日 ${params.end} 超出信号覆盖末日 ${coverage.end}，会直接报错。`;
     return "";
   }, [coverage, params.start, params.end]);
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  const addDays = (date: string, n: number) => { const d = new Date(date); d.setDate(d.getDate() + n); return iso(d); };
+  // Rank mode gets the whole coverage; LightGBM needs history first, so the backtest takes the last third and
+  // training / validation split the first two thirds 2:1 (the worker insists on train < valid < backtest).
   const fitToCoverage = () => {
     if (!coverage) return;
-    const start = new Date(coverage.start); start.setDate(start.getDate() + 1);
-    setParams((p) => ({ ...p, start: start.toISOString().slice(0, 10), end: coverage.end }));
+    if (method !== "lgbm") { setParams((p) => ({ ...p, start: addDays(coverage.start, 1), end: coverage.end })); return; }
+    const days = Math.round((new Date(coverage.end).getTime() - new Date(coverage.start).getTime()) / 86400000);
+    if (days < 90) { setPageError(`信号覆盖只有 ${days} 天，放不下训练、验证和回测三段；换成排名加权或移出覆盖短的信号。`); return; }
+    const backtestStart = addDays(coverage.start, Math.floor(days * 2 / 3));
+    const trainEnd = addDays(coverage.start, Math.floor(days * 4 / 9));
+    setLgbm((l) => ({ ...l, train: [coverage.start, trainEnd], valid: [addDays(trainEnd, 1), addDays(backtestStart, -1)] }));
+    setParams((p) => ({ ...p, start: backtestStart, end: coverage.end }));
+  };
+  // The worker rejects overlapping windows outright; say so before the run.
+  const orderWarning = useMemo(() => {
+    if (method !== "lgbm" || !params.start) return "";
+    if (lgbm.train[1] && lgbm.valid[0] && lgbm.train[1] >= lgbm.valid[0]) return `验证窗口 ${lgbm.valid[0]} 开始时训练窗口（到 ${lgbm.train[1]}）还没结束，两段必须前后相接。`;
+    if (lgbm.valid[1] && lgbm.valid[1] >= params.start) return `回测开始日 ${params.start} 不晚于验证窗口结束日 ${lgbm.valid[1]}：模型会在回测期上训练，后端会拒绝。`;
+    return "";
+  }, [method, lgbm.train, lgbm.valid, params.start]);
+  // LightGBM needs every signal observed inside the training and validation windows (the worker refuses
+  // an empty column rather than dropping it); name the signals that would fail before the run starts.
+  const windowGaps = useMemo(() => {
+    if (method !== "lgbm") return [];
+    const check = (name: string, [a, b]: [string, string]) => {
+      if (!a || !b) return null;
+      const missing = basket.items.filter((f) => { const c = coverageOf(f); return c && (c.end < a || c.start > b); });
+      return missing.length ? { name, window: [a, b] as [string, string], missing } : null;
+    };
+    return [check("训练", lgbm.train), check("验证", lgbm.valid)].filter((g): g is NonNullable<typeof g> => !!g);
+  }, [method, lgbm.train, lgbm.valid, basket.items, library, fetched]); // eslint-disable-line react-hooks/exhaustive-deps
+  const removeGapSignals = () => { for (const f of windowGaps.flatMap((g) => g.missing)) if (basket.has(f)) basket.toggle(f); };
+  // Fit both windows between the shared coverage start and the day before the backtest: two thirds training, one third validation.
+  const fitWindowsToCoverage = () => {
+    if (!coverage || !params.start) return;
+    const from = new Date(coverage.start), to = new Date(dayBefore(params.start));
+    const days = Math.round((to.getTime() - from.getTime()) / 86400000);
+    if (days < 60) { setPageError(`信号覆盖起点 ${coverage.start} 到回测开始前一天只有 ${days} 天，放不下训练和验证窗口；请把回测开始日往后挪。`); return; }
+    const split = new Date(from); split.setDate(split.getDate() + Math.floor(days * 2 / 3));
+    setLgbm((l) => ({ ...l, train: [iso(from), iso(split)], valid: [iso(new Date(split.getTime() + 86400000)), iso(to)] }));
   };
 
   const submit = useCallback(async () => {
@@ -148,7 +185,15 @@ export function BacktestPage() {
                 <SelectInput value={method} onChange={setMethod} options={[{ value: "rank", label: "排名加权" }, { value: "lgbm", label: "训练 LightGBM" }]} />
               </Field>
             </FieldGrid>
-            {dateWarning && <div style={{ marginTop: 12 }}><Note actions={coverage && <Btn onClick={fitToCoverage}>按覆盖区间填日期</Btn>}>{dateWarning}</Note></div>}
+            {dateWarning && <div style={{ marginTop: 12 }}><Note actions={coverage && <Btn onClick={fitToCoverage}>{method === "lgbm" ? "按覆盖区间重排三段" : "按覆盖区间填日期"}</Btn>}>{dateWarning}</Note></div>}
+            {orderWarning && <div style={{ marginTop: 12 }}><Note actions={coverage && <Btn onClick={fitToCoverage}>按覆盖区间重排三段</Btn>}>{orderWarning}</Note></div>}
+            {windowGaps.map((g) => (
+              <div key={g.name} style={{ marginTop: 12 }}>
+                <Note actions={<><Btn onClick={removeGapSignals}>移出这些信号</Btn><Btn onClick={fitWindowsToCoverage}>把窗口挪进覆盖区间</Btn></>}>
+                  {g.name}窗口 {g.window[0]} → {g.window[1]} 里没有 {g.missing.map((f) => `${f.name}（${coverageOf(f)!.start} → ${coverageOf(f)!.end}）`).join("、")} 的数据，LightGBM 会直接报错。
+                </Note>
+              </div>
+            ))}
           </Block>
           {method === "lgbm" && (
             <Block title="LightGBM" note="训练集学关系，验证集早停">
@@ -172,7 +217,7 @@ export function BacktestPage() {
                       <span key="s" className="mm-dim block truncate">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>,
                       <Num key="ic" value={info(f)?.analysis?.ic.mean} />,
                       <Num key="ric" value={info(f)?.analysis?.rank_ic.mean} />,
-                      <span key="cov" className="mm-mono mm-dim">{coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}` : f.kind === "prediction" ? "读取中…" : "未分析"}</span>,
+                      <span key="cov" className="mm-mono mm-dim">{coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}` : key(f) in fetched ? "读取中…" : "未知"}</span>,
                       <NumberInput key="w" className="mm-weight" ariaLabel="权重" step={0.5} value={f.weight} disabled={method === "lgbm"} onChange={(v) => basket.setWeight(f, v)} />,
                       <Link key="x" onClick={() => basket.toggle(f)}>移除</Link>,
                     ],

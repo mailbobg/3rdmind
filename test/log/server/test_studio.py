@@ -183,6 +183,18 @@ def test_prediction_coverage_reads_pred_pkl(studio_client, tmp_path: Path) -> No
 
 
 @pytest.mark.offline
+def test_factor_coverage_reads_result_h5(studio_client, tmp_path: Path) -> None:
+    import pandas as pd
+
+    index = pd.MultiIndex.from_product([pd.to_datetime(["2022-10-10", "2025-12-31"]), ["SH600000"]], names=["datetime", "instrument"])
+    pd.DataFrame({"STR_5": [1.0, 2.0]}, index=index).to_hdf(tmp_path / "ws" / "f0" / "result.h5", key="data")
+    response = studio_client.get("/studio/factors/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "0", "name": "STR_5"})
+    assert response.status_code == 200
+    assert response.get_json() == {"start": "2022-10-10", "end": "2025-12-31", "days": 2, "rows": 2}
+    assert studio_client.get("/studio/factors/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "0", "name": "nope"}).status_code == 400
+
+
+@pytest.mark.offline
 def test_rounds_lists_factor_rounds(studio_client) -> None:
     response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
     assert response.status_code == 200

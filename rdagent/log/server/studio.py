@@ -416,14 +416,26 @@ def factor_analysis():
         return jsonify({"error": str(error)}), 500
 
 
-def prediction_coverage(path):
-    """First/last date and size of a Qlib pred.pkl, so the UI can warn before a backtest window misses it."""
+def frame_coverage(frame):
+    """First/last date and size of a signal frame, so the UI can warn before a backtest window misses it."""
     import pandas as pd
 
-    frame = pd.read_pickle(path)
     level = "datetime" if "datetime" in (frame.index.names or []) else 0
     dates = pd.DatetimeIndex(frame.index.get_level_values(level))
     return {"start": str(dates.min().date()), "end": str(dates.max().date()), "days": int(dates.nunique()), "rows": int(len(frame))}
+
+
+def prediction_coverage(path):
+    import pandas as pd
+
+    return frame_coverage(pd.read_pickle(path))
+
+
+def factor_coverage(workspace):
+    """Coverage of a factor's result.h5 without running the full single-factor analysis."""
+    import pandas as pd
+
+    return frame_coverage(pd.read_hdf(workspace / "result.h5"))
 
 
 @studio.get("/predictions/coverage")
@@ -433,6 +445,15 @@ def predictions_coverage():
                                         [{"name": "prediction", "kind": "prediction"}])
         return jsonify(prediction_coverage(Path(resolved[0]["path"])))
     except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.get("/factors/coverage")
+def factors_coverage():
+    try:
+        workspace = factor_workspace(request.args.get("trace", ""), request.args.get("loop_id"), request.args.get("name", ""))
+        return jsonify(factor_coverage(workspace))
+    except (ValueError, TypeError, KeyError, OSError) as error:
         return jsonify({"error": str(error)}), 400
 
 

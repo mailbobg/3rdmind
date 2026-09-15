@@ -125,6 +125,8 @@ export const rounds = (trace: string) => api<Round[]>(`/studio/rounds?${new URLS
 export interface Coverage { start: string; end: string }
 export const predictionCoverage = (trace: string, loop_id: number) =>
   api<Coverage & { days: number; rows: number }>(`/studio/predictions/coverage?${new URLSearchParams({ trace, loop_id: String(loop_id) })}`);
+export const factorCoverage = (ref: FactorRef) =>
+  api<Coverage & { days: number; rows: number }>(`/studio/factors/coverage?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name })}`);
 export const backtests = () => api<BacktestSummary[]>("/studio/backtests");
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);
 export const runBacktest = (config: BacktestRequest) => api<{ id: string }>("/studio/backtests", config);
