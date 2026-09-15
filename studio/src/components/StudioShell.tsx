@@ -15,9 +15,8 @@ const MENU = [
   { path: "/runs", symbol: "↗", title: "运行记录", desc: "统一查看研究与回测" },
 ];
 
-// RD-Agent's own Vue UI: served by the log server at "/" in production (rd-agent/web `npm run build:flask`),
-// by its own Vite dev server on 8080 while developing.
-const PLAYGROUND_URL = import.meta.env.DEV ? "http://127.0.0.1:8080/#/Playground" : "/#/Playground";
+/** Microsoft's hosted RD-Agent demo. */
+const OFFICIAL_APP_URL = "https://rdagent.azurewebsites.net/";
 
 /** Root frame: the left rail plus the page outlet. Owns every cross-page store and hands it down through context. */
 export function StudioShell() {
@@ -63,7 +62,7 @@ export function StudioShell() {
             ) : (
               <small className="mb-4 mt-1.5 block text-muted">运行 <code>scripts/start-backend.sh</code> 后 <button className="text-accent underline" onClick={() => reloadEnv()}>重试</button></small>
             )}
-            <a href={PLAYGROUND_URL} target="_blank" rel="noreferrer" className="text-muted">原生 Playground ↗</a>
+            <a href={OFFICIAL_APP_URL} target="_blank" rel="noreferrer" className="text-muted">RD-Agent 官方应用 ↗</a>
           </div>
         </aside>
         <Outlet />
