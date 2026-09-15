@@ -26,15 +26,28 @@
               <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.name }}</option>
             </select>
           </label>
-          <label>轮数（1–30）<input v-model.number="form.loops" type="number" min="1" max="30" /></label>
-          <label>时限（小时，0.1–24）<input v-model.number="form.duration" type="number" min="0.1" max="24" step="0.1" /></label>
+          <label v-if="mode.loops">轮数（1–30）<input v-model.number="form.loops" type="number" min="1" max="30" /></label>
+          <label v-if="mode.duration">时限（小时，0.1–24）<input v-model.number="form.duration" type="number" min="0.1" max="24" step="0.1" /></label>
         </div>
-        <label style="margin-top: 10px">研究方向（agent 首次确认时预填）
+        <label v-if="mode.input === 'reports'" style="margin-top: 10px">研报 PDF（可多选）
+          <input type="file" accept=".pdf,application/pdf" multiple @change="onFiles" />
+          <span class="hint" v-if="files.length">{{ files.map((f) => f.name).join("，") }}</span>
+        </label>
+        <template v-if="mode.input === 'paper'">
+          <label style="margin-top: 10px">论文 PDF
+            <input type="file" accept=".pdf,application/pdf" @change="onFiles" />
+            <span class="hint" v-if="files.length">{{ files[0].name }}</span>
+          </label>
+          <label style="margin-top: 6px">或论文链接（未上传文件时使用）
+            <input v-model="form.link" placeholder="https://arxiv.org/pdf/…" />
+          </label>
+        </template>
+        <label v-if="mode.objective" style="margin-top: 10px">研究方向（agent 首次确认时预填）
           <textarea v-model="form.objective" rows="2" placeholder="例如：研究沪深300中量价动量因子的增量信息，并评估与现有特征组合后的效果。"></textarea>
         </label>
         <div class="actions">
           <button class="dark" :disabled="trace.busy.value" @click="start">开始研究</button>
-          <span class="hint">{{ modes.find((m) => m.value === form.scenario)?.desc }}</span>
+          <span class="hint">{{ mode.desc }}</span>
         </div>
       </section>
 
@@ -88,13 +101,24 @@ const { env, trace, basket } = useStudioContext();
 const { stdoutUrl } = studio;
 const route = useRoute();
 const router = useRouter();
-const modes = [
-  { name: "因子研发", desc: "假设 → 因子实现 → Qlib 评估", value: "Finance Data Building" },
-  { name: "模型研发", desc: "模型实现与迭代验证", value: "Finance Model Implementation" },
-  { name: "因子 × 模型联合", desc: "RD-Agent 原生联合研究循环", value: "Finance Whole Pipeline" },
+interface Mode { name: string; desc: string; value: string; loops: boolean; duration: boolean; objective: boolean; input?: "reports" | "paper" }
+// The six scenarios the log server's /upload accepts (rdagent/log/server/security.py); Data Science needs an
+// MLE-bench competition and dataset outside this UI, so it stays in the native Playground.
+const modes: Mode[] = [
+  { name: "因子研发", desc: "假设 → 因子实现 → Qlib 评估", value: "Finance Data Building", loops: true, duration: true, objective: true },
+  { name: "模型研发", desc: "模型实现与迭代验证", value: "Finance Model Implementation", loops: true, duration: true, objective: true },
+  { name: "因子 × 模型联合", desc: "RD-Agent 原生联合研究循环", value: "Finance Whole Pipeline", loops: true, duration: true, objective: true },
+  { name: "研报因子提取", desc: "上传研报 PDF → 提取因子 → 实现与 Qlib 评估", value: "Finance Data Building (Reports)", loops: false, duration: true, objective: false, input: "reports" },
+  { name: "论文模型实现", desc: "上传论文 PDF 或给链接 → 提取模型结构 → 实现", value: "General Model Implementation", loops: false, duration: false, objective: false, input: "paper" },
 ];
 const saved = restoreStudioState();
-const form = reactive({ scenario: modes[0].value, loops: 3, duration: 2, objective: saved.objective || "" });
+const form = reactive({ scenario: modes[0].value, loops: 3, duration: 2, objective: saved.objective || "", link: "" });
+const files = ref<File[]>([]);
+const mode = computed(() => modes.find((m) => m.value === form.scenario) || modes[0]);
+watch(() => form.scenario, () => { files.value = []; });
+function onFiles(event: Event) {
+  files.value = [...((event.target as HTMLInputElement).files || [])];
+}
 const showForm = ref(!!route.query.new || !trace.traceId.value);
 watch(() => route.query.new, (value) => { if (value) showForm.value = true; });
 const roundId = ref("");
@@ -112,14 +136,29 @@ async function pick(id: string) {
   else trace.traceId.value = "";
 }
 async function start() {
-  if (!Number.isInteger(form.loops) || form.loops < 1 || form.loops > 30 || !(form.duration >= 0.1 && form.duration <= 24)) {
-    trace.error.value = "研究轮数应为 1–30，运行时限应为 0.1–24 小时。";
+  if (mode.value.loops && (!Number.isInteger(form.loops) || form.loops < 1 || form.loops > 30)) {
+    trace.error.value = "研究轮数应为 1–30。";
+    return;
+  }
+  if (mode.value.duration && !(form.duration >= 0.1 && form.duration <= 24)) {
+    trace.error.value = "运行时限应为 0.1–24 小时。";
+    return;
+  }
+  if (mode.value.input === "reports" && !files.value.length) {
+    trace.error.value = "请至少上传一份研报 PDF。";
+    return;
+  }
+  if (mode.value.input === "paper" && !files.value.length && !/^https?:\/\//.test(form.link.trim())) {
+    trace.error.value = "请上传论文 PDF，或填写以 http(s) 开头的链接。";
     return;
   }
   const data = new FormData();
   data.append("scenario", form.scenario);
-  data.append("loops", String(form.loops));
-  data.append("all_duration", String(form.duration));
+  if (mode.value.loops) data.append("loops", String(form.loops));
+  if (mode.value.duration) data.append("all_duration", String(form.duration));
+  for (const file of files.value) data.append("files", file, file.name);
+  // The server reads the paper link from the "files" form field when no file is attached.
+  if (mode.value.input === "paper" && !files.value.length) data.append("files", form.link.trim());
   try {
     trace.busy.value = true;
     const { id } = await studio.startResearch(data);
