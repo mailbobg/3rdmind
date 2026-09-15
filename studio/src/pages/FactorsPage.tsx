@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Checkbox, Chip, Input, Tooltip } from "@heroui/react";
+import { Alert, Button, Chip, Input, Tooltip } from "@heroui/react";
 import * as studio from "../api/studio";
 import type { CorrelationMatrix as Corr, FactorRef, LibraryFactor } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
@@ -8,8 +8,8 @@ import { download, errorText, shortName, useStudio } from "../hooks/studioContex
 import { PageFrame } from "../components/PageFrame";
 import { Panel } from "../components/Panel";
 import { Section } from "../components/Section";
-import { TabBar } from "../components/fields";
-import { CodeView, CorrelationMatrix, DataTable, Formula, Hint, IcBars, MetricGrid, MetricTable, Mono, Signed } from "../components/widgets";
+import { ListRow, Stat, TabBar } from "../components/fields";
+import { CodeView, CorrelationMatrix, Formula, Hint, IcBars, MetricGrid, MetricTable, Mono, Signed } from "../components/widgets";
 
 const GUIDE = "① 单独有没有用：看 IC / Rank IC 的符号和 ICIR（均值÷波动）；|IC|<0.01 且 ICIR≈0 基本是噪声，IC 为负的回测时权重设 −1 反向。② 放一起合不合适：篮内两两相关 |ρ|<0.5 才互补，高相关只是重复计权。③ 覆盖区间要包住回测期。";
 
@@ -36,6 +36,11 @@ export function FactorsPage() {
     const q = query.trim().toLowerCase();
     return all.filter((f) => (filter !== "accepted" || f.decision === true) && (!q || `${f.name} ${f.description || ""} ${f.trace}`.toLowerCase().includes(q)));
   }, [all, query, filter]);
+  const groups = useMemo(() => {
+    const map = new Map<string, LibraryFactor[]>();
+    for (const f of rows) { if (!map.has(f.trace)) map.set(f.trace, []); map.get(f.trace)!.push(f); }
+    return [...map.entries()].map(([trace, items]) => ({ trace, items }));
+  }, [rows]);
   const selected = useMemo(() => all.find((f) => key(f) === selectedKey) || null, [all, selectedKey]);
   const pending = useMemo(() => all.filter((f) => !f.analysis), [all]);
 
@@ -80,7 +85,7 @@ export function FactorsPage() {
       tabs={<TabBar label="筛选" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部因子" }, { key: "accepted", label: "agent 接受的轮次" }]} />}
       actions={
         <>
-          <Input aria-label="搜索因子" placeholder="搜索因子、描述或实验" value={query} onChange={(e) => setQuery(e.target.value)} className="w-52" />
+          <Input aria-label="搜索因子" placeholder="搜索因子或实验" value={query} onChange={(e) => setQuery(e.target.value)} className="w-44" />
           <Button size="sm" variant="secondary" isDisabled={analyzing || !pending.length} onPress={analyzeAll}>{analyzing ? `分析中 ${analyzed}/${pending.length}…` : `分析全部（${pending.length}）`}</Button>
           <Button size="sm" variant="secondary" onPress={load}>刷新</Button>
         </>
@@ -133,10 +138,6 @@ export function FactorsPage() {
         <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{error}</Alert.Title></Alert.Content>
           <Button size="sm" variant="ghost" onPress={() => setError("")}>关闭</Button></Alert>
       )}
-      <div className="flex items-center gap-2">
-        <Tooltip delay={200}><Tooltip.Trigger><Button size="sm" variant="ghost">怎么挑因子 ⓘ</Button></Tooltip.Trigger><Tooltip.Content className="max-w-md"><Tooltip.Arrow />{GUIDE}</Tooltip.Content></Tooltip>
-        <Hint>IC / Rank IC：因子值与次日收益的日均相关 · ICIR：IC 均值 ÷ 波动 · agent 结论针对整轮，不针对单因子</Hint>
-      </div>
       <Panel grow flush
         title={<>因子 <span className="font-normal text-muted">{rows.length} 个</span></>}
         status={statusLine} statusTone={maxCorr >= 0.7 ? "bad" : "ok"}
@@ -149,28 +150,38 @@ export function FactorsPage() {
               <Button size="sm" onPress={() => navigate("/backtest")}>去组合回测 →</Button>
             </span>
           </div>
-        ) : undefined}>
-        {rows.length ? (
-          <DataTable label="因子库" head={[[""], ["因子"], ["实验 · 轮次"], ["agent"], ["IC", "end"], ["Rank IC", "end"], ["ICIR", "end"], ["覆盖"]]}
-            rows={rows.map((f) => ({
-              key: key(f), selected: key(f) === selectedKey,
-              cells: [
-                <Checkbox key="c" aria-label="加入组合" isSelected={basket.has(f)} onChange={() => basket.toggle(f)}><Checkbox.Content><Checkbox.Control><Checkbox.Indicator /></Checkbox.Control></Checkbox.Content></Checkbox>,
-                <button key="n" className="flex w-[360px] flex-col text-left" onClick={() => select(f)}>
+        ) : (
+          <div className="flex w-full items-center gap-2">
+            <Tooltip delay={200}><Tooltip.Trigger><button className="text-accent underline">怎么挑因子</button></Tooltip.Trigger><Tooltip.Content className="max-w-md"><Tooltip.Arrow />{GUIDE}</Tooltip.Content></Tooltip>
+            <span>勾选进组合篮；点名字在右栏看描述、公式、单因子分析与代码。</span>
+          </div>
+        )}>
+        {rows.length ? groups.map((g) => (
+          <div key={g.trace}>
+            <div className="flex items-center justify-between border-b border-border bg-surface-secondary px-3 py-1.5 text-[12px]">
+              <span className="font-medium">{shortName(g.trace)}</span>
+              <span className="text-muted">{g.trace.split("/")[0]} · {g.items.length} 个因子</span>
+            </div>
+            {g.items.map((f) => (
+              <ListRow key={key(f)} selected={key(f) === selectedKey} onSelect={() => select(f)}
+                leading={<input type="checkbox" aria-label="加入组合" checked={basket.has(f)} onChange={() => basket.toggle(f)} className="size-4 cursor-pointer accent-[var(--accent)]" />}
+                trailing={<>
+                  <span className="w-12">{decisionChip(f.decision)}</span>
+                  <Stat label="IC">{f.analysis ? <Signed value={f.analysis.ic.mean} /> : "—"}</Stat>
+                  <Stat label="Rank IC">{f.analysis ? <Signed value={f.analysis.rank_ic.mean} /> : "—"}</Stat>
+                  <Stat label="ICIR" width={56}>{f.analysis?.ic.ir == null ? "—" : f.analysis.ic.ir.toFixed(2)}</Stat>
+                  <span className="w-[150px] text-right text-[12px] text-muted">
+                    {f.analysis ? `${f.analysis.coverage.start.slice(0, 7)} → ${f.analysis.coverage.end.slice(0, 7)}` : busyKey === key(f) ? "分析中…" : <button className="text-accent underline" onClick={(e) => { e.stopPropagation(); analyze(f); }}>计算指标</button>}
+                  </span>
+                </>}>
+                <div className="flex items-center gap-2">
                   <Mono>{f.name}</Mono>
-                  <span className="line-clamp-2 text-[11px] text-muted">{f.description || "（agent 没有记录描述）"}</span>
-                </button>,
-                <span key="t" className="whitespace-nowrap text-[11px] text-muted">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>,
-                <span key="d">{decisionChip(f.decision)}</span>,
-                f.analysis ? <Signed key="ic" value={f.analysis.ic.mean} /> : <span key="ic" className="text-muted">—</span>,
-                f.analysis ? <Signed key="ric" value={f.analysis.rank_ic.mean} /> : <span key="ric" className="text-muted">—</span>,
-                <span key="ir" className="tabular-nums">{f.analysis?.ic.ir == null ? "—" : f.analysis.ic.ir.toFixed(2)}</span>,
-                f.analysis ? <span key="cov" className="whitespace-nowrap text-[11px] text-muted">{f.analysis.coverage.start} → {f.analysis.coverage.end}</span>
-                  : busyKey === key(f) ? <span key="cov" className="text-[11px] text-muted">分析中…</span>
-                  : <Button key="cov" size="sm" variant="ghost" onPress={() => analyze(f)}>计算</Button>,
-              ],
-            }))} />
-        ) : !loading ? <div className="p-6 text-center text-xs text-muted">还没有带因子产物的研究轮次。先在「AI 研究」里跑一次因子研发。</div> : null}
+                  <span className="text-[12px] text-muted">第 {f.loop_id + 1} 轮</span>
+                </div>
+              </ListRow>
+            ))}
+          </div>
+        )) : !loading ? <div className="p-6 text-center text-xs text-muted">还没有带因子产物的研究轮次。先在「AI 研究」里跑一次因子研发。</div> : null}
       </Panel>
     </PageFrame>
   );

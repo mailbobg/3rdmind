@@ -9,8 +9,8 @@ import { download, errorText, shortName, useStudio } from "../hooks/studioContex
 import { PageFrame } from "../components/PageFrame";
 import { Panel } from "../components/Panel";
 import { BacktestResultView } from "../components/BacktestResultView";
-import { DateBox, NumberBox, SelectBox, TabBar, TextBox } from "../components/fields";
-import { CodeView, DataTable, Hint, Mono, Signed } from "../components/widgets";
+import { DateBox, ListRow, NumberBox, ParamGroup, SelectBox, Stat, TabBar, TextBox } from "../components/fields";
+import { CodeView, Hint, Mono, Signed } from "../components/widgets";
 
 type Market = "csi300" | "csi500" | "all";
 interface Params { start: string; end: string; market: Market; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number }
@@ -129,26 +129,42 @@ export function BacktestPage() {
       {tab === "params" ? (
         <>
           <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
-            <DateBox label="开始" value={params.start} onChange={(v) => set("start", v)} />
-            <DateBox label="结束" value={params.end} onChange={(v) => set("end", v)} />
-            <NumberBox label="初始资金" value={params.account} onChange={(v) => set("account", v)} min={1000} step={100000} width={130} />
-            <SelectBox label="股票池" value={params.market} onChange={(v) => set("market", v)} width={120} options={[{ value: "csi300", label: "沪深300" }, { value: "csi500", label: "中证500" }, { value: "all", label: "全市场" }]} />
-            <TextBox label="基准指数" value={params.benchmark} onChange={(v) => set("benchmark", v)} width={110} />
-            <NumberBox label="持股数 topk" hint="每天按评分持有前 topk 只" value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} width={100} />
-            <NumberBox label="每日换出 n_drop" hint="每天最多换出 n_drop 只" value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} width={110} />
-            <NumberBox label="买入费率" hint="0.0005 = 万分之五" value={params.open_cost} onChange={(v) => set("open_cost", v)} min={0} max={0.1} step={0.0001} width={100} />
-            <NumberBox label="卖出费率" hint="0.0015 含印花税" value={params.close_cost} onChange={(v) => set("close_cost", v)} min={0} max={0.1} step={0.0001} width={100} />
+            <ParamGroup caption="区间">
+              <DateBox label="开始" value={params.start} onChange={(v) => set("start", v)} width={130} />
+              <DateBox label="结束" value={params.end} onChange={(v) => set("end", v)} width={130} />
+            </ParamGroup>
+            <ParamGroup caption="市场">
+              <SelectBox label="股票池" value={params.market} onChange={(v) => set("market", v)} width={110} options={[{ value: "csi300", label: "沪深300" }, { value: "csi500", label: "中证500" }, { value: "all", label: "全市场" }]} />
+              <TextBox label="基准" value={params.benchmark} onChange={(v) => set("benchmark", v)} width={100} />
+            </ParamGroup>
+            <ParamGroup caption="持仓">
+              <NumberBox label="持股数" hint="每天按评分持有前 topk 只" value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} width={76} />
+              <NumberBox label="每日换出" hint="每天最多换出 n_drop 只" value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} width={76} />
+              <NumberBox label="初始资金" value={params.account} onChange={(v) => set("account", v)} min={1000} step={100000} width={110} />
+            </ParamGroup>
+            <ParamGroup caption="费率">
+              <NumberBox label="买入" hint="0.0005 = 万分之五" value={params.open_cost} onChange={(v) => set("open_cost", v)} min={0} max={0.1} step={0.0001} width={82} />
+              <NumberBox label="卖出" hint="0.0015 含印花税" value={params.close_cost} onChange={(v) => set("close_cost", v)} min={0} max={0.1} step={0.0001} width={82} />
+            </ParamGroup>
           </div>
           <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
-            <SelectBox label="信号合成" value={method} onChange={setMethod} width={170}
-              options={[{ value: "rank", label: "排名加权", description: "每天做截面百分位排名，按权重求和" }, { value: "lgbm", label: "训练 LightGBM", description: "学信号与次日收益的关系，验证集早停" }]} />
+            <ParamGroup caption="评分">
+              <SelectBox label="信号合成" value={method} onChange={setMethod} width={150}
+                options={[{ value: "rank", label: "排名加权", description: "截面百分位排名，按权重求和" }, { value: "lgbm", label: "训练 LightGBM", description: "学信号与次日收益的关系，验证集早停" }]} />
+            </ParamGroup>
             {method === "lgbm" && (
               <>
-                <DateBox label="训练开始" value={lgbm.train[0]} onChange={(v) => setLgbm((l) => ({ ...l, train: [v, l.train[1]] }))} />
-                <DateBox label="训练结束" value={lgbm.train[1]} onChange={(v) => setLgbm((l) => ({ ...l, train: [l.train[0], v] }))} />
-                <DateBox label="验证开始" value={lgbm.valid[0]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [v, l.valid[1]] }))} />
-                <DateBox label="验证结束" value={lgbm.valid[1]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [l.valid[0], v] }))} />
-                {lgbmKeys.map((k) => <NumberBox key={k} label={k} value={lgbm.params[k]} onChange={(v) => setLgbm((l) => ({ ...l, params: { ...l.params, [k]: v } }))} width={110} />)}
+                <ParamGroup caption="训练">
+                  <DateBox label="开始" value={lgbm.train[0]} onChange={(v) => setLgbm((l) => ({ ...l, train: [v, l.train[1]] }))} width={130} />
+                  <DateBox label="结束" value={lgbm.train[1]} onChange={(v) => setLgbm((l) => ({ ...l, train: [l.train[0], v] }))} width={130} />
+                </ParamGroup>
+                <ParamGroup caption="验证">
+                  <DateBox label="开始" value={lgbm.valid[0]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [v, l.valid[1]] }))} width={130} />
+                  <DateBox label="结束" value={lgbm.valid[1]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [l.valid[0], v] }))} width={130} />
+                </ParamGroup>
+                <ParamGroup caption="LightGBM">
+                  {lgbmKeys.map((k) => <NumberBox key={k} label={k} value={lgbm.params[k]} onChange={(v) => setLgbm((l) => ({ ...l, params: { ...l.params, [k]: v } }))} width={k === "learning_rate" || k === "early_stopping_rounds" ? 96 : 84} />)}
+                </ParamGroup>
               </>
             )}
           </div>
@@ -161,25 +177,25 @@ export function BacktestPage() {
             title={<>信号篮 <span className="font-normal text-muted">{basket.items.length} 个 · <a href="#/factors" className="text-accent underline">去因子库增减</a></span></>}
             status={statusLine} statusTone={maxCorr >= 0.7 ? "bad" : "ok"}
             footer={basket.items.length ? <>TopkDropoutStrategy · 前一日评分 · 当日收盘成交{coverageUnknown ? ` · ${coverageUnknown} 个信号未做单因子分析，覆盖区间未计入` : ""}</> : undefined}>
-            {basket.items.length ? (
-              <DataTable label="信号篮" head={[["信号"], ["来源"], ["IC", "end"], ["Rank IC", "end"], ["覆盖"], ["权重", "end"], [""]]}
-                rows={basket.items.map((f) => ({
-                  key: key(f),
-                  cells: [
-                    <div key="n" className="flex flex-col"><span className="flex items-center gap-1">{f.kind === "prediction" && <Chip size="sm" variant="soft">模型</Chip>}<Mono>{f.name}</Mono></span>
-                      {info(f)?.description && <span className="line-clamp-2 w-[320px] text-[11px] text-muted">{info(f)!.description}</span>}</div>,
-                    <span key="s" className="whitespace-nowrap text-[11px] text-muted">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>,
-                    <Signed key="ic" value={info(f)?.analysis?.ic.mean} />,
-                    <Signed key="ric" value={info(f)?.analysis?.rank_ic.mean} />,
-                    <span key="c" className="whitespace-nowrap text-[11px] text-muted">{info(f)?.analysis ? `${info(f)!.analysis!.coverage.start} → ${info(f)!.analysis!.coverage.end}` : f.kind === "prediction" ? "模型测试期" : "未分析"}</span>,
-                    <Tooltip key="w" delay={300}><Tooltip.Trigger>
-                      <input type="number" step={0.5} value={f.weight} disabled={method === "lgbm"} onChange={(e) => basket.setWeight(f, Number(e.target.value))}
-                        className="w-16 rounded-md border border-border bg-surface px-1.5 py-0.5 text-right text-xs disabled:opacity-40" aria-label="权重" />
-                    </Tooltip.Trigger><Tooltip.Content><Tooltip.Arrow />负权重 = 反向使用；LightGBM 模式下不生效</Tooltip.Content></Tooltip>,
-                    <Button key="x" size="sm" variant="ghost" onPress={() => basket.toggle(f)}>移除</Button>,
-                  ],
-                }))} />
-            ) : (
+            {basket.items.length ? basket.items.map((f) => (
+              <ListRow key={key(f)}
+                trailing={<>
+                  <Stat label="IC"><Signed value={info(f)?.analysis?.ic.mean} /></Stat>
+                  <Stat label="Rank IC"><Signed value={info(f)?.analysis?.rank_ic.mean} /></Stat>
+                  <span className="w-[150px] text-right text-[12px] text-muted">{info(f)?.analysis ? `${info(f)!.analysis!.coverage.start.slice(0, 7)} → ${info(f)!.analysis!.coverage.end.slice(0, 7)}` : f.kind === "prediction" ? "模型测试期" : "未分析"}</span>
+                  <Tooltip delay={300}><Tooltip.Trigger>
+                    <input type="number" step={0.5} value={f.weight} disabled={method === "lgbm"} onChange={(e) => basket.setWeight(f, Number(e.target.value))}
+                      className="h-7 w-16 rounded-md border border-border bg-surface px-1.5 text-right text-[13px] disabled:opacity-40" aria-label="权重" />
+                  </Tooltip.Trigger><Tooltip.Content><Tooltip.Arrow />权重；负数 = 反向使用，LightGBM 模式下不生效</Tooltip.Content></Tooltip>
+                  <Button size="sm" variant="ghost" onPress={() => basket.toggle(f)}>移除</Button>
+                </>}>
+                <div className="flex items-center gap-2">
+                  {f.kind === "prediction" && <Chip size="sm" variant="soft">模型</Chip>}
+                  <Mono>{f.name}</Mono>
+                  <span className="truncate text-[12px] text-muted">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>
+                </div>
+              </ListRow>
+            )) : (
               <div className="p-6 text-center text-xs text-muted">还没有选信号。去 <a href="#/factors" className="text-accent underline">因子库</a> 勾选，或在研究轮次里点“用 N 个因子回测”。</div>
             )}
           </Panel>

@@ -98,10 +98,11 @@ export function ResearchPage() {
       tabs={<TabBar label="工作区视图" value={tab} onChange={setTab} items={[{ key: "rounds", label: "研究轮次" }, { key: "new", label: "＋ 新建研究" }]} />}
       actions={
         <>
-          <SelectBox label="实验" isLabelHidden placeholder="选择实验" width={280} value={trace.traceId || null} onChange={pick} options={trace.traceIds.map((id) => ({ value: id, label: id }))} />
-          {trace.traceId && <Button size="sm" variant="ghost" onPress={() => pick("")}>取消选择</Button>}
+          <SelectBox label="实验" isLabelHidden placeholder="选择实验" width={230} value={trace.traceId || null} onChange={pick}
+            options={trace.traceIds.map((id) => ({ value: id, label: shortName(id), description: id.split("/")[0] }))} />
           {trace.active && <Button size="sm" variant="danger-soft" isDisabled={trace.busy} onPress={trace.stop}>■ 停止</Button>}
-          {trace.traceId && <a className="text-xs text-accent underline" href={studio.stdoutUrl(trace.traceId)} download>日志</a>}
+          {trace.traceId && <Button size="sm" variant="ghost" onPress={() => window.open(studio.stdoutUrl(trace.traceId), "_blank")}>日志</Button>}
+          {trace.traceId && <Button size="sm" variant="ghost" onPress={() => pick("")}>取消选择</Button>}
         </>
       }
       resultsTitle={activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情"}
@@ -125,10 +126,10 @@ export function ResearchPage() {
       {tab === "new" ? (
         <>
           <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
-            <SelectBox label="场景" value={form.scenario} onChange={(v) => { setForm((f) => ({ ...f, scenario: v })); setFiles([]); }} width={220}
+            <SelectBox label="场景" value={form.scenario} onChange={(v) => { setForm((f) => ({ ...f, scenario: v })); setFiles([]); }} width={200}
               options={MODES.map((m) => ({ value: m.value, label: m.name, description: m.desc }))} />
-            {mode.loops && <NumberBox label="轮数（1–30）" value={form.loops} onChange={(v) => setForm((f) => ({ ...f, loops: v }))} min={1} max={30} width={110} />}
-            {mode.duration && <NumberBox label="时限（小时，0.1–24）" value={form.duration} onChange={(v) => setForm((f) => ({ ...f, duration: v }))} min={0.1} max={24} step={0.1} width={140} />}
+            {mode.loops && <NumberBox label="轮数" hint="1–30" value={form.loops} onChange={(v) => setForm((f) => ({ ...f, loops: v }))} min={1} max={30} width={80} />}
+            {mode.duration && <NumberBox label="时限（小时）" hint="0.1–24" value={form.duration} onChange={(v) => setForm((f) => ({ ...f, duration: v }))} min={0.1} max={24} step={0.1} width={110} />}
             {mode.input && (
               <label className="flex flex-col gap-1 text-[11px] text-muted">{mode.input === "reports" ? "研报 PDF（可多选）" : "论文 PDF"}
                 <input type="file" accept=".pdf,application/pdf" multiple={mode.input === "reports"} onChange={(e) => setFiles([...(e.target.files || [])])} className="text-xs" />
@@ -153,17 +154,17 @@ export function ResearchPage() {
           </Panel>
         </>
       ) : (
-        <Panel grow title={<>研究轮次 <span className="font-normal text-muted">{trace.rounds.length} 轮</span></>} status={trace.traceId ? status : undefined}>
+        <Panel grow flush title={<>研究轮次 <span className="font-normal text-muted">{trace.rounds.length} 轮</span></>} status={trace.traceId ? status : undefined}
+          footer={trace.rounds.length ? "点一轮在右栏看假设、评估、反馈与代码；回测入口在右栏标题行。" : undefined}>
           {!trace.traceId ? <div className="p-6 text-center text-xs text-muted">从右上角选择一个实验，或新建研究。</div>
             : status === "启动中" ? <div className="p-6 text-center text-xs text-muted">agent 正在初始化，第一条事件到达前这里是空的，通常几十秒。</div>
             : status === "未加载" ? <Alert status="accent"><Alert.Indicator /><Alert.Content><Alert.Title>服务端没有加载这个实验的事件</Alert.Title><Alert.Description>已结束的实验需要后端以 UI_LOAD_LEGACY_PICKLE_TRACES=true 启动才可回看。</Alert.Description></Alert.Content></Alert>
             : status === "已结束" && !trace.rounds.length ? <Alert status="warning"><Alert.Indicator /><Alert.Content><Alert.Title>这个实验的进程已结束，且没有留下任何事件；看日志里的报错。</Alert.Title></Alert.Content></Alert>
             : status === "运行中" && !trace.rounds.length ? <div className="p-6 text-center text-xs text-muted">研究已启动，等待第一轮假设…</div>
             : (
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-col">
                 {trace.rounds.map((round) => (
-                  <RoundCard key={round.id} round={round} selected={round.id === (activeRound?.id ?? "")} hasPrediction={hasPrediction(round)}
-                    onSelect={() => { setRoundId(round.id); layout.openResults(); }} onBacktest={() => sendToBacktest(round)} onBacktestPrediction={() => sendPrediction(round)} />
+                  <RoundCard key={round.id} round={round} selected={round.id === (activeRound?.id ?? "")} onSelect={() => { setRoundId(round.id); layout.openResults(); }} />
                 ))}
               </div>
             )}

@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Card, Checkbox, Chip, Disclosure, TextArea } from "@heroui/react";
+import { ListRow } from "./fields";
 import type { TraceEvent } from "../api/studio";
 import type { RoundView } from "../hooks/rounds";
 import { download } from "../hooks/studioContext";
 import { Section } from "./Section";
 import { CodeView, Hint, MetricTable, StatusChip } from "./widgets";
 
-/** One research round in the middle column: hypothesis, tasks, stage dots and the backtest actions. */
-export function RoundCard({ round, selected, hasPrediction, onSelect, onBacktest, onBacktestPrediction }:
-  { round: RoundView; selected: boolean; hasPrediction: boolean; onSelect: () => void; onBacktest: () => void; onBacktestPrediction: () => void }) {
+/** One research round in the middle column: number, hypothesis on one line, stage dots, status. Actions live in the results column. */
+export function RoundCard({ round, selected, onSelect }: { round: RoundView; selected: boolean; onSelect: () => void }) {
   const stages = [
     { name: "假设", done: !!round.hypothesis.hypothesis },
     { name: "代码", done: round.files.length > 0 },
@@ -16,21 +16,17 @@ export function RoundCard({ round, selected, hasPrediction, onSelect, onBacktest
     { name: "反馈", done: !!round.feedback },
   ];
   return (
-    <Card className={`cursor-pointer gap-2 p-3 transition-colors hover:border-foreground/30 ${selected ? "border-accent shadow-[inset_3px_0_0_var(--accent)]" : ""}`} onClick={onSelect} role="button" tabIndex={0}>
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-xs font-semibold text-foreground">第 {Number(round.id) + 1} 轮 · {round.hypothesis.hypothesis || "（无假设文本）"}</span>
-        <StatusChip status={round.status} />
+    <ListRow selected={selected} onSelect={onSelect}
+      trailing={<>
+        <span className="flex gap-2 text-[11px]">{stages.map((s) => <span key={s.name} className={s.done ? "text-success" : "text-muted"}>{s.done ? "●" : "○"} {s.name}</span>)}</span>
+        <span className="w-14 text-right"><StatusChip status={round.status} /></span>
+      </>}>
+      <div className="flex items-center gap-2">
+        <span className="shrink-0 text-[12px] text-muted">第 {Number(round.id) + 1} 轮</span>
+        <span className="truncate text-[13px]">{round.hypothesis.hypothesis || "（无假设文本）"}</span>
+        {round.factors.length > 0 && <Chip size="sm" variant="soft">{round.factors.length} 因子</Chip>}
       </div>
-      {round.hypothesis.reason && <p className="m-0 line-clamp-2 text-[11px] text-muted">{round.hypothesis.reason}</p>}
-      {round.tasks.length > 0 && <div className="flex flex-wrap gap-1">{round.tasks.map((t) => <Chip key={t.name} size="sm" variant="soft">{t.name}</Chip>)}</div>}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex gap-3 text-[11px]">{stages.map((s) => <span key={s.name} className={s.done ? "text-success" : "text-muted"}>{s.done ? "●" : "○"} {s.name}</span>)}</div>
-        <div className="flex gap-1">
-          {round.factors.length > 0 && <Button size="sm" onPress={onBacktest}>用 {round.factors.length} 个因子回测 →</Button>}
-          {hasPrediction && <Button size="sm" variant="secondary" onPress={onBacktestPrediction}>用模型预测回测 →</Button>}
-        </div>
-      </div>
-    </Card>
+    </ListRow>
   );
 }
 
