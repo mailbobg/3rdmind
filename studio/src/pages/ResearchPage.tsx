@@ -10,16 +10,31 @@ import { PageFrame } from "../components/PageFrame";
 import { InteractionPanel, RoundDetail } from "../components/RoundViews";
 import { Block, Btn, Empty, Field, FieldGrid, Note, NumberInput, P, SelectInput, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import type { Row } from "../components/minimal";
-import { Hint, StatusChip } from "../components/widgets";
+import { Section } from "../components/Section";
+import { Hint, MetricGrid, StatusChip } from "../components/widgets";
 
-interface Mode { name: string; desc: string; value: string; loops: boolean; duration: boolean; objective: boolean; input?: "reports" | "paper" }
+interface Mode {
+  name: string; desc: string; value: string; loops: boolean; duration: boolean; objective: boolean; input?: "reports" | "paper";
+  /** What one round does, in order, and what the run leaves behind: shown in the results column while the form is open. */
+  steps: string[]; output: string;
+}
 // The scenarios the log server's /upload accepts; Data Science needs an MLE-bench dataset, so it stays in the Playground.
 const MODES: Mode[] = [
-  { name: "因子研发", desc: "假设 → 因子实现 → Qlib 评估", value: "Finance Data Building", loops: true, duration: true, objective: true },
-  { name: "模型研发", desc: "模型实现与迭代验证", value: "Finance Model Implementation", loops: true, duration: true, objective: true },
-  { name: "因子 × 模型联合", desc: "RD-Agent 原生联合研究循环", value: "Finance Whole Pipeline", loops: true, duration: true, objective: true },
-  { name: "研报因子提取", desc: "上传研报 PDF → 提取因子 → 实现与 Qlib 评估", value: "Finance Data Building (Reports)", loops: false, duration: true, objective: false, input: "reports" },
-  { name: "论文模型实现", desc: "上传论文 PDF 或给链接 → 提取模型结构 → 实现", value: "General Model Implementation", loops: false, duration: false, objective: false, input: "paper" },
+  { name: "因子研发", desc: "假设 → 因子实现 → Qlib 评估", value: "Finance Data Building", loops: true, duration: true, objective: true,
+    steps: ["Agent 根据研究方向和前几轮的反馈提出一个假设，并拆成几个因子任务", "为每个因子写 factor.py，在 daily_pv.h5 上计算出 result.h5，通不过检查就自己改", "把新因子和基础特征一起交给 Qlib：LightGBM 训练，TopkDropout 回测", "对照上一轮的指标写反馈，决定接受还是拒绝这个假设，进入下一轮"],
+    output: "每一轮的因子都进因子库，可以挑进组合篮回测；训练出的模型预测（pred.pkl）也能直接当信号回测。" },
+  { name: "模型研发", desc: "模型实现与迭代验证", value: "Finance Model Implementation", loops: true, duration: true, objective: true,
+    steps: ["Agent 提出一个模型结构假设（网络、损失、训练方式）", "写出 PyTorch 模型代码并做形状与训练检查", "在 Qlib 的固定特征集上训练、回测", "对照上一轮写反馈，决定接受还是拒绝，进入下一轮"],
+    output: "每一轮的模型预测（pred.pkl）可以在组合回测里当信号使用。" },
+  { name: "因子 × 模型联合", desc: "RD-Agent 原生联合研究循环", value: "Finance Whole Pipeline", loops: true, duration: true, objective: true,
+    steps: ["Agent 每轮自己决定这一轮改因子还是改模型", "按选择走因子研发或模型研发的实现与评估流程", "反馈同时看因子贡献和模型效果，进入下一轮"],
+    output: "因子进因子库，模型预测可当信号，两者都能回测。" },
+  { name: "研报因子提取", desc: "上传研报 PDF → 提取因子 → 实现与 Qlib 评估", value: "Finance Data Building (Reports)", loops: false, duration: true, objective: false, input: "reports",
+    steps: ["读取上传的研报，抽出其中定义的因子（名称、公式、变量）", "逐个实现成 factor.py 并计算 result.h5", "交给 Qlib 评估"],
+    output: "抽出的因子进因子库。这个场景不迭代假设，跑完一遍就结束。" },
+  { name: "论文模型实现", desc: "上传论文 PDF 或给链接 → 提取模型结构 → 实现", value: "General Model Implementation", loops: false, duration: false, objective: false, input: "paper",
+    steps: ["读取论文，抽出模型结构与训练细节", "实现成可运行的模型代码并做检查"],
+    output: "产出是模型代码，没有 Qlib 评估，也不进因子库。" },
 ];
 
 const stagesOf = (round: RoundView) => [
@@ -55,6 +70,8 @@ export function ResearchPage() {
   const experiments = useMemo(() => mergeExperiments(trace.traceIds, summaries), [trace.traceIds, summaries]);
 
   useEffect(() => { if (search.get("new")) setTab("new"); }, [search]);
+  // The form's explanation lives in the results column, so switching to the form brings that column up.
+  useEffect(() => { if (tab === "new") layout.openResults(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { persistStudioState({ objective: form.objective }); }, [form.objective]);
   // The URL's ?trace= seeds the first load only; afterwards the user's pick wins on reload.
   useEffect(() => {
@@ -151,10 +168,10 @@ export function ResearchPage() {
 
   return (
     <PageFrame
-      title={trace.traceId ? shortName(trace.traceId) : "AI 研究"}
-      description={objectDesc}
-      tag={objectTag}
-      titleEnd={trace.traceId ? <StatusChip status={status} /> : undefined}
+      title={tab === "new" ? "新建研究" : trace.traceId ? shortName(trace.traceId) : "AI 研究"}
+      description={tab === "new" ? `${mode.name} · ${mode.desc}` : objectDesc}
+      tag={tab === "new" ? undefined : objectTag}
+      titleEnd={tab !== "new" && trace.traceId ? <StatusChip status={status} /> : undefined}
       tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "rounds", label: "研究轮次" }, { key: "new", label: "新建研究" }]} />}
       actions={tab === "rounds" && (
         <>
@@ -163,19 +180,46 @@ export function ResearchPage() {
           <Btn onClick={() => { trace.loadTraces(); loadSummaries(); }}>刷新</Btn>
         </>
       )}
-      resultsTitle={activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情"}
-      resultsActions={activeRound ? (
+      resultsTitle={tab === "new" ? mode.name : activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情"}
+      resultsActions={tab === "new" ? undefined : activeRound ? (
         <>
           {activeRound.factors.length > 0 && <Btn kind="primary" onClick={() => sendToBacktest(activeRound)}>用 {activeRound.factors.length} 个因子回测 →</Btn>}
           {hasPrediction(activeRound) && <Btn onClick={() => sendPrediction(activeRound)}>用模型预测回测 →</Btn>}
         </>
       ) : undefined}
-      results={
+      results={tab === "new" ? (
+        <div className="flex flex-col gap-3">
+          <Section title="这个场景做什么" note={mode.desc}>
+            <ol className="m-0 flex list-decimal flex-col gap-1 pl-4 text-xs">{mode.steps.map((step) => <li key={step}>{step}</li>)}</ol>
+            <Hint>{mode.output}</Hint>
+          </Section>
+          <Section title="会用到的环境" note={env?.data_ready ? "就绪" : "未就绪"}>
+            <MetricGrid columns={2} items={[
+              { label: "研究模型", value: env?.chat_model?.replace("deepseek/", "") || "未配置" },
+              { label: "Qlib 数据", value: env ? `${env.start || "—"} → ${env.end || "—"}` : "后端未连接" },
+              ...(mode.loops ? [{ label: "轮数", value: String(form.loops) }] : []),
+              ...(mode.duration ? [{ label: "时限", value: `${form.duration} 小时` }] : []),
+            ]} />
+            {mode.input && <Hint>{files.length ? `已选 ${files.length} 个文件：${files.map((f) => f.name).join("，")}` : mode.input === "reports" ? "还没有上传研报。" : form.link.trim() ? `将读取链接 ${form.link.trim()}` : "还没有上传论文或填写链接。"}</Hint>}
+          </Section>
+          {mode.objective && (
+            <Section title="运行中会问你三次" note="不提交它会一直等">
+              <ol className="m-0 flex list-decimal flex-col gap-1 pl-4 text-xs">
+                <li>开始前：总体研究方向和基础特征集。方向留空就由 Agent 自行选题。</li>
+                <li>每一轮开始：这一轮的假设。认可就直接继续，也可以改写后提交。</li>
+                <li>每一轮结束：评估结论。不同意 Agent 的判断可以在这里改。</li>
+              </ol>
+              <Hint>确认面板会出现在这一栏，不改直接提交就按 Agent 的原案继续。</Hint>
+            </Section>
+          )}
+          {form.objective.trim() && mode.objective && <Section title="研究方向"><p className="m-0 text-xs">{form.objective}</p></Section>}
+        </div>
+      ) : (
         <div className="flex flex-col gap-3">
           {trace.interaction && <InteractionPanel event={trace.interaction} busy={trace.busy} defaultInstruction={form.objective} onSubmit={trace.answer} />}
-          {activeRound ? <RoundDetail round={activeRound} /> : <Hint>在左侧选择一轮查看假设、评估与代码。</Hint>}
+          {activeRound ? <RoundDetail round={activeRound} /> : <Hint>在左侧展开一个实验，点一轮查看假设、评估与代码。</Hint>}
         </div>
-      }
+      )}
     >
       {trace.error && <Note tone="bad" actions={<Btn kind="text" onClick={() => trace.setError("")}>关闭</Btn>}>{trace.error}</Note>}
       {tab === "new" ? (
@@ -203,7 +247,7 @@ export function ResearchPage() {
             <Btn kind="primary" disabled={trace.busy} onClick={start}>{trace.busy ? "启动中…" : "开始研究"}</Btn>
             <span className="mm-dim" style={{ fontSize: 12 }}>{mode.desc}{files.length ? ` · 已选 ${files.map((f) => f.name).join("，")}` : ""}</span>
           </div>
-          {mode.objective && <P>假设由 Agent 自己提出并按前几轮的成败迭代。运行中它会在三个节点停下来让你确认（开始前的方向与基础特征、每轮的假设、每轮的反馈），面板里不改直接提交就按它的原案继续；不提交它会一直等。</P>}
+          <P>场景说明、环境和确认流程在右栏。</P>
         </Block>
       ) : (
         <Block title="实验" count={experiments.length} note={experiments.length ? "点一个实验展开它的轮次；再点一轮在右栏看详情" : undefined}>
