@@ -4,13 +4,6 @@
       <a class="brand" href="#/studio/research"
         ><span class="brand-mark">R</span><span>RESEARCH STUDIO<small>RD-Agent × Qlib</small></span></a
       >
-      <button class="new-research" @click="goResearch()">＋ 新建研究</button>
-      <div v-if="recent.length" class="recent">
-        <small>最近实验</small>
-        <button v-for="id in recent" :key="id" :class="{ selected: id === trace.traceId.value }" :title="id" @click="goResearch(id)">
-          {{ shortName(id) }}
-        </button>
-      </div>
       <nav class="task-navigation" aria-label="工作任务">
         <router-link v-for="item in menu" :key="item.name" :to="{ name: item.name }" custom v-slot="{ navigate, isActive }">
           <button :class="{ selected: isActive }" :aria-current="isActive ? 'page' : undefined" @click="navigate">
@@ -42,14 +35,12 @@
 </template>
 <script setup lang="ts">
 import { computed, onMounted, provide } from "vue";
-import { useRouter } from "vue-router";
 import { useEnvironment } from "../../composables/useEnvironment";
 import { useTrace } from "../../composables/useTrace";
 import { useBacktests } from "../../composables/useBacktests";
 import { useFactorBasket } from "../../composables/useFactorBasket";
 import "./studio.css";
 
-const router = useRouter();
 const { env, load: loadEnv } = useEnvironment();
 const trace = useTrace();
 const backtests = useBacktests();
@@ -59,20 +50,12 @@ provide("trace", trace);
 provide("backtests", backtests);
 provide("basket", basket);
 
-const recent = computed(() => trace.traceIds.value.slice(0, 5));
-const shortName = (id: string) => id.split("/").slice(1).join("/") || id;
 const menu = computed(() => [
   { name: "studio-research", symbol: "◎", title: "AI 研究", desc: "提出假设，开发并评估因子或模型" },
   { name: "studio-factors", symbol: "⊞", title: "因子库", desc: "研究产出的因子，挑选进组合", count: basket.items.length },
   { name: "studio-backtest", symbol: "◇", title: "组合回测", desc: "用已选因子构建并验证策略", count: backtests.jobs.value.length },
   { name: "studio-runs", symbol: "↗", title: "运行记录", desc: "统一查看研究与回测" },
 ]);
-
-function goResearch(id?: string) {
-  if (id) trace.select(id);
-  // `new` carries a timestamp so repeated clicks still change the route and re-open the form.
-  router.push({ name: "studio-research", query: id ? { trace: id } : { new: String(Date.now()) } });
-}
 
 onMounted(async () => {
   await Promise.all([loadEnv(), trace.loadTraces(), backtests.load()]);
