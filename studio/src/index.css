@@ -5,6 +5,19 @@
   --font-sans: "Avenir Next", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
 }
 
+/* One ground for the whole app: the work column's paper colour, with HeroUI's neutral surfaces and rules
+   retinted to match so the rail, object bar and results column sit on the same paper. */
+:root {
+  --background: #fbfaf8;
+  --surface: #fbfaf8;
+  --surface-secondary: #f1efea;
+  --surface-tertiary: #ebe8e2;
+  --field-background: #fbfaf8;
+  --overlay: #fbfaf8;
+  --border: #e5e2dc;
+  --separator: #efece7;
+}
+
 html, body, #root { height: 100%; }
 body { margin: 0; background: var(--background); color: var(--foreground); font-family: var(--font-sans); font-size: 13px; }
 
