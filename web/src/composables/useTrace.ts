@@ -156,6 +156,13 @@ export function useTrace() {
     failures = 0;
     schedule();
   }
+  /** Deselect the current experiment: stop polling, drop its events and forget it in storage. */
+  function clear() {
+    clearTimeout(timer);
+    traceId.value = "";
+    events.value = [];
+    persist({ traceId: "" });
+  }
   async function stop() {
     await guarded(async () => { await studio.stopResearch(traceId.value); await refresh(); });
   }
@@ -171,5 +178,5 @@ export function useTrace() {
 
   function dispose() { disposed = true; clearTimeout(timer); }
   if (getCurrentInstance()) onBeforeUnmount(dispose);
-  return { traceId, traceIds, events, rounds, status, active, interaction, error, busy, loadTraces, select, refresh, stop, answer, schedule, dispose };
+  return { traceId, traceIds, events, rounds, status, active, interaction, error, busy, loadTraces, select, clear, refresh, stop, answer, schedule, dispose };
 }

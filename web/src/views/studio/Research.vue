@@ -61,7 +61,8 @@
           </span>
         </div>
         <p v-if="status === '未加载'" class="hint">服务端没有加载这个实验的事件。已结束的实验需要后端以 <code>UI_LOAD_LEGACY_PICKLE_TRACES=true</code> 启动才可回看。</p>
-        <RoundCard v-for="round in trace.rounds.value" :key="round.id" :round="round" :selected="round.id === roundId" @select="roundId = round.id; layout.openResults()" />
+        <RoundCard v-for="round in trace.rounds.value" :key="round.id" :round="round" :selected="round.id === roundId" :has-prediction="hasPrediction(round)"
+          @select="roundId = round.id; layout.openResults()" @backtest="sendToBacktest(round)" @backtest-prediction="sendPrediction(round)" />
         <p v-if="status === '运行中' && !trace.rounds.value.length" class="empty">研究已启动，等待第一轮假设…</p>
       </template>
       <p v-else-if="!showForm" class="empty">选择一个实验，或新建研究。</p>
@@ -124,7 +125,9 @@ const showForm = ref(!!route.query.new || !trace.traceId.value);
 watch(() => route.query.new, (value) => { if (value) showForm.value = true; });
 const roundId = ref("");
 const shortName = (id: string) => id.split("/").slice(1).join("/") || id;
-const status = computed(() => trace.status.value);
+// While the first snapshot of a freshly selected experiment is in flight there are no events yet;
+// show that as loading rather than as "not loaded on the server".
+const status = computed(() => (trace.busy.value && !trace.events.value.length ? "加载中" : trace.status.value));
 const activeRound = computed(() => {
   const rounds = trace.rounds.value;
   return rounds.find((r) => r.id === roundId.value) || rounds[rounds.length - 1] || null;
@@ -134,8 +137,10 @@ watch(() => trace.interaction.value, (request) => { if (request) layout.openResu
 
 async function pick(id: string) {
   roundId.value = "";
+  // The URL's ?trace= only seeds the first load; once the user picks, the picked one must win on reload.
+  if (route.query.trace || route.query.new) router.replace({ name: "studio-research" });
   if (id) await trace.select(id);
-  else trace.traceId.value = "";
+  else trace.clear();
 }
 async function start() {
   if (mode.value.loops && (!Number.isInteger(form.loops) || form.loops < 1 || form.loops > 30)) {
@@ -166,6 +171,7 @@ async function start() {
     const { id } = await studio.startResearch(data);
     trace.traceIds.value = [id, ...trace.traceIds.value.filter((t) => t !== id)];
     showForm.value = false;
+    if (route.query.new) router.replace({ name: "studio-research" });
     await trace.select(id);
   } catch (e) {
     trace.error.value = e instanceof Error ? e.message : String(e);
@@ -198,5 +204,6 @@ watch(() => [trace.traceId.value, trace.rounds.value.length] as const, ([id]) =>
 onMounted(async () => {
   const wanted = typeof route.query.trace === "string" ? route.query.trace : trace.traceId.value;
   if (wanted && (wanted !== trace.traceId.value || !trace.events.value.length)) await trace.select(wanted);
+  if (route.query.trace) router.replace({ name: "studio-research" });
 });
 </script>

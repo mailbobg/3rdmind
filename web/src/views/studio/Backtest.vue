@@ -15,7 +15,8 @@
       <div v-if="backtests.error.value || pageError" class="notice" role="alert">
         {{ backtests.error.value || pageError }}<button class="text-button" @click="backtests.error.value = ''; pageError = ''">关闭</button>
       </div>
-      <div v-if="env && !env.data_ready" class="notice">Qlib 数据未就绪（{{ env.provider_uri }}），无法回测。</div>
+      <div v-if="!env" class="notice">后端未连接，无法回测。运行 <code>scripts/start-backend.sh</code> 后刷新。</div>
+      <div v-else-if="!env.data_ready" class="notice">Qlib 数据未就绪（{{ env.provider_uri }}），无法回测。</div>
 
       <section class="surface">
         <div class="section-heading">
@@ -172,8 +173,8 @@ function modelConfig() {
 async function submit() {
   const model = modelConfig();
   persistStudioState({ params: { ...params }, model });
-  await backtests.run({ factors: basket.items.map((f) => ({ ...f, weight: Number(f.weight) })), model, ...params });
-  layout.openResults();
+  const accepted = await backtests.run({ factors: basket.items.map((f) => ({ ...f, weight: Number(f.weight) })), model, ...params });
+  if (accepted) layout.openResults();
 }
 function exportResult() {
   if (result.value) download(`backtest-${result.value.id.slice(0, 8)}.json`, JSON.stringify(result.value, null, 2), "application/json");

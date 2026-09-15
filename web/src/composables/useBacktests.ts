@@ -69,16 +69,20 @@ export function useBacktests() {
     await guarded(fetchSelected);
     schedule();
   }
-  async function run(config: BacktestRequest) {
+  /** Submit a backtest; resolves to true when the server accepted it, false on validation or request failure. */
+  async function run(config: BacktestRequest): Promise<boolean> {
     const message = validateRequest(config);
-    if (message) { error.value = message; return; }
+    if (message) { error.value = message; return false; }
+    let accepted = false;
     await guarded(async () => {
       const { id } = await studio.runBacktest(config);
       jobs.value = await studio.backtests();
       selectedId.value = id;
       result.value = { id, status: "queued", config };
+      accepted = true;
       schedule();
     });
+    return accepted;
   }
 
   function dispose() { disposed = true; clearTimeout(timer); }
