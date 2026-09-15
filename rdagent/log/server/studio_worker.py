@@ -33,6 +33,10 @@ def validate_config(config):
         raise ValueError("n_drop cannot exceed topk")
     if result.get("market") not in ("csi300", "csi500", "all"):
         raise ValueError("Unsupported instrument universe")
+    benchmark = result.get("benchmark", "SH000300")
+    if not isinstance(benchmark, str) or not benchmark.strip() or len(benchmark) > 20:
+        raise ValueError("Invalid benchmark")
+    result["benchmark"] = benchmark.strip()
     factors = result.get("factors", [])
     if not isinstance(factors, list) or not 1 <= len(factors) <= 20:
         raise ValueError("Select 1 to 20 factors")

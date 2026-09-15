@@ -166,7 +166,8 @@ def test_backtest_resolves_factor_paths(studio_client, tmp_path: Path) -> None:
     assert response.status_code == 202, response.get_json()
     job = response.get_json()["id"]
     config = json.loads((tmp_path / "traces" / "studio_backtests" / job / "config.json").read_text())
-    assert config["factors"] == [{"name": "STR_5", "weight": 1.0, "path": str(tmp_path / "ws" / "f0")}]
+    assert config["factors"] == [{"name": "STR_5", "weight": 1.0, "path": str(tmp_path / "ws" / "f0"),
+                                  "trace": "Finance Data Building/demo", "loop_id": 0}]
     assert config["trace"] == "Finance Data Building/demo"
 
     bad = dict(body, factors=[{"name": "UNKNOWN", "weight": 1}])
@@ -361,3 +362,44 @@ def test_backtest_responses_omit_factor_paths(studio_client, tmp_path: Path) -> 
         assert "path" not in factor
     for factor in studio_client.get(f"/studio/backtests/{job}").get_json()["config"]["factors"]:
         assert "path" not in factor
+
+
+@pytest.mark.offline
+def test_backtest_accepts_per_factor_rounds_without_request_defaults(studio_client, tmp_path: Path) -> None:
+    body = {"factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": "0"}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300", "benchmark": "SH000905",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / response.get_json()["id"] / "config.json").read_text())
+    assert config["factors"][0]["loop_id"] == 0
+    assert config["benchmark"] == "SH000905"
+    listed = studio_client.get("/studio/backtests").get_json()[0]["config"]["factors"][0]
+    assert listed == {"name": "STR_5", "weight": 1.0, "trace": "Finance Data Building/demo", "loop_id": 0}
+
+    unknown = dict(body, factors=[{"name": "STR_5", "weight": 1, "trace": "nope/none", "loop_id": 0}])
+    assert studio_client.post("/studio/backtests", json=unknown).status_code == 400
+
+
+@pytest.mark.offline
+def test_factor_library_lists_factors_with_code(studio_client, tmp_path: Path) -> None:
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages.insert(1, {"tag": "evolving.codes", "loop_id": "0", "timestamp": "t", "evo_id": 0,
+                             "content": [{"evo_id": 0, "target_task_name": "STR_5", "workspace": {"factor.py": "print(5)"}}]})
+    response = studio_client.get("/studio/factors")
+    assert response.status_code == 200
+    assert response.get_json() == [{
+        "trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5",
+        "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)",
+    }]
+
+
+@pytest.mark.offline
+def test_validate_config_checks_benchmark() -> None:
+    assert validate_config(_config())["benchmark"] == "SH000300"
+    assert validate_config(_config(benchmark=" SH000905 "))["benchmark"] == "SH000905"
+    with pytest.raises(ValueError, match="benchmark"):
+        validate_config(_config(benchmark=""))

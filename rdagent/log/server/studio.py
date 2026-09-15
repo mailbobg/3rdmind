@@ -80,34 +80,80 @@ def metric_rounds(messages):
     return [by_loop[loop_id] for loop_id in order]
 
 
-def resolve_factor_paths(messages, loop_id, factors):
-    """Attach workspace paths to the requested factor names; reject unknown names or paths outside the workspace root."""
-    paths = {}
-    for round_ in metric_rounds(messages):
-        if round_["loop_id"] == loop_id:
-            paths = round_["paths"]
-    if not paths:
-        raise ValueError(f"Round {loop_id} has no factor workspaces")
+def factor_code(messages, loop_id, name):
+    """The generated factor.py for ``name`` in round ``loop_id``, or None when the trace has no code event for it."""
+    code = None
+    for message in messages:
+        if message.get("tag") != "evolving.codes":
+            continue
+        try:
+            if normalize_loop_id(message.get("loop_id")) != loop_id:
+                continue
+        except ValueError:
+            continue
+        for task in message.get("content") or []:
+            if task.get("target_task_name") == name and isinstance(task.get("workspace"), dict):
+                code = task["workspace"].get("factor.py", code)
+    return code
+
+
+def factor_library(registry, log_folder):
+    """Every factor with a workspace across all loaded traces, newest trace first."""
+    root = Path(log_folder)
+    entries = []
+    for key, task in registry.items():
+        try:
+            trace = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            continue
+        for round_ in metric_rounds(task.messages):
+            for name in round_["factors"]:
+                entries.append({
+                    "trace": trace, "loop_id": round_["loop_id"], "name": name,
+                    "metrics": round_["metrics"], "code": factor_code(task.messages, round_["loop_id"], name),
+                })
+    return entries
+
+
+def resolve_factor_paths(default_trace, default_loop_id, factors):
+    """Attach workspace paths to the requested factors.
+
+    Each factor may name its own ``trace``/``loop_id`` (a basket built from several rounds); otherwise the
+    request-level defaults apply. Unknown names, unloaded traces, paths outside the workspace root and
+    missing result.h5 files are all rejected.
+    """
     resolved = []
     for factor in factors:
         if not isinstance(factor, dict):
             raise ValueError("Each factor must be an object with name and weight")
         name = factor.get("name")
+        trace = factor.get("trace") or default_trace
+        loop_id = normalize_loop_id(factor.get("loop_id", default_loop_id))
+        messages = trace_messages(str(trace or ""))
+        if messages is None:
+            raise ValueError(f"Trace {trace!r} is not loaded on this server")
+        paths = {}
+        for round_ in metric_rounds(messages):
+            if round_["loop_id"] == loop_id:
+                paths = round_["paths"]
+        if not paths:
+            raise ValueError(f"Round {loop_id} of {trace} has no factor workspaces")
         if name not in paths:
-            raise ValueError(f"Unknown factor {name!r} in round {loop_id}")
+            raise ValueError(f"Unknown factor {name!r} in round {loop_id} of {trace}")
         path = Path(paths[name]).resolve()
         if WORKSPACE_ROOT not in path.parents:
             raise ValueError(f"Factor {name} lives outside the RD-Agent workspace root")
         if not (path / "result.h5").is_file():
             raise ValueError(f"Factor {name} has no result.h5")
-        resolved.append({"name": name, "weight": float(factor.get("weight", 1)), "path": str(path)})
+        resolved.append({"name": name, "weight": float(factor.get("weight", 1)), "path": str(path),
+                         "trace": trace, "loop_id": loop_id})
     return resolved
 
 
 def public_config(config):
     """A copy of ``config`` with each factor's on-disk workspace ``path`` stripped for API responses."""
     public = dict(config)
-    public["factors"] = [{"name": f["name"], "weight": f["weight"]} for f in config.get("factors", [])]
+    public["factors"] = [{k: f[k] for k in ("name", "weight", "trace", "loop_id") if k in f} for f in config.get("factors", [])]
     return public
 
 
@@ -136,6 +182,11 @@ def rounds():
     return jsonify([{k: v for k, v in r.items() if k != "paths"} for r in metric_rounds(messages)])
 
 
+@studio.get("/factors")
+def factors():
+    return jsonify(factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"]))
+
+
 @studio.route("/backtests", methods=["GET", "POST"])
 def backtests():
     ROOT.mkdir(parents=True, exist_ok=True)
@@ -148,12 +199,14 @@ def backtests():
         return jsonify(jobs)
     body = request.get_json() or {}
     try:
-        messages = trace_messages(str(body.get("trace", "")))
-        if messages is None:
+        # Request-level trace/loop_id are defaults for factors that do not name their own round.
+        default_trace = str(body.get("trace") or "") or None
+        default_loop = body.get("loop_id")
+        if default_trace and trace_messages(default_trace) is None:
             raise ValueError("Trace is not loaded on this server")
-        loop_id = normalize_loop_id(body.get("loop_id"))
-        body["loop_id"] = loop_id
-        body["factors"] = resolve_factor_paths(messages, loop_id, body.get("factors") or [])
+        if default_loop is not None:
+            body["loop_id"] = normalize_loop_id(default_loop)
+        body["factors"] = resolve_factor_paths(default_trace, body.get("loop_id"), body.get("factors") or [])
         config = validate_config(body)
         config["provider_uri"] = str(Path(config.get("provider_uri") or os.environ.get(
             "QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
