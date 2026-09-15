@@ -123,7 +123,7 @@ export function BacktestPage() {
       resultsTitle={result ? `回测 ${result.id.slice(0, 8)}` : "回测结果"}
       resultsActions={
         <>
-          <SelectInput ariaLabel="回测历史" placeholder="回测历史" className="w-80" value={backtests.selectedId || ""} onChange={(id) => { backtests.select(id); layout.openResults(); }}
+          <SelectInput ariaLabel="回测历史" placeholder="回测历史" className="w-80 max-w-full" value={backtests.selectedId || ""} onChange={(id) => { backtests.select(id); layout.openResults(); }}
             options={backtests.jobs.map((j) => ({ value: j.id, label: jobLabel(j) }))} />
           {result?.metrics && <Btn kind="text" onClick={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>导出 JSON</Btn>}
         </>

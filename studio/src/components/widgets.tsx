@@ -20,9 +20,11 @@ export function Mono({ children }: { children: ReactNode }) {
 }
 
 /** Key/value spec sheet; the hint shows as a tooltip on the label. */
+/** Labelled values in a grid: `columns` is the most per row; cells wrap to fewer columns when the column is narrow. */
 export function MetricGrid({ items, columns = 3 }: { items: { label: string; value: ReactNode; hint?: string }[]; columns?: number }) {
+  const min = columns >= 3 ? 150 : 170;
   return (
-    <dl className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+    <dl className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(max(min(${min}px, 100%), calc(${(100 / columns).toFixed(3)}% - 6px)), 1fr))` }}>
       {items.map((m) => (
         <div key={m.label} className="flex items-center justify-between gap-2 rounded-lg border border-border px-2.5 py-1.5">
           {m.hint ? (
