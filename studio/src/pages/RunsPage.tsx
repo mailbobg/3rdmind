@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Alert } from "@heroui/react";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
-import { useStudio } from "../hooks/studioContext";
+import { shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
 import { BacktestResultView } from "../components/BacktestResultView";
 import { RoundDetail } from "../components/RoundViews";
@@ -19,7 +19,7 @@ export function RunsPage() {
 
   const rows = useMemo<Row[]>(() => {
     const research: Row[] = filter !== "backtest" ? trace.traceIds.map((id) => ({
-      key: `r:${id}`, kind: "research", id, name: id.split("/").slice(1).join("/") || id, detail: id.split("/")[0],
+      key: `r:${id}`, kind: "research", id, name: shortName(id), detail: id.split("/")[0],
       status: id === trace.traceId ? trace.status : "—",
     })) : [];
     const jobs: Row[] = filter !== "research" ? backtests.jobs.map((job) => ({

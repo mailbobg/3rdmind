@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Chip } from "@heroui/react";
-import { useStudio } from "../hooks/studioContext";
+import { capitalize, useStudio } from "../hooks/studioContext";
 import { useResizablePanel } from "../hooks/useResizablePanel";
 
 export interface PageFrameProps {
@@ -28,7 +28,7 @@ export function PageFrame(p: PageFrameProps) {
     <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2">
       <header className="flex min-h-[52px] items-center gap-3.5 rounded-2xl border border-border bg-surface px-4.5 py-2.5">
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-foreground" title={p.title}>{p.title}</h1>
+          <h1 className="truncate text-sm font-semibold text-foreground" title={p.title}>{capitalize(p.title)}</h1>
           {p.description && <div className="truncate text-[11px] text-muted" title={p.description}>{p.description}</div>}
         </div>
         {p.titleEnd}
@@ -53,7 +53,7 @@ export function PageFrame(p: PageFrameProps) {
             </div>
             <aside className="flex min-h-0 min-w-0 flex-col rounded-2xl border border-border bg-surface">
               <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-border px-3.5 py-2.5">
-                <div className="text-[13px] font-semibold text-foreground">{p.resultsTitle}</div>
+                <div className="text-[13px] font-semibold text-foreground">{typeof p.resultsTitle === "string" ? capitalize(p.resultsTitle) : p.resultsTitle}</div>
                 <div className="flex flex-wrap items-center gap-1.5">{p.resultsActions}</div>
               </div>
               <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3.5">{p.results}</div>
