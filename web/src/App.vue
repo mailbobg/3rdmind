@@ -1,6 +1,6 @@
 <template>
   <div id="app">
-    <Header v-if="!route.path.startsWith('/studio') && route.path !== '/'" />
+    <Header />
     <router-view v-slot="{ Component }" class="component">
       <keep-alive>
         <component
@@ -15,7 +15,7 @@
         v-if="!$route.meta.keepAlive"
       />
     </router-view>
-    <Footer v-if="!route.path.startsWith('/studio') && route.path !== '/'" :color="color" />
+    <Footer :color="color" />
   </div>
 </template>
 <script setup>

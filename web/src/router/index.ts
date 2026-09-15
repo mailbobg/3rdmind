@@ -1,20 +1,10 @@
 import { createRouter, RouteRecordRaw, createWebHashHistory } from 'vue-router'
 
 const routes: Array<RouteRecordRaw> = [
-  {
-    path: '/studio',
-    alias: ['/', '/Studio'],
-    component: () => import('../views/studio/StudioLayout.vue'),
-    meta: { keepAlive: false, requiresFrontEndAuth: true, footerBg: "#F6FAFF" },
-    children: [
-      { path: '', redirect: { name: 'studio-research' } },
-      { path: 'research', name: 'studio-research', component: () => import('../views/studio/Research.vue') },
-      { path: 'factors', name: 'studio-factors', component: () => import('../views/studio/Factors.vue') },
-      { path: 'backtest', name: 'studio-backtest', component: () => import('../views/studio/Backtest.vue') },
-      { path: 'strategy', redirect: { name: 'studio-backtest' } },
-      { path: 'runs', name: 'studio-runs', component: () => import('../views/studio/Runs.vue') },
-    ],
-  },
+  // The Studio moved to the React app served by the log server at /app/ (source: rd-agent/studio).
+  { path: '/', redirect: '/Intro' },
+  { path: '/studio/:rest(.*)*', redirect: () => { window.location.href = '/app/'; return '/Intro'; } },
+  { path: '/Studio', redirect: () => { window.location.href = '/app/'; return '/Intro'; } },
   {
     path: '/Intro',
     name: 'Home',

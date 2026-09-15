@@ -7,10 +7,8 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
-    BacktestResult: typeof import('./src/components/studio/BacktestResult.vue')['default']
     ChartBox: typeof import('./src/components/chartBox.vue')['default']
     Code: typeof import('./src/components/code.vue')['default']
-    CodeViewer: typeof import('./src/components/studio/CodeViewer.vue')['default']
     Development: typeof import('./src/components/development.vue')['default']
     Dialog: typeof import('./src/components/dialog.vue')['default']
     ElInputNumber: typeof import('element-plus/es')['ElInputNumber']
@@ -23,10 +21,8 @@ declare module 'vue' {
     ElTabs: typeof import('element-plus/es')['ElTabs']
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
     ElUpload: typeof import('element-plus/es')['ElUpload']
-    EquityChart: typeof import('./src/components/studio/EquityChart.vue')['default']
     Feedback: typeof import('./src/components/feedback.vue')['default']
     Footer: typeof import('./src/components/footer.vue')['default']
-    InteractionPanel: typeof import('./src/components/studio/InteractionPanel.vue')['default']
     LineChart: typeof import('./src/components/lineChart.vue')['default']
     LineChartOne: typeof import('./src/components/lineChartOne.vue')['default']
     Loading: typeof import('./src/components/loading.vue')['default']
@@ -34,11 +30,8 @@ declare module 'vue' {
     LoopComponent: typeof import('./src/components/loop-component.vue')['default']
     Markdown: typeof import('./src/components/markdown.vue')['default']
     MarkdownToHtml: typeof import('./src/components/markdownToHtml.vue')['default']
-    MetricTable: typeof import('./src/components/studio/MetricTable.vue')['default']
     NavBar: typeof import('./src/components/navBar.vue')['default']
     Research: typeof import('./src/components/research.vue')['default']
-    RoundCard: typeof import('./src/components/studio/RoundCard.vue')['default']
-    RoundDetail: typeof import('./src/components/studio/RoundDetail.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SelectComponent: typeof import('./src/components/select-component.vue')['default']
