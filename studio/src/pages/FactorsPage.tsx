@@ -89,9 +89,6 @@ export function FactorsPage() {
 
   return (
     <PageFrame
-      title="因子库"
-      description={`${all.length} 个因子来自 ${new Set(all.map((f) => f.trace)).size} 个实验 · 单因子 IC 由后端计算并缓存 · 篮内相关性实时计算`}
-      tag={`篮内 ${basket.items.length}`}
       tabs={<TextTabs label="筛选" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部因子" }, { key: "accepted", label: "Agent 接受的轮次" }]} />}
       actions={
         <>

@@ -1,14 +1,9 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Chip } from "@heroui/react";
 import { capitalize, useStudio } from "../hooks/studioContext";
 import { useResizablePanel } from "../hooks/useResizablePanel";
 
 export interface PageFrameProps {
-  title: string;
-  description?: string;
-  tag?: string;
-  titleEnd?: ReactNode;
   tabs?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
@@ -18,9 +13,8 @@ export interface PageFrameProps {
 }
 
 /**
- * The three-layer frame every page shares: an object bar across both columns, then a work column
- * (text tabs + actions, content in the minimal `.mm` style) beside a results panel the user can hide
- * and drag wider.
+ * The frame every page shares: a work column (text tabs + actions, content in the minimal `.mm` style)
+ * beside a results panel the user can hide and drag wider.
  */
 const WORK_MIN = 360;   // the work column never goes below this beside the results column
 const RESULTS_MIN = 280;
@@ -47,16 +41,7 @@ export function PageFrame(p: PageFrameProps) {
   const columns = !layout.resultsOpen || stacked ? "minmax(0,1fr)" : `minmax(${WORK_MIN}px,1fr) ${HANDLE}px ${resultsWidth}px`;
   const rows = stacked ? "minmax(0,1fr) minmax(0,1fr)" : undefined;
   return (
-    <div className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] gap-2">
-      <header className="flex min-h-[52px] min-w-0 items-center gap-3.5 rounded-2xl border border-border bg-surface px-4.5 py-2.5">
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-foreground" title={p.title}>{capitalize(p.title)}</h1>
-          {p.description && <div className="truncate text-[11px] text-muted" title={p.description}>{p.description}</div>}
-        </div>
-        {p.titleEnd}
-        {p.tag && <Chip size="sm" variant="tertiary">{p.tag}</Chip>}
-      </header>
-      <div ref={frame} className="grid min-h-0 min-w-0 gap-0.5" style={{ gridTemplateColumns: columns, gridTemplateRows: rows }}>
+    <div ref={frame} className="grid min-h-0 min-w-0 gap-0.5" style={{ gridTemplateColumns: columns, gridTemplateRows: rows }}>
         <main className="mm flex min-h-0 min-w-0 flex-col rounded-2xl border border-border">
           <div className="mm-head">
             <div>{p.tabs}</div>
@@ -84,7 +69,6 @@ export function PageFrame(p: PageFrameProps) {
             </aside>
           </>
         )}
-      </div>
     </div>
   );
 }

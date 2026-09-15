@@ -47,8 +47,6 @@ export function RunsPage() {
 
   return (
     <PageFrame
-      title="运行记录"
-      description={`${backtests.jobs.length} 次回测 · ${trace.traceIds.length} 个研究实验`}
       tabs={<TextTabs label="类型" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部" }, { key: "research", label: "研究" }, { key: "backtest", label: "回测" }]} />}
       actions={<Btn onClick={() => { trace.loadTraces(); backtests.load(); loadSummaries(); }}>刷新</Btn>}
       resultsTitle={selected ? (selected.kind === "research" ? selected.name : `回测 ${selected.name}`) : "详情"}

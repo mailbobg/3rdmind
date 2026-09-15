@@ -115,9 +115,6 @@ export function BacktestPage() {
 
   return (
     <PageFrame
-      title="组合回测"
-      description={basket.items.length ? `${basket.items.length} 个信号：${basket.items.map((f) => f.name).join("、")} · ${params.start || "?"} → ${params.end || "?"} · ${params.market}` : "信号篮为空，先去因子库挑选"}
-      tag={method === "lgbm" ? "LightGBM" : "排名加权"}
       tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "params", label: "参数设置" }, { key: "source", label: "策略源码" }]} />}
       actions={<Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length} onClick={submit}>{backtests.busy ? "运行中…" : "运行回测"}</Btn>}
       resultsTitle={result ? `回测 ${result.id.slice(0, 8)}` : "回测结果"}

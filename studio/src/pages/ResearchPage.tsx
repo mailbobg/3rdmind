@@ -11,7 +11,7 @@ import { InteractionPanel, RoundDetail } from "../components/RoundViews";
 import { Block, Btn, Empty, Field, FieldGrid, Note, NumberInput, P, SelectInput, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import type { Row } from "../components/minimal";
 import { Section } from "../components/Section";
-import { Hint, MetricGrid, StatusChip } from "../components/widgets";
+import { Hint, MetricGrid } from "../components/widgets";
 
 interface Mode {
   name: string; desc: string; value: string; loops: boolean; duration: boolean; objective: boolean; input?: "reports" | "paper";
@@ -121,12 +121,6 @@ export function ResearchPage() {
 
   const sendToBacktest = (round: RoundView) => { basket.addRound(trace.traceId, Number(round.id), round.factors); navigate("/backtest"); };
   const sendPrediction = (round: RoundView) => { basket.addPrediction(trace.traceId, Number(round.id)); navigate("/backtest"); };
-  const objectDesc = useMemo(() => {
-    if (!trace.traceId) return "启动 RD-Agent 研究，查看假设、代码与评估";
-    const last = trace.rounds[trace.rounds.length - 1];
-    return last?.hypothesis?.hypothesis || trace.traceId;
-  }, [trace.traceId, trace.rounds]);
-  const objectTag = trace.traceId ? scenarioName(trace.traceId) : undefined;
 
   // Rounds of the expanded experiment, nested under its row; the states before the first round are spelled out.
   const roundsBody = () => {
@@ -168,10 +162,6 @@ export function ResearchPage() {
 
   return (
     <PageFrame
-      title={tab === "new" ? "新建研究" : trace.traceId ? shortName(trace.traceId) : "AI 研究"}
-      description={tab === "new" ? `${mode.name} · ${mode.desc}` : objectDesc}
-      tag={tab === "new" ? undefined : objectTag}
-      titleEnd={tab !== "new" && trace.traceId ? <StatusChip status={status} /> : undefined}
       tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "rounds", label: "研究轮次" }, { key: "new", label: "新建研究" }]} />}
       actions={tab === "rounds" && (
         <>
