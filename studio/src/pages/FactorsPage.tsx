@@ -8,7 +8,7 @@ import { download, errorText, shortName, useStudio } from "../hooks/studioContex
 import { PageFrame } from "../components/PageFrame";
 import { Section } from "../components/Section";
 import { Block, Btn, Empty, Link, Note, Num, Table, Tag, TextInput, TextTabs } from "../components/minimal";
-import { CodeView, CorrelationMatrix, Formula, Hint, IcBars, MetricGrid, MetricTable, Mono, Signed } from "../components/widgets";
+import { CodeView, CorrelationMatrix, DataTable, Formula, Hint, IcBars, MetricGrid, MetricTable, Mono, Signed } from "../components/widgets";
 
 const GUIDE = "① 单独有没有用：看 IC / Rank IC 的符号和 ICIR（均值÷波动）；|IC|<0.01 且 ICIR≈0 基本是噪声，IC 为负的回测时权重设 −1 反向。② 放一起合不合适：篮内两两相关 |ρ|<0.5 才互补，高相关只是重复计权。③ 覆盖区间要包住回测期。";
 
@@ -21,6 +21,8 @@ export function FactorsPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [selectedKey, setSelectedKey] = useState("");
+  // The results column answers one of two questions: "what is this factor" or "do these go together".
+  const [view, setView] = useState<"factor" | "basket">("factor");
   const [busyKey, setBusyKey] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzed, setAnalyzed] = useState(0);
@@ -55,7 +57,10 @@ export function FactorsPage() {
     setAnalyzing(true); setAnalyzed(0);
     try { for (const f of pending) { await analyze(f); setAnalyzed((n) => n + 1); } } finally { setAnalyzing(false); }
   }, [pending, analyze]);
-  const select = (f: LibraryFactor) => { setSelectedKey(key(f)); layout.openResults(); if (!f.analysis && busyKey !== key(f)) analyze(f); };
+  const select = (f: LibraryFactor) => { setSelectedKey(key(f)); setView("factor"); layout.openResults(); if (!f.analysis && busyKey !== key(f)) analyze(f); };
+  const check = (f: LibraryFactor) => { basket.toggle(f); setView("basket"); layout.openResults(); };
+  const showBasket = () => { setView("basket"); layout.openResults(); };
+  const library = useMemo(() => new Map(all.map((f) => [key(f), f])), [all]);
 
   const basketFactors = useMemo<FactorRef[]>(() => basket.items.filter((f) => (f.kind || "factor") === "factor").map((f) => ({ trace: f.trace, loop_id: f.loop_id, name: f.name })), [basket.items]);
   const [correlation, setCorrelation] = useState<Corr | null>(null);
@@ -66,12 +71,18 @@ export function FactorsPage() {
     const t = setTimeout(() => studio.factorCorrelation(basketFactors).then(setCorrelation).catch((e) => setCorrelationError(errorText(e))), 400);
     return () => clearTimeout(t);
   }, [basketFactors]);
-  const maxCorr = useMemo(() => {
-    if (!correlation) return 0;
-    let m = 0;
-    correlation.matrix.forEach((row, i) => row.forEach((v, j) => { if (i !== j) m = Math.max(m, Math.abs(v)); }));
-    return m;
+  const strongest = useMemo(() => {
+    if (!correlation) return null;
+    let best = { value: 0, a: "", b: "" };
+    correlation.matrix.forEach((row, i) => row.forEach((v, j) => { if (i < j && Math.abs(v) > Math.abs(best.value)) best = { value: v, a: correlation.names[i], b: correlation.names[j] }; }));
+    return best;
   }, [correlation]);
+  const maxCorr = strongest ? Math.abs(strongest.value) : 0;
+  const basketCoverage = useMemo(() => {
+    const spans = basket.items.map((f) => library.get(key(f))?.analysis?.coverage).filter((c): c is { start: string; end: string } => !!c);
+    if (!spans.length) return null;
+    return { start: spans.reduce((a, c) => (c.start > a ? c.start : a), spans[0].start), end: spans.reduce((a, c) => (c.end < a ? c.end : a), spans[0].end), missing: basket.items.length - spans.length };
+  }, [basket.items, library]);
   const statusLine = basketFactors.length >= 2
     ? (correlation ? `篮内最高相关 ${maxCorr.toFixed(2)}${maxCorr >= 0.7 ? "（有因子重复）" : ""}` : correlationError ? "相关性计算失败" : "计算相关性…") : undefined;
   const decisionTag = (d: boolean | null) => d === true ? <Tag tone="ok">接受</Tag> : d === false ? <Tag tone="bad">拒绝</Tag> : <Tag tone="dim">—</Tag>;
@@ -89,9 +100,11 @@ export function FactorsPage() {
           <Btn onClick={load}>刷新</Btn>
         </>
       }
-      resultsTitle={selected ? selected.name : "因子详情"}
-      resultsActions={selected ? <Btn kind={basket.has(selected) ? undefined : "primary"} onClick={() => basket.toggle(selected)}>{basket.has(selected) ? "移出组合" : "加入组合"}</Btn> : undefined}
-      results={
+      resultsTitle={<TextTabs label="右栏视图" value={view} onChange={(v) => setView(v as "factor" | "basket")} items={[{ key: "factor", label: selected ? selected.name : "因子详情" }, { key: "basket", label: `组合篮 ${basket.items.length}` }]} />}
+      resultsActions={view === "factor"
+        ? (selected ? <Btn kind={basket.has(selected) ? undefined : "primary"} onClick={() => check(selected)}>{basket.has(selected) ? "移出组合" : "加入组合"}</Btn> : undefined)
+        : (basket.items.length ? <><Btn kind="text" onClick={basket.clear}>清空</Btn><Btn kind="primary" onClick={() => navigate("/backtest")}>去组合回测 →</Btn></> : undefined)}
+      results={view === "factor" ? (
         selected ? (
           <div className="flex flex-col gap-3">
             <Section title="这是什么" note={`${selected.trace} · 第 ${selected.loop_id + 1} 轮`}>
@@ -122,16 +135,52 @@ export function FactorsPage() {
               ) : busyKey === key(selected) ? <Hint>分析中，约 10 秒…</Hint>
                 : <div className="flex items-center gap-2"><Hint>尚未计算。</Hint><Btn onClick={() => analyze(selected)}>现在计算</Btn></div>}
             </Section>
-            {correlation && basketFactors.length >= 2 && <Section title="篮内相关性" note={`${basketFactors.length} 个因子`}><CorrelationMatrix data={correlation} /></Section>}
             <Section title="所在轮次的 Qlib 评估" note="与同轮其他因子合并训练的结果"><MetricTable metrics={selected.metrics} /></Section>
             <Section title="factor.py" note={selected.code ? <Btn kind="text" onClick={() => download(`${selected.name}.py`, selected.code!)}>下载代码</Btn> : undefined}>
               {selected.code ? <CodeView code={selected.code} /> : <Hint>这个实验没有记录代码。</Hint>}
             </Section>
           </div>
-        ) : correlation && basketFactors.length >= 2 ? (
-          <Section title="篮内相关性" note={`${basketFactors.length} 个因子`}><CorrelationMatrix data={correlation} /></Section>
-        ) : <Hint>点一行查看因子说明、单因子分析与代码。</Hint>
-      }
+        ) : <Hint>点因子名查看说明、单因子分析与代码。</Hint>
+      ) : (
+        basket.items.length ? (
+          <div className="flex flex-col gap-3">
+            <Section title="篮内信号" note={basketCoverage ? `回测可用区间 ${basketCoverage.start} → ${basketCoverage.end}${basketCoverage.missing ? `（${basketCoverage.missing} 个未分析，未计入）` : ""}` : "覆盖区间未知：先在中间栏计算指标"}>
+              <DataTable label="篮内信号" head={[["信号"], ["来源"], ["IC", "end"], ["Rank IC", "end"], ["覆盖"], [""]]}
+                rows={basket.items.map((f) => {
+                  const a = library.get(key(f))?.analysis;
+                  return {
+                    key: key(f),
+                    cells: [
+                      <Mono key="n">{f.name}</Mono>,
+                      <span key="s" className="text-[11px] text-muted">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>,
+                      <Signed key="ic" value={a?.ic.mean} />,
+                      <Signed key="ric" value={a?.rank_ic.mean} />,
+                      <span key="c" className="whitespace-nowrap text-[11px] text-muted tabular-nums">{a ? `${a.coverage.start.slice(0, 7)} → ${a.coverage.end.slice(0, 7)}` : f.kind === "prediction" ? "模型测试期" : "未分析"}</span>,
+                      <Btn key="x" kind="text" onClick={() => basket.toggle(f)}>移出</Btn>,
+                    ],
+                  };
+                })} />
+            </Section>
+            <Section title="篮内相关性" note={`${basketFactors.length} 个因子${basket.items.length > basketFactors.length ? " · 模型预测不参与" : ""}`}>
+              {basketFactors.length < 2 ? <Hint>至少两个因子才有相关性可看。</Hint>
+                : correlationError ? <Hint>相关性计算失败：{correlationError}</Hint>
+                : !correlation || !strongest ? <Hint>计算中…</Hint>
+                : (
+                  <>
+                    <p className={`m-0 text-xs ${maxCorr >= 0.7 ? "text-danger" : ""}`}>
+                      {maxCorr >= 0.7
+                        ? `${strongest.a} 与 ${strongest.b} 相关 ${strongest.value.toFixed(2)}，基本是同一个信号，同时入选只是重复计权。`
+                        : maxCorr >= 0.5
+                          ? `最高相关 ${strongest.value.toFixed(2)}（${strongest.a} 与 ${strongest.b}），有部分重叠，仍可组合。`
+                          : `最高相关 ${strongest.value.toFixed(2)}（${strongest.a} 与 ${strongest.b}），彼此互补。`}
+                    </p>
+                    <CorrelationMatrix data={correlation} />
+                  </>
+                )}
+            </Section>
+          </div>
+        ) : <Hint>在中间栏勾选因子，这里看它们放在一起合不合适：覆盖区间、两两相关性。</Hint>
+      )}
     >
       {error && <Note tone="bad" actions={<Btn kind="text" onClick={() => setError("")}>关闭</Btn>}>{error}</Note>}
       <Block title="因子" count={rows.length} note={statusLine} noteTone={maxCorr >= 0.7 ? "bad" : "ok"}>
@@ -142,7 +191,7 @@ export function FactorsPage() {
               ...g.items.map((f) => ({
                 key: key(f), selected: key(f) === selectedKey, onClick: () => select(f),
                 cells: [
-                  <input key="c" type="checkbox" className="mm-check" aria-label="加入组合" checked={basket.has(f)} onChange={() => basket.toggle(f)} onClick={(e) => e.stopPropagation()} />,
+                  <input key="c" type="checkbox" className="mm-check" aria-label="加入组合" checked={basket.has(f)} onChange={() => check(f)} onClick={(e) => e.stopPropagation()} />,
                   <span key="n" className="mm-mono mm-name">{f.name}</span>,
                   <span key="r" className="mm-dim">{f.loop_id + 1}</span>,
                   decisionTag(f.decision),
@@ -165,7 +214,7 @@ export function FactorsPage() {
       </Block>
       {basket.items.length > 0 && (
         <div className="mm-sticky mm-row">
-          <span className="mm-name">组合篮 <span className="mm-count mm-mono mm-dim" style={{ fontWeight: 400 }}>{basket.items.length}</span></span>
+          <Link onClick={showBasket}><span className="mm-name" style={{ color: "var(--mm-ink)" }}>组合篮 <span className="mm-count mm-mono mm-dim" style={{ fontWeight: 400 }}>{basket.items.length}</span></span></Link>
           <span className="mm-mono mm-dim" style={{ fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{basket.items.map((f) => f.name).join(" · ")}</span>
           <Btn kind="text" onClick={basket.clear}>清空</Btn>
           <Btn kind="primary" onClick={() => navigate("/backtest")}>去组合回测 →</Btn>

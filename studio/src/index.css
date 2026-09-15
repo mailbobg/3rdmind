@@ -42,7 +42,7 @@ body { margin: 0; background: var(--background); color: var(--foreground); font-
 .mm-body > * + * { margin-top: 28px; }
 
 .mm-tabs { display: flex; gap: 18px; }
-.mm-tab { padding: 6px 0; font-size: 13px; color: var(--mm-muted); background: none; border: 0; border-bottom: 1.5px solid transparent; border-radius: 0; cursor: pointer; }
+.mm-tab { padding: 6px 0; font-size: 13px; font-weight: 400; color: var(--mm-muted); background: none; border: 0; border-bottom: 1.5px solid transparent; border-radius: 0; cursor: pointer; }
 .mm-tab:hover { color: var(--mm-ink); }
 .mm-tab[aria-selected="true"] { color: var(--mm-ink); font-weight: 600; border-bottom-color: var(--mm-ink); }
 
