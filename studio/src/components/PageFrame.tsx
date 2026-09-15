@@ -25,8 +25,8 @@ export function PageFrame(p: PageFrameProps) {
   const { layout } = useStudio();
   const panel = useResizablePanel();
   return (
-    <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2">
-      <header className="flex min-h-[52px] items-center gap-3.5 rounded-2xl border border-border bg-surface px-4.5 py-2.5">
+    <div className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] gap-2">
+      <header className="flex min-h-[52px] min-w-0 items-center gap-3.5 rounded-2xl border border-border bg-surface px-4.5 py-2.5">
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-foreground" title={p.title}>{capitalize(p.title)}</h1>
           {p.description && <div className="truncate text-[11px] text-muted" title={p.description}>{p.description}</div>}
@@ -34,7 +34,7 @@ export function PageFrame(p: PageFrameProps) {
         {p.titleEnd}
         {p.tag && <Chip size="sm" variant="tertiary">{p.tag}</Chip>}
       </header>
-      <div className="grid min-h-0 gap-0.5" style={{ gridTemplateColumns: layout.resultsOpen ? `minmax(360px,1fr) 6px ${panel.width}px` : "minmax(360px,1fr)" }}>
+      <div className="grid min-h-0 min-w-0 gap-0.5" style={{ gridTemplateColumns: layout.resultsOpen ? `minmax(360px,1fr) 6px ${panel.width}px` : "minmax(360px,1fr)" }}>
         <main className="mm flex min-h-0 min-w-0 flex-col rounded-2xl border border-border">
           <div className="mm-head">
             <div>{p.tabs}</div>

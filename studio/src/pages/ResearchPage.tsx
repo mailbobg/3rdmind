@@ -101,7 +101,7 @@ export function ResearchPage() {
       tag={objectTag}
       titleEnd={trace.traceId ? <StatusChip status={status} /> : undefined}
       tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "rounds", label: "研究轮次" }, { key: "new", label: "新建研究" }]} />}
-      actions={
+      actions={tab === "rounds" && (
         <>
           <SelectInput ariaLabel="实验" placeholder="选择实验" className="w-56" value={trace.traceId} onChange={pick}
             options={trace.traceIds.map((id) => ({ value: id, label: shortName(id), group: MODES.find((m) => id.startsWith(m.value + "/"))?.name || id.split("/")[0] }))} />
@@ -109,7 +109,7 @@ export function ResearchPage() {
           {trace.traceId && <Btn onClick={() => window.open(studio.stdoutUrl(trace.traceId), "_blank")}>日志</Btn>}
           {trace.traceId && <Btn kind="text" onClick={() => pick("")}>取消选择</Btn>}
         </>
-      }
+      )}
       resultsTitle={activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情"}
       resultsActions={activeRound ? (
         <>

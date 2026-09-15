@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ChangeEvent, MouseEvent, ReactNode } from "react";
 
 /**
@@ -53,18 +54,69 @@ export function NumberInput({ value, onChange, min, max, step, disabled, classNa
 
 export interface Option<T extends string> { value: T; label: string; group?: string }
 
-/** Native select; options that carry a `group` are shown under an optgroup of that name. */
+/**
+ * Select with its own list: the OS popup of a native <select> renders outside the page's styling (and
+ * unreliably inside the desktop app), so the trigger is a button and the options are a fixed-position
+ * list portalled to <body>, with optional group headings. Escape, outside click, scroll and resize close it.
+ */
 export function SelectInput<T extends string>({ value, onChange, options, placeholder, className, ariaLabel }:
   { value: T | ""; onChange: (v: T) => void; options: Option<T>[]; placeholder?: string; className?: string; ariaLabel?: string }) {
-  const groups = new Map<string, Option<T>[]>();
-  const plain: Option<T>[] = [];
-  for (const o of options) { if (o.group) { if (!groups.has(o.group)) groups.set(o.group, []); groups.get(o.group)!.push(o); } else plain.push(o); }
+  const [open, setOpen] = useState(false);
+  const [box, setBox] = useState<{ top: number; left: number; width: number; below: number } | null>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const current = options.find((o) => o.value === value);
+
+  useLayoutEffect(() => {
+    if (!open || !trigger.current) return;
+    const r = trigger.current.getBoundingClientRect();
+    setBox({ top: r.bottom + 4, left: r.left, width: r.width, below: window.innerHeight - r.bottom - 12 });
+  }, [open]);
+  useLayoutEffect(() => { if (open && box) list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" }); }, [open, box]);
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    const inside = (t: EventTarget | null) => !!t && (trigger.current?.contains(t as Node) || list.current?.contains(t as Node));
+    const onPointer = (e: PointerEvent) => { if (!inside(e.target)) close(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { close(); trigger.current?.focus(); } };
+    // The list's own scrolling (including the scrollIntoView on open) must not close it; page scrolling does.
+    const onScroll = (e: Event) => { if (!inside(e.target)) close(); };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", close);
+    document.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", close);
+      document.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open]);
+
+  const pick = (o: Option<T>) => { setOpen(false); if (o.value !== value) onChange(o.value); trigger.current?.focus(); };
+  // Options keep their order; a group heading is emitted where a new group starts.
+  const items: ReactNode[] = [];
+  let lastGroup: string | undefined;
+  for (const o of options) {
+    if (o.group && o.group !== lastGroup) items.push(<div key={`g:${o.group}`} className="mm-select__group">{o.group}</div>);
+    lastGroup = o.group;
+    items.push(
+      <div key={o.value} role="option" aria-selected={o.value === value} className="mm-select__option" onClick={() => pick(o)}>{o.label}</div>,
+    );
+  }
   return (
-    <select className={`mm-control${className ? ` ${className}` : ""}`} value={value} aria-label={ariaLabel} onChange={(e) => e.target.value && onChange(e.target.value as T)}>
-      {placeholder && <option value="">{placeholder}</option>}
-      {plain.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      {[...groups.entries()].map(([g, items]) => <optgroup key={g} label={g}>{items.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</optgroup>)}
-    </select>
+    <>
+      <button ref={trigger} type="button" className={`mm-control mm-select${className ? ` ${className}` : ""}`} aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}>
+        <span className={current ? undefined : "mm-dim"}>{current ? current.label : placeholder || ""}</span>
+      </button>
+      {open && box && createPortal(
+        <div ref={list} role="listbox" aria-label={ariaLabel} className="mm-select__list" style={{ top: box.top, left: box.left, minWidth: box.width, maxHeight: Math.max(120, Math.min(360, box.below)) }}>
+          {items.length ? items : <div className="mm-select__group">没有可选项</div>}
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
