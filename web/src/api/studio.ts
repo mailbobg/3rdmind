@@ -13,9 +13,20 @@ export interface Round { loop_id: number; factors: string[]; metrics: Record<str
 export type SignalKind = "factor" | "prediction";
 /** One signal in the portfolio: a research factor's result.h5, or a round's Qlib model prediction (pred.pkl). */
 export interface FactorWeight { name: string; weight: number; trace: string; loop_id: number; kind?: SignalKind }
-export interface LibraryFactor {
-  trace: string; loop_id: number; name: string; metrics: Record<string, number>; code: string | null;
+export interface IcStats { mean: number; std: number; ir: number | null; positive_ratio: number }
+/** Single-factor analysis: daily IC of the factor against next-day return, computed server-side and cached. */
+export interface FactorAnalysis {
+  coverage: { start: string; end: string }; days: number; rows: number;
+  ic: IcStats; rank_ic: IcStats; monthly: { month: string; ic: number | null; rank_ic: number | null }[];
 }
+export interface LibraryFactor {
+  trace: string; loop_id: number; name: string;
+  description: string | null; formulation: string | null; variables: Record<string, string> | null;
+  hypothesis: string | null; decision: boolean | null; reason: string | null;
+  metrics: Record<string, number>; code: string | null; analysis: FactorAnalysis | null;
+}
+export interface FactorRef { trace: string; loop_id: number; name: string }
+export interface CorrelationMatrix { names: string[]; matrix: number[][]; days: number }
 export interface LgbmParams {
   learning_rate: number; num_leaves: number; max_depth: number; colsample_bytree: number; subsample: number;
   subsample_freq: number; lambda_l1: number; lambda_l2: number; n_estimators: number; early_stopping_rounds: number;
@@ -98,6 +109,9 @@ export const stdoutUrl = (id: string) => `/stdout?${new URLSearchParams({ id })}
 export const environment = () => api<Environment>("/studio/environment");
 export const strategySource = () => api<{ name: string; code: string }>("/studio/strategy");
 export const factorLibrary = () => api<LibraryFactor[]>("/studio/factors");
+export const factorAnalysis = (ref: FactorRef, market = "csi300") =>
+  api<FactorAnalysis>(`/studio/factors/analysis?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name, market })}`);
+export const factorCorrelation = (factors: FactorRef[]) => api<CorrelationMatrix>("/studio/factors/correlation", { factors });
 export const rounds = (trace: string) => api<Round[]>(`/studio/rounds?${new URLSearchParams({ trace })}`);
 export const backtests = () => api<BacktestSummary[]>("/studio/backtests");
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);

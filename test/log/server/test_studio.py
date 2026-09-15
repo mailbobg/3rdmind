@@ -389,11 +389,18 @@ def test_factor_library_lists_factors_with_code(studio_client, tmp_path: Path) -
     task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
     task.messages.insert(1, {"tag": "evolving.codes", "loop_id": "0", "timestamp": "t", "evo_id": 0,
                              "content": [{"evo_id": 0, "target_task_name": "STR_5", "workspace": {"factor.py": "print(5)"}}]})
+    task.messages.insert(1, {"tag": "research.tasks", "loop_id": "0", "timestamp": "t",
+                             "content": [{"name": "STR_5", "description": "Short-term reversal", "formulation": "-r_5",
+                                          "variables": {"$close": "close"}}]})
+    task.messages.append({"tag": "feedback.hypothesis_feedback", "loop_id": "0", "timestamp": "t",
+                          "content": {"decision": True, "reason": "improves return"}})
     response = studio_client.get("/studio/factors")
     assert response.status_code == 200
     assert response.get_json() == [{
         "trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5",
-        "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)",
+        "description": "Short-term reversal", "formulation": "-r_5", "variables": {"$close": "close"},
+        "hypothesis": "h", "decision": True, "reason": "improves return",
+        "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)", "analysis": None,
     }]
 
 
@@ -599,3 +606,60 @@ def test_window_coverage_names_the_missing_signal() -> None:
     require_window_coverage(features, [str(days[5].date()), str(days[9].date())], "training")
     with pytest.raises(ValueError, match="pred \\(2024-01-08 to 2024-01-12\\)"):
         require_window_coverage(features, [str(days[0].date()), str(days[4].date())], "training")
+
+
+@pytest.mark.offline
+def test_factor_library_borrows_task_description_from_another_trace(studio_client, tmp_path: Path) -> None:
+    other = server._get_or_create_task(str(tmp_path / "traces" / "Finance Data Building/original"))
+    other.messages = [{"tag": "research.hypothesis", "loop_id": "0", "timestamp": "t", "content": {"hypothesis": "original idea"}},
+                      {"tag": "research.tasks", "loop_id": "0", "timestamp": "t",
+                       "content": [{"name": "STR_5", "description": "from the original run", "formulation": None, "variables": None}]}]
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages = [m for m in task.messages if m["tag"] != "research.hypothesis"]
+    entry = next(e for e in studio_client.get("/studio/factors").get_json() if e["trace"] == "Finance Data Building/demo")
+    assert entry["description"] == "from the original run"
+    assert entry["hypothesis"] == "original idea"
+
+
+@pytest.mark.offline
+def test_factor_correlation_ranks_and_averages(studio_client, tmp_path: Path) -> None:
+    from rdagent.log.server.studio import factor_correlation
+
+    days = pd.bdate_range("2025-01-01", periods=5)
+    stocks = ["A", "B", "C", "D"]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    base = pd.Series(range(len(index)), index=index, dtype=float)
+    (tmp_path / "ws" / "f1").mkdir(parents=True)
+    (tmp_path / "ws" / "f2").mkdir(parents=True)
+    base.to_frame("x").to_hdf(tmp_path / "ws" / "f1" / "result.h5", key="data")
+    (-base).to_frame("y").to_hdf(tmp_path / "ws" / "f2" / "result.h5", key="data")
+    result = factor_correlation([("f1", tmp_path / "ws" / "f1"), ("f2", tmp_path / "ws" / "f2")])
+    assert result["names"] == ["f1", "f2"] and result["days"] == 5
+    assert result["matrix"][0][0] == pytest.approx(1.0) and result["matrix"][0][1] == pytest.approx(-1.0)
+
+
+@pytest.mark.offline
+def test_cached_analysis_is_invalidated_when_result_changes(tmp_path: Path) -> None:
+    from rdagent.log.server.studio import analysis_cache_path, cached_analysis
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "result.h5").write_bytes(b"x")
+    analysis_cache_path(ws, "csi300").write_text(json.dumps({"status": "completed", "source_mtime": (ws / "result.h5").stat().st_mtime, "days": 3}))
+    assert cached_analysis(ws, "csi300")["days"] == 3
+    analysis_cache_path(ws, "csi300").write_text(json.dumps({"status": "completed", "source_mtime": 0, "days": 3}))
+    assert cached_analysis(ws, "csi300") is None
+
+
+@pytest.mark.offline
+def test_analysis_summary_on_synthetic_ic() -> None:
+    from rdagent.log.server.studio_analysis import daily_ic, summarize
+
+    days = pd.bdate_range("2025-01-01", periods=30)
+    stocks = [f"S{i}" for i in range(20)]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    factor = pd.Series([i % 20 for i in range(len(index))], index=index, dtype=float)
+    ic, rank_ic = daily_ic(factor, factor * 2)
+    summary = summarize(ic, rank_ic, days[0], days[-1], len(index))
+    assert summary["days"] == 30 and summary["ic"]["mean"] == pytest.approx(1.0) and summary["rank_ic"]["positive_ratio"] == 1.0
+    assert summary["monthly"][0]["month"] == "2025-01" and summary["coverage"] == {"start": "2025-01-01", "end": "2025-02-11"}

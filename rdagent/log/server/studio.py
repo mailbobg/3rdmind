@@ -110,6 +110,59 @@ def factor_code(messages, loop_id, name):
     return code
 
 
+def round_context(messages):
+    """Per loop_id: the agent's hypothesis, its verdict, and each task's description/formulation/variables."""
+    context = {}
+    for message in messages:
+        try:
+            loop_id = normalize_loop_id(message.get("loop_id"))
+        except ValueError:
+            continue
+        entry = context.setdefault(loop_id, {"hypothesis": None, "decision": None, "reason": None, "tasks": {}})
+        tag, content = message.get("tag"), message.get("content") or {}
+        if tag == "research.hypothesis" and isinstance(content, dict):
+            entry["hypothesis"] = content.get("hypothesis")
+        elif tag == "feedback.hypothesis_feedback" and isinstance(content, dict):
+            entry["decision"] = content.get("decision")
+            entry["reason"] = content.get("reason") or content.get("hypothesis_evaluation")
+        elif tag == "research.tasks":
+            for task in content if isinstance(content, list) else [content]:
+                if isinstance(task, dict) and task.get("name"):
+                    entry["tasks"][task["name"]] = {k: task.get(k) for k in ("description", "formulation", "variables")}
+    return context
+
+
+def task_fallback(registry, name):
+    """A resumed run replays no task/hypothesis events; borrow them from any loaded trace that proposed ``name``.
+
+    Returns the task detail plus the hypothesis of the round that proposed it (under "hypothesis").
+    """
+    for task in registry.values():
+        for entry in round_context(task.messages).values():
+            if name in entry["tasks"] and entry["tasks"][name].get("description"):
+                return {**entry["tasks"][name], "hypothesis": entry["hypothesis"]}
+    return {}
+
+
+def analysis_cache_path(workspace, market):
+    return Path(workspace) / f"studio_analysis.{market}.json"
+
+
+def cached_analysis(workspace, market):
+    """The stored single-factor analysis, or None when absent or older than result.h5."""
+    path = analysis_cache_path(workspace, market)
+    source = Path(workspace) / "result.h5"
+    if not path.is_file() or not source.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except ValueError:
+        return None
+    if data.get("source_mtime") != source.stat().st_mtime or data.get("status") != "completed":
+        return None
+    return data
+
+
 def factor_library(registry, log_folder):
     """Every factor with a workspace across all loaded traces, newest trace first."""
     root = Path(log_folder)
@@ -119,19 +172,78 @@ def factor_library(registry, log_folder):
             trace = Path(key).relative_to(root).as_posix()
         except ValueError:
             continue
+        context = round_context(task.messages)
         for round_ in metric_rounds(task.messages):
+            round_ctx = context.get(round_["loop_id"], {"hypothesis": None, "decision": None, "reason": None, "tasks": {}})
             for name in round_["factors"]:
                 code = factor_code(task.messages, round_["loop_id"], name)
-                if code is None:
+                workspace = Path(round_["paths"].get(name, "")).resolve()
+                if code is None and WORKSPACE_ROOT in workspace.parents and (workspace / "factor.py").is_file():
                     # A resumed run replays no code events; fall back to the factor.py left in its workspace.
-                    source = Path(round_["paths"].get(name, "")).resolve() / "factor.py"
-                    if WORKSPACE_ROOT in source.parents and source.is_file():
-                        code = source.read_text(errors="replace")
+                    code = (workspace / "factor.py").read_text(errors="replace")
+                detail = round_ctx["tasks"].get(name) or task_fallback(registry, name)
                 entries.append({
                     "trace": trace, "loop_id": round_["loop_id"], "name": name,
+                    "description": detail.get("description"), "formulation": detail.get("formulation"),
+                    "variables": detail.get("variables"),
+                    "hypothesis": round_ctx["hypothesis"] or detail.get("hypothesis"),
+                    "decision": round_ctx["decision"], "reason": round_ctx["reason"],
                     "metrics": round_["metrics"], "code": code,
+                    "analysis": cached_analysis(workspace, "csi300") if WORKSPACE_ROOT in workspace.parents else None,
                 })
     return entries
+
+
+def factor_workspace(trace, loop_id, name):
+    """Resolve one library factor to its workspace path, with the same guards as a backtest request."""
+    resolved = resolve_factor_paths(trace, loop_id, [{"name": name, "weight": 1}])
+    return Path(resolved[0]["path"])
+
+
+def analyze_factor(workspace, market):
+    """Run (or reuse) the single-factor analysis for ``workspace`` inside ``market``."""
+    cached = cached_analysis(workspace, market)
+    if cached is not None:
+        return cached
+    provider = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
+    output = analysis_cache_path(workspace, market)
+    completed = subprocess.run(
+        [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_analysis.py")),
+         str(workspace), provider, market, str(output)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if not output.is_file():
+        raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "analysis produced no output")
+    data = json.loads(output.read_text())
+    if data.get("status") != "completed":
+        raise RuntimeError(data.get("error") or "analysis failed")
+    data["source_mtime"] = (Path(workspace) / "result.h5").stat().st_mtime
+    output.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False))
+    return data
+
+
+def factor_correlation(workspaces):
+    """Mean daily cross-sectional Spearman correlation between factors, over the dates they all share."""
+    import pandas as pd
+
+    frames = []
+    for name, workspace in workspaces:
+        frame = pd.read_hdf(Path(workspace) / "result.h5")
+        if isinstance(frame, pd.Series):
+            frame = frame.to_frame()
+        frames.append(frame.iloc[:, 0].rename(name))
+    joined = pd.concat(frames, axis=1).dropna()
+    if joined.empty:
+        raise ValueError("The selected factors share no observations")
+    ranks = joined.groupby(level="datetime").rank(pct=True)
+    days = ranks.index.get_level_values("datetime").unique()
+    # Averaging per-day correlation matrices is O(days); sampling every k-th day keeps large baskets responsive.
+    step = max(1, len(days) // 250)
+    sampled = ranks[ranks.index.get_level_values("datetime").isin(days[::step])]
+    matrix = sampled.groupby(level="datetime").corr().groupby(level=1).mean()
+    names = [name for name, _ in workspaces]
+    matrix = matrix.loc[names, names]
+    return {"names": names, "matrix": [[float(v) for v in row] for row in matrix.values], "days": int(len(days))}
 
 
 def resolve_factor_paths(default_trace, default_loop_id, factors):
@@ -215,6 +327,39 @@ def rounds():
 @studio.get("/factors")
 def factors():
     return jsonify(factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"]))
+
+
+@studio.get("/factors/analysis")
+def factor_analysis():
+    market = request.args.get("market", "csi300")
+    if market not in ("csi300", "csi500", "all"):
+        return jsonify({"error": "Unsupported instrument universe"}), 400
+    try:
+        workspace = factor_workspace(request.args.get("trace", ""), request.args.get("loop_id"), request.args.get("name", ""))
+        return jsonify(analyze_factor(workspace, market))
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@studio.post("/factors/correlation")
+def factors_correlation():
+    body = request.get_json() or {}
+    try:
+        refs = body.get("factors") or []
+        if not isinstance(refs, list) or not 2 <= len(refs) <= 20:
+            raise ValueError("Select 2 to 20 factors")
+        workspaces = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                raise ValueError("Each factor must be an object")
+            workspaces.append((ref.get("name"), factor_workspace(ref.get("trace", ""), ref.get("loop_id"), ref.get("name", ""))))
+        if len({name for name, _ in workspaces}) != len(workspaces):
+            raise ValueError("Factor names in a basket must be unique")
+        return jsonify(factor_correlation(workspaces))
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
 
 
 @studio.route("/backtests", methods=["GET", "POST"])
