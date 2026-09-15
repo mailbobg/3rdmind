@@ -53,11 +53,19 @@
 .studio .workspace-head h1, .studio .result-head h2 { margin: 4px 0 0; font-size: 18px; font-weight: 600; }
 .studio .eyebrow { font-size: 10px; letter-spacing: 1.2px; color: var(--muted); text-transform: uppercase; }
 .studio .workspace-body, .studio .result-scroll { overflow: auto; padding: 18px 22px; flex: 1; min-height: 0; }
+/* The middle column takes whatever the screen leaves, which on a wide monitor with the results column hidden is
+   1600px+. Cap the readable content and center it so forms and tables keep a sensible shape; the header and the
+   sticky basket bar share the same measure so everything lines up. */
+.studio .workspace { --measure: 1240px; }
+.studio .workspace-body > * { max-width: var(--measure); margin-left: auto; margin-right: auto; }
+.studio .workspace-head { padding-left: max(22px, calc((100% - var(--measure)) / 2)); padding-right: max(22px, calc((100% - var(--measure)) / 2)); }
+.studio .basket-bar { padding-left: max(22px, calc((100% - var(--measure)) / 2)); padding-right: max(22px, calc((100% - var(--measure)) / 2)); }
 .studio .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .studio .toolbar label { flex-direction: row; align-items: center; gap: 6px; }
 
 /* ---- shared primitives ---- */
-.studio .surface { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; background: var(--paper); }
+.studio .surface { border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin-bottom: 14px; background: var(--paper); }
+.studio .surface p { max-width: 82ch; }
 .studio .surface.selectable { cursor: pointer; }
 .studio .surface.selectable:hover { border-color: #c9cfc3; }
 .studio .surface.selected { border-color: var(--green); box-shadow: inset 3px 0 0 var(--green); }
@@ -66,7 +74,7 @@
 .studio .section-heading span { color: var(--muted); font-size: 12px; }
 .studio .notice { padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; background: #fbf1ef; color: var(--danger); display: flex; gap: 10px; align-items: center; }
 .studio .notice.info { background: #eef4f1; color: var(--green); }
-.studio .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px 14px; }
+.studio .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px 14px; max-width: 960px; }
 .studio label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 .studio input, .studio select, .studio textarea { font: inherit; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: var(--paper); }
 .studio input:focus-visible, .studio select:focus-visible, .studio textarea:focus-visible, .studio button:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
@@ -104,3 +112,12 @@
 .studio .result-head select, .studio .workspace-head select { max-width: 240px; text-overflow: ellipsis; }
 .studio .workspace-head > div:first-child, .studio .result-head > div:first-child { min-width: 0; }
 .studio .workspace-head h1, .studio .result-head h2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* When the results column is open on a smaller screen the middle column can drop to ~650px; hide the
+   secondary text in wide tables so the numbers stay on one line. */
+.studio .workspace { container-type: inline-size; }
+@container (max-width: 760px) {
+  .studio .workspace .desc { display: none !important; }
+  .studio .workspace .workspace-head h1 { font-size: 16px; }
+  .studio .workspace .cards { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+}

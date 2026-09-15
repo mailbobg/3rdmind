@@ -265,7 +265,7 @@ onMounted(load);
 .guide ol { margin: 6px 0 8px; padding-left: 20px; }
 .guide li { margin: 4px 0; }
 .check { flex-direction: row; align-items: center; gap: 6px; color: var(--ink); white-space: nowrap; }
-.library .name-cell { max-width: 420px; }
+.library .name-cell { max-width: 640px; }
 .library .desc { color: var(--muted); font-size: 11px; line-height: 1.5; margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .nowrap { white-space: nowrap; }
 .basket-bar { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 12px 22px; border-top: 1px solid var(--line); background: var(--paper); border-radius: 0 0 16px 16px; }
