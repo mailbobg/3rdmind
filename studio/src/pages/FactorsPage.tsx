@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Chip, Input, Tooltip } from "@heroui/react";
+import { Button, Chip } from "@heroui/react";
 import * as studio from "../api/studio";
 import type { CorrelationMatrix as Corr, FactorRef, LibraryFactor } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
 import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
-import { Panel } from "../components/Panel";
 import { Section } from "../components/Section";
-import { ListRow, Stat, TabBar } from "../components/fields";
+import { Block, Btn, Empty, Link, Note, Num, Table, Tag, TextInput, TextTabs } from "../components/minimal";
 import { CodeView, CorrelationMatrix, Formula, Hint, IcBars, MetricGrid, MetricTable, Mono, Signed } from "../components/widgets";
 
 const GUIDE = "① 单独有没有用：看 IC / Rank IC 的符号和 ICIR（均值÷波动）；|IC|<0.01 且 ICIR≈0 基本是噪声，IC 为负的回测时权重设 −1 反向。② 放一起合不合适：篮内两两相关 |ρ|<0.5 才互补，高相关只是重复计权。③ 覆盖区间要包住回测期。";
@@ -75,19 +74,19 @@ export function FactorsPage() {
   }, [correlation]);
   const statusLine = basketFactors.length >= 2
     ? (correlation ? `篮内最高相关 ${maxCorr.toFixed(2)}${maxCorr >= 0.7 ? "（有因子重复）" : ""}` : correlationError ? "相关性计算失败" : "计算相关性…") : undefined;
-  const decisionChip = (d: boolean | null) => d === true ? <Chip size="sm" variant="soft" color="success">接受</Chip> : d === false ? <Chip size="sm" variant="soft" color="danger">拒绝</Chip> : <Chip size="sm" variant="soft">—</Chip>;
+  const decisionTag = (d: boolean | null) => d === true ? <Tag tone="ok">接受</Tag> : d === false ? <Tag tone="bad">拒绝</Tag> : <Tag tone="dim">—</Tag>;
 
   return (
     <PageFrame
       title="因子库"
       description={`${all.length} 个因子来自 ${new Set(all.map((f) => f.trace)).size} 个实验 · 单因子 IC 由后端计算并缓存 · 篮内相关性实时计算`}
       tag={`篮内 ${basket.items.length}`}
-      tabs={<TabBar label="筛选" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部因子" }, { key: "accepted", label: "agent 接受的轮次" }]} />}
+      tabs={<TextTabs label="筛选" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部因子" }, { key: "accepted", label: "agent 接受的轮次" }]} />}
       actions={
         <>
-          <Input aria-label="搜索因子" placeholder="搜索因子或实验" value={query} onChange={(e) => setQuery(e.target.value)} className="w-44" />
-          <Button size="sm" variant="secondary" isDisabled={analyzing || !pending.length} onPress={analyzeAll}>{analyzing ? `分析中 ${analyzed}/${pending.length}…` : `分析全部（${pending.length}）`}</Button>
-          <Button size="sm" variant="secondary" onPress={load}>刷新</Button>
+          <TextInput type="search" ariaLabel="搜索因子" placeholder="搜索因子或实验" value={query} onChange={setQuery} className="w-44" />
+          <Btn disabled={analyzing || !pending.length} onClick={analyzeAll}>{analyzing ? `分析中 ${analyzed}/${pending.length}…` : `分析全部（${pending.length}）`}</Btn>
+          <Btn onClick={load}>刷新</Btn>
         </>
       }
       resultsTitle={selected ? selected.name : "因子详情"}
@@ -134,55 +133,44 @@ export function FactorsPage() {
         ) : <Hint>点一行查看因子说明、单因子分析与代码。</Hint>
       }
     >
-      {error && (
-        <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{error}</Alert.Title></Alert.Content>
-          <Button size="sm" variant="ghost" onPress={() => setError("")}>关闭</Button></Alert>
+      {error && <Note tone="bad" actions={<Btn kind="text" onClick={() => setError("")}>关闭</Btn>}>{error}</Note>}
+      <Block title="因子" count={rows.length} note={statusLine} noteTone={maxCorr >= 0.7 ? "bad" : "ok"}>
+        {rows.length ? (
+          <Table label="因子库" columns={[{ label: "", width: 34 }, { label: "因子" }, { label: "轮", num: true, width: 44, optional: true }, { label: "判定", width: 56, optional: true }, { label: "IC", num: true, width: 82 }, { label: "Rank IC", num: true, width: 82 }, { label: "ICIR", num: true, width: 66, optional: true }, { label: "覆盖", width: 156, optional: true }]}
+            rows={groups.flatMap((g) => [
+              { key: `g:${g.trace}`, group: true, cells: [<span key="g">{shortName(g.trace)}<span className="mm-dim">{g.trace.split("/")[0]} · {g.items.length} 个因子</span></span>] },
+              ...g.items.map((f) => ({
+                key: key(f), selected: key(f) === selectedKey, onClick: () => select(f),
+                cells: [
+                  <input key="c" type="checkbox" className="mm-check" aria-label="加入组合" checked={basket.has(f)} onChange={() => basket.toggle(f)} onClick={(e) => e.stopPropagation()} />,
+                  <span key="n" className="mm-mono mm-name">{f.name}</span>,
+                  <span key="r" className="mm-dim">{f.loop_id + 1}</span>,
+                  decisionTag(f.decision),
+                  <Num key="ic" value={f.analysis?.ic.mean} />,
+                  <Num key="ric" value={f.analysis?.rank_ic.mean} />,
+                  f.analysis?.ic.ir == null ? <span key="ir" className="mm-dim">—</span> : f.analysis.ic.ir.toFixed(2),
+                  <span key="cov" className="mm-mono mm-dim">
+                    {f.analysis ? `${f.analysis.coverage.start.slice(0, 7)} → ${f.analysis.coverage.end.slice(0, 7)}` : busyKey === key(f) ? "分析中…" : <Link onClick={(e) => { e.stopPropagation(); analyze(f); }}>计算指标</Link>}
+                  </span>,
+                ],
+              })),
+            ])} />
+        ) : !loading ? <Empty>还没有带因子产物的研究轮次。先在「AI 研究」里跑一次因子研发。</Empty> : <Empty>加载中…</Empty>}
+        {rows.length > 0 && !basket.items.length && (
+          <details className="mm-details" style={{ marginTop: 12 }}>
+            <summary>勾选进组合篮；点名字在右栏看描述、公式、单因子分析与代码。怎么挑因子？</summary>
+            <p className="mm-p">{GUIDE}</p>
+          </details>
+        )}
+      </Block>
+      {basket.items.length > 0 && (
+        <div className="mm-sticky mm-row">
+          <span className="mm-name">组合篮 <span className="mm-count mm-mono mm-dim" style={{ fontWeight: 400 }}>{basket.items.length}</span></span>
+          <span className="mm-mono mm-dim" style={{ fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{basket.items.map((f) => f.name).join(" · ")}</span>
+          <Btn kind="text" onClick={basket.clear}>清空</Btn>
+          <Btn kind="primary" onClick={() => navigate("/backtest")}>去组合回测 →</Btn>
+        </div>
       )}
-      <Panel grow flush
-        title={<>因子 <span className="font-normal text-muted">{rows.length} 个</span></>}
-        status={statusLine} statusTone={maxCorr >= 0.7 ? "bad" : "ok"}
-        footer={basket.items.length ? (
-          <div className="flex w-full flex-wrap items-center gap-2">
-            <span className="font-semibold text-foreground">组合篮 · {basket.items.length}</span>
-            {basket.items.map((f) => <Chip key={key(f)} size="sm" variant="soft">{f.name}</Chip>)}
-            <span className="ml-auto flex gap-2">
-              <Button size="sm" variant="ghost" onPress={basket.clear}>清空</Button>
-              <Button size="sm" onPress={() => navigate("/backtest")}>去组合回测 →</Button>
-            </span>
-          </div>
-        ) : (
-          <div className="flex w-full items-center gap-2">
-            <Tooltip delay={200}><Tooltip.Trigger><button className="text-accent underline">怎么挑因子</button></Tooltip.Trigger><Tooltip.Content className="max-w-md"><Tooltip.Arrow />{GUIDE}</Tooltip.Content></Tooltip>
-            <span>勾选进组合篮；点名字在右栏看描述、公式、单因子分析与代码。</span>
-          </div>
-        )}>
-        {rows.length ? groups.map((g) => (
-          <div key={g.trace}>
-            <div className="flex items-center justify-between border-b border-border bg-surface-secondary px-3 py-1.5 text-[12px]">
-              <span className="font-medium">{shortName(g.trace)}</span>
-              <span className="text-muted">{g.trace.split("/")[0]} · {g.items.length} 个因子</span>
-            </div>
-            {g.items.map((f) => (
-              <ListRow key={key(f)} selected={key(f) === selectedKey} onSelect={() => select(f)}
-                leading={<input type="checkbox" aria-label="加入组合" checked={basket.has(f)} onChange={() => basket.toggle(f)} className="size-4 cursor-pointer accent-[var(--accent)]" />}
-                trailing={<>
-                  <span className="w-12">{decisionChip(f.decision)}</span>
-                  <Stat label="IC">{f.analysis ? <Signed value={f.analysis.ic.mean} /> : "—"}</Stat>
-                  <Stat label="Rank IC">{f.analysis ? <Signed value={f.analysis.rank_ic.mean} /> : "—"}</Stat>
-                  <Stat label="ICIR" width={56}>{f.analysis?.ic.ir == null ? "—" : f.analysis.ic.ir.toFixed(2)}</Stat>
-                  <span className="w-[150px] text-right text-[12px] text-muted">
-                    {f.analysis ? `${f.analysis.coverage.start.slice(0, 7)} → ${f.analysis.coverage.end.slice(0, 7)}` : busyKey === key(f) ? "分析中…" : <button className="text-accent underline" onClick={(e) => { e.stopPropagation(); analyze(f); }}>计算指标</button>}
-                  </span>
-                </>}>
-                <div className="flex items-center gap-2">
-                  <Mono>{f.name}</Mono>
-                  <span className="text-[12px] text-muted">第 {f.loop_id + 1} 轮</span>
-                </div>
-              </ListRow>
-            ))}
-          </div>
-        )) : !loading ? <div className="p-6 text-center text-xs text-muted">还没有带因子产物的研究轮次。先在「AI 研究」里跑一次因子研发。</div> : null}
-      </Panel>
     </PageFrame>
   );
 }

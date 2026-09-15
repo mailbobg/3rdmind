@@ -1,14 +1,13 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Chip } from "@heroui/react";
+import { Alert, Button } from "@heroui/react";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
-import { Panel } from "../components/Panel";
 import { BacktestResultView } from "../components/BacktestResultView";
 import { RoundDetail } from "../components/RoundViews";
-import { TabBar } from "../components/fields";
-import { DataTable, Hint, Mono, StatusChip } from "../components/widgets";
+import { Block, Btn, Empty, StatusTag, Table, TextTabs } from "../components/minimal";
+import { Hint } from "../components/widgets";
 
 interface Row { key: string; kind: "research" | "backtest"; id: string; name: string; detail: string; status: string }
 
@@ -41,8 +40,8 @@ export function RunsPage() {
     <PageFrame
       title="运行记录"
       description={`${backtests.jobs.length} 次回测 · ${trace.traceIds.length} 个研究实验`}
-      tabs={<TabBar label="类型" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部" }, { key: "research", label: "研究" }, { key: "backtest", label: "回测" }]} />}
-      actions={<Button size="sm" variant="secondary" onPress={() => { trace.loadTraces(); backtests.load(); }}>刷新</Button>}
+      tabs={<TextTabs label="类型" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部" }, { key: "research", label: "研究" }, { key: "backtest", label: "回测" }]} />}
+      actions={<Btn onClick={() => { trace.loadTraces(); backtests.load(); }}>刷新</Btn>}
       resultsTitle={selected ? (selected.kind === "research" ? selected.name : `回测 ${selected.name}`) : "详情"}
       resultsActions={selected ? <Button size="sm" variant="secondary" onPress={() => navigate(selected.kind === "research" ? `/research?trace=${encodeURIComponent(selected.id)}` : "/backtest")}>{selected.kind === "research" ? "在研究页打开 →" : "在回测页打开 →"}</Button> : undefined}
       results={
@@ -54,20 +53,20 @@ export function RunsPage() {
         ) : selected?.kind === "backtest" && backtests.result ? <BacktestResultView result={backtests.result} /> : <Hint>点一行查看详情。</Hint>
       }
     >
-      <Panel grow flush title={<>记录 <span className="font-normal text-muted">{rows.length} 条</span></>}>
+      <Block title="记录" count={rows.length}>
         {rows.length ? (
-          <DataTable label="运行记录" head={[["类型"], ["名称"], ["说明"], ["状态"]]}
+          <Table label="运行记录" columns={[{ label: "类型", width: 60 }, { label: "名称", width: 210 }, { label: "说明" }, { label: "状态", width: 72 }]}
             rows={rows.map((r) => ({
-              key: r.key, selected: r.key === selectedKey, onPress: () => open(r),
+              key: r.key, selected: r.key === selectedKey, onClick: () => open(r),
               cells: [
-                <Chip key="k" size="sm" variant="soft">{r.kind === "research" ? "研究" : "回测"}</Chip>,
-                <Mono key="n">{r.name}</Mono>,
-                <span key="d" className="text-[11px] text-muted">{r.detail}</span>,
-                r.status === "—" ? <span key="s" className="text-muted">—</span> : <StatusChip key="s" status={r.status} />,
+                <span key="k" className="mm-dim">{r.kind === "research" ? "研究" : "回测"}</span>,
+                <span key="n" className="mm-mono mm-name">{r.name}</span>,
+                <span key="d" className="mm-dim block truncate">{r.detail}</span>,
+                r.status === "—" ? <span key="s" className="mm-dim">—</span> : <StatusTag key="s" status={r.status} />,
               ],
             }))} />
-        ) : <div className="p-6 text-center text-xs text-muted">还没有记录。</div>}
-      </Panel>
+        ) : <Empty>还没有记录。</Empty>}
+      </Block>
     </PageFrame>
   );
 }

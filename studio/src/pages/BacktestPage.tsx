@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Chip, Tooltip } from "@heroui/react";
+import { Button } from "@heroui/react";
 import * as studio from "../api/studio";
 import type { BacktestSummary, CorrelationMatrix as Corr, FactorRef, FactorWeight, LibraryFactor } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
@@ -7,10 +7,10 @@ import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
 import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
-import { Panel } from "../components/Panel";
 import { BacktestResultView } from "../components/BacktestResultView";
-import { DateBox, ListRow, NumberBox, ParamGroup, SelectBox, Stat, TabBar, TextBox } from "../components/fields";
-import { CodeView, Hint, Mono, Signed } from "../components/widgets";
+import { SelectBox } from "../components/fields";
+import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, Table, Tag, TextInput, TextTabs } from "../components/minimal";
+import { Hint } from "../components/widgets";
 
 type Market = "csi300" | "csi500" | "all";
 interface Params { start: string; end: string; market: Market; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number }
@@ -107,8 +107,8 @@ export function BacktestPage() {
       title="组合回测"
       description={basket.items.length ? `${basket.items.length} 个信号：${basket.items.map((f) => f.name).join("、")} · ${params.start || "?"} → ${params.end || "?"} · ${params.market}` : "信号篮为空，先去因子库挑选"}
       tag={method === "lgbm" ? "LightGBM" : "排名加权"}
-      tabs={<TabBar label="工作区视图" value={tab} onChange={setTab} items={[{ key: "params", label: "参数设置" }, { key: "source", label: "策略源码" }]} />}
-      actions={<Button size="sm" isDisabled={backtests.busy || !env?.data_ready || !basket.items.length} isPending={backtests.busy} onPress={submit}>▶ 运行回测</Button>}
+      tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "params", label: "参数设置" }, { key: "source", label: "策略源码" }]} />}
+      actions={<Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length} onClick={submit}>{backtests.busy ? "运行中…" : "运行回测"}</Btn>}
       resultsTitle={result ? `回测 ${result.id.slice(0, 8)}` : "回测结果"}
       resultsActions={
         <>
@@ -119,89 +119,68 @@ export function BacktestPage() {
       }
       results={result ? <BacktestResultView result={result} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
     >
-      {(backtests.error || pageError) && (
-        <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{backtests.error || pageError}</Alert.Title></Alert.Content>
-          <Button size="sm" variant="ghost" onPress={() => { backtests.setError(""); setPageError(""); }}>关闭</Button></Alert>
-      )}
-      {!env && <Alert status="warning"><Alert.Indicator /><Alert.Content><Alert.Title>后端未连接，无法回测。运行 scripts/start-backend.sh 后刷新。</Alert.Title></Alert.Content></Alert>}
-      {env && !env.data_ready && <Alert status="warning"><Alert.Indicator /><Alert.Content><Alert.Title>Qlib 数据未就绪（{env.provider_uri}），无法回测。</Alert.Title></Alert.Content></Alert>}
+      {(backtests.error || pageError) && <Note tone="bad" actions={<Btn kind="text" onClick={() => { backtests.setError(""); setPageError(""); }}>关闭</Btn>}>{backtests.error || pageError}</Note>}
+      {!env && <Note>后端未连接，无法回测。运行 scripts/start-backend.sh 后刷新。</Note>}
+      {env && !env.data_ready && <Note>Qlib 数据未就绪（{env.provider_uri}），无法回测。</Note>}
 
       {tab === "params" ? (
         <>
-          <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
-            <ParamGroup caption="区间">
-              <DateBox label="开始" value={params.start} onChange={(v) => set("start", v)} width={130} />
-              <DateBox label="结束" value={params.end} onChange={(v) => set("end", v)} width={130} />
-            </ParamGroup>
-            <ParamGroup caption="市场">
-              <SelectBox label="股票池" value={params.market} onChange={(v) => set("market", v)} width={110} options={[{ value: "csi300", label: "沪深300" }, { value: "csi500", label: "中证500" }, { value: "all", label: "全市场" }]} />
-              <TextBox label="基准" value={params.benchmark} onChange={(v) => set("benchmark", v)} width={100} />
-            </ParamGroup>
-            <ParamGroup caption="持仓">
-              <NumberBox label="持股数" hint="每天按评分持有前 topk 只" value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} width={76} />
-              <NumberBox label="每日换出" hint="每天最多换出 n_drop 只" value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} width={76} />
-              <NumberBox label="初始资金" value={params.account} onChange={(v) => set("account", v)} min={1000} step={100000} width={110} />
-            </ParamGroup>
-            <ParamGroup caption="费率">
-              <NumberBox label="买入" hint="0.0005 = 万分之五" value={params.open_cost} onChange={(v) => set("open_cost", v)} min={0} max={0.1} step={0.0001} width={82} />
-              <NumberBox label="卖出" hint="0.0015 含印花税" value={params.close_cost} onChange={(v) => set("close_cost", v)} min={0} max={0.1} step={0.0001} width={82} />
-            </ParamGroup>
-          </div>
-          <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
-            <ParamGroup caption="评分">
-              <SelectBox label="信号合成" value={method} onChange={setMethod} width={150}
-                options={[{ value: "rank", label: "排名加权", description: "截面百分位排名，按权重求和" }, { value: "lgbm", label: "训练 LightGBM", description: "学信号与次日收益的关系，验证集早停" }]} />
-            </ParamGroup>
-            {method === "lgbm" && (
-              <>
-                <ParamGroup caption="训练">
-                  <DateBox label="开始" value={lgbm.train[0]} onChange={(v) => setLgbm((l) => ({ ...l, train: [v, l.train[1]] }))} width={130} />
-                  <DateBox label="结束" value={lgbm.train[1]} onChange={(v) => setLgbm((l) => ({ ...l, train: [l.train[0], v] }))} width={130} />
-                </ParamGroup>
-                <ParamGroup caption="验证">
-                  <DateBox label="开始" value={lgbm.valid[0]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [v, l.valid[1]] }))} width={130} />
-                  <DateBox label="结束" value={lgbm.valid[1]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [l.valid[0], v] }))} width={130} />
-                </ParamGroup>
-                <ParamGroup caption="LightGBM">
-                  {lgbmKeys.map((k) => <NumberBox key={k} label={k} value={lgbm.params[k]} onChange={(v) => setLgbm((l) => ({ ...l, params: { ...l.params, [k]: v } }))} width={k === "learning_rate" || k === "early_stopping_rounds" ? 96 : 84} />)}
-                </ParamGroup>
-              </>
-            )}
-          </div>
-          {dateWarning && (
-            <Alert status="warning"><Alert.Indicator /><Alert.Content><Alert.Title>{dateWarning}</Alert.Title></Alert.Content>
-              {coverage && <Button size="sm" variant="secondary" onPress={fitToCoverage}>按覆盖区间填日期</Button>}</Alert>
+          <Block title="回测参数" note={`${params.start || "?"} → ${params.end || "?"} · ${params.market}`}>
+            <FieldGrid min={140}>
+              <Field label="开始"><TextInput type="date" value={params.start} onChange={(v) => set("start", v)} /></Field>
+              <Field label="结束"><TextInput type="date" value={params.end} onChange={(v) => set("end", v)} /></Field>
+              <Field label="股票池"><SelectInput value={params.market} onChange={(v) => set("market", v)} options={[{ value: "csi300", label: "沪深300" }, { value: "csi500", label: "中证500" }, { value: "all", label: "全市场" }]} /></Field>
+              <Field label="基准"><TextInput value={params.benchmark} onChange={(v) => set("benchmark", v)} /></Field>
+              <Field label="持股数" hint="每天按评分持有前 topk 只"><NumberInput value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} /></Field>
+              <Field label="每日换出" hint="每天最多换出 n_drop 只"><NumberInput value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} /></Field>
+              <Field label="初始资金"><NumberInput value={params.account} onChange={(v) => set("account", v)} min={1000} step={100000} /></Field>
+              <Field label="买入费率" hint="0.0005 = 万分之五"><NumberInput value={params.open_cost} onChange={(v) => set("open_cost", v)} min={0} max={0.1} step={0.0001} /></Field>
+              <Field label="卖出费率" hint="0.0015 含印花税"><NumberInput value={params.close_cost} onChange={(v) => set("close_cost", v)} min={0} max={0.1} step={0.0001} /></Field>
+              <Field label="信号合成" hint="排名加权：截面百分位排名按权重求和；LightGBM：学信号与次日收益的关系，验证集早停">
+                <SelectInput value={method} onChange={setMethod} options={[{ value: "rank", label: "排名加权" }, { value: "lgbm", label: "训练 LightGBM" }]} />
+              </Field>
+            </FieldGrid>
+            {dateWarning && <div style={{ marginTop: 12 }}><Note actions={coverage && <Btn onClick={fitToCoverage}>按覆盖区间填日期</Btn>}>{dateWarning}</Note></div>}
+          </Block>
+          {method === "lgbm" && (
+            <Block title="LightGBM" note="训练集学关系，验证集早停">
+              <FieldGrid min={140}>
+                <Field label="训练开始"><TextInput type="date" value={lgbm.train[0]} onChange={(v) => setLgbm((l) => ({ ...l, train: [v, l.train[1]] }))} /></Field>
+                <Field label="训练结束"><TextInput type="date" value={lgbm.train[1]} onChange={(v) => setLgbm((l) => ({ ...l, train: [l.train[0], v] }))} /></Field>
+                <Field label="验证开始"><TextInput type="date" value={lgbm.valid[0]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [v, l.valid[1]] }))} /></Field>
+                <Field label="验证结束"><TextInput type="date" value={lgbm.valid[1]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [l.valid[0], v] }))} /></Field>
+                {lgbmKeys.map((k) => <Field key={k} label={k}><NumberInput value={lgbm.params[k]} onChange={(v) => setLgbm((l) => ({ ...l, params: { ...l.params, [k]: v } }))} /></Field>)}
+              </FieldGrid>
+            </Block>
           )}
-
-          <Panel grow flush
-            title={<>信号篮 <span className="font-normal text-muted">{basket.items.length} 个 · <a href="#/factors" className="text-accent underline">去因子库增减</a></span></>}
-            status={statusLine} statusTone={maxCorr >= 0.7 ? "bad" : "ok"}
-            footer={basket.items.length ? <>TopkDropoutStrategy · 前一日评分 · 当日收盘成交{coverageUnknown ? ` · ${coverageUnknown} 个信号未做单因子分析，覆盖区间未计入` : ""}</> : undefined}>
-            {basket.items.length ? basket.items.map((f) => (
-              <ListRow key={key(f)}
-                trailing={<>
-                  <Stat label="IC"><Signed value={info(f)?.analysis?.ic.mean} /></Stat>
-                  <Stat label="Rank IC"><Signed value={info(f)?.analysis?.rank_ic.mean} /></Stat>
-                  <span className="w-[150px] text-right text-[12px] text-muted">{info(f)?.analysis ? `${info(f)!.analysis!.coverage.start.slice(0, 7)} → ${info(f)!.analysis!.coverage.end.slice(0, 7)}` : f.kind === "prediction" ? "模型测试期" : "未分析"}</span>
-                  <Tooltip delay={300}><Tooltip.Trigger>
-                    <input type="number" step={0.5} value={f.weight} disabled={method === "lgbm"} onChange={(e) => basket.setWeight(f, Number(e.target.value))}
-                      className="h-7 w-16 rounded-md border border-border bg-surface px-1.5 text-right text-[13px] disabled:opacity-40" aria-label="权重" />
-                  </Tooltip.Trigger><Tooltip.Content><Tooltip.Arrow />权重；负数 = 反向使用，LightGBM 模式下不生效</Tooltip.Content></Tooltip>
-                  <Button size="sm" variant="ghost" onPress={() => basket.toggle(f)}>移除</Button>
-                </>}>
-                <div className="flex items-center gap-2">
-                  {f.kind === "prediction" && <Chip size="sm" variant="soft">模型</Chip>}
-                  <Mono>{f.name}</Mono>
-                  <span className="truncate text-[12px] text-muted">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>
-                </div>
-              </ListRow>
-            )) : (
-              <div className="p-6 text-center text-xs text-muted">还没有选信号。去 <a href="#/factors" className="text-accent underline">因子库</a> 勾选，或在研究轮次里点“用 N 个因子回测”。</div>
+          <Block title="信号篮" count={basket.items.length} note={statusLine} noteTone={maxCorr >= 0.7 ? "bad" : "ok"}>
+            {basket.items.length ? (
+              <>
+                <Table label="信号篮" columns={[{ label: "信号" }, { label: "来源", width: 200, optional: true }, { label: "IC", num: true, width: 82 }, { label: "Rank IC", num: true, width: 82 }, { label: "覆盖", width: 156, optional: true }, { label: "权重", num: true, width: 84 }, { label: "", width: 52 }]}
+                  rows={basket.items.map((f) => ({
+                    key: key(f),
+                    cells: [
+                      <span key="n"><span className="mm-mono mm-name">{f.name}</span>{f.kind === "prediction" && <Tag tone="dim"> · 模型预测</Tag>}</span>,
+                      <span key="s" className="mm-dim block truncate">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>,
+                      <Num key="ic" value={info(f)?.analysis?.ic.mean} />,
+                      <Num key="ric" value={info(f)?.analysis?.rank_ic.mean} />,
+                      <span key="cov" className="mm-mono mm-dim">{info(f)?.analysis ? `${info(f)!.analysis!.coverage.start.slice(0, 7)} → ${info(f)!.analysis!.coverage.end.slice(0, 7)}` : f.kind === "prediction" ? "模型测试期" : "未分析"}</span>,
+                      <NumberInput key="w" className="mm-weight" ariaLabel="权重" step={0.5} value={f.weight} disabled={method === "lgbm"} onChange={(v) => basket.setWeight(f, v)} />,
+                      <Link key="x" onClick={() => basket.toggle(f)}>移除</Link>,
+                    ],
+                  }))} />
+                <P>
+                  TopkDropoutStrategy · 前一日评分 · 当日收盘成交 · 权重为负 = 反向使用{method === "lgbm" ? "（LightGBM 模式下权重不生效）" : ""}
+                  {coverageUnknown ? ` · ${coverageUnknown} 个信号未做单因子分析，覆盖区间未计入` : ""} · <Link href="#/factors">去因子库增减</Link>
+                </P>
+              </>
+            ) : (
+              <Empty>还没有选信号。去 <Link href="#/factors">因子库</Link> 勾选，或在研究轮次里点“用 N 个因子回测”。</Empty>
             )}
-          </Panel>
+          </Block>
         </>
       ) : (
-        <Panel grow flush title="studio_worker.py" status="只读 · 服务端执行"><CodeView code={source || "加载中…"} maxHeight={10000} /></Panel>
+        <Block title="studio_worker.py" note="只读 · 服务端执行"><pre className="mm-pre">{source || "加载中…"}</pre></Block>
       )}
     </PageFrame>
   );
