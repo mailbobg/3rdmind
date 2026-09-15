@@ -6,7 +6,8 @@
       >
       <button class="new-research" @click="goResearch()">＋ 新建研究</button>
       <div v-if="recent.length" class="recent">
-        <button v-for="id in recent" :key="id" :class="{ selected: id === trace.traceId.value }" @click="goResearch(id)">
+        <small>最近实验</small>
+        <button v-for="id in recent" :key="id" :class="{ selected: id === trace.traceId.value }" :title="id" @click="goResearch(id)">
           {{ shortName(id) }}
         </button>
       </div>
@@ -69,7 +70,8 @@ const menu = computed(() => [
 
 function goResearch(id?: string) {
   if (id) trace.select(id);
-  router.push({ name: "studio-research", query: id ? { trace: id } : { new: "1" } });
+  // `new` carries a timestamp so repeated clicks still change the route and re-open the form.
+  router.push({ name: "studio-research", query: id ? { trace: id } : { new: String(Date.now()) } });
 }
 
 onMounted(async () => {

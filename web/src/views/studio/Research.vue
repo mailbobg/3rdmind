@@ -94,7 +94,8 @@ const modes = [
 ];
 const saved = restoreStudioState();
 const form = reactive({ scenario: modes[0].value, loops: 3, duration: 2, objective: saved.objective || "" });
-const showForm = ref(route.query.new === "1" || !trace.traceId.value);
+const showForm = ref(!!route.query.new || !trace.traceId.value);
+watch(() => route.query.new, (value) => { if (value) showForm.value = true; });
 const roundId = ref("");
 const shortName = (id: string) => id.split("/").slice(1).join("/") || id;
 const status = computed(() => trace.status.value);
