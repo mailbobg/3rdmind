@@ -415,6 +415,26 @@ def factor_analysis():
         return jsonify({"error": str(error)}), 500
 
 
+def prediction_coverage(path):
+    """First/last date and size of a Qlib pred.pkl, so the UI can warn before a backtest window misses it."""
+    import pandas as pd
+
+    frame = pd.read_pickle(path)
+    level = "datetime" if "datetime" in (frame.index.names or []) else 0
+    dates = pd.DatetimeIndex(frame.index.get_level_values(level))
+    return {"start": str(dates.min().date()), "end": str(dates.max().date()), "days": int(dates.nunique()), "rows": int(len(frame))}
+
+
+@studio.get("/predictions/coverage")
+def predictions_coverage():
+    try:
+        resolved = resolve_factor_paths(request.args.get("trace", ""), request.args.get("loop_id"),
+                                        [{"name": "prediction", "kind": "prediction"}])
+        return jsonify(prediction_coverage(Path(resolved[0]["path"])))
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
 @studio.post("/factors/correlation")
 def factors_correlation():
     body = request.get_json() or {}

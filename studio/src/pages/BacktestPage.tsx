@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as studio from "../api/studio";
-import type { BacktestSummary, CorrelationMatrix as Corr, FactorRef, FactorWeight, LibraryFactor } from "../api/studio";
+import type { BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
 import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
 import { BacktestResultView } from "../components/BacktestResultView";
-import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, Table, Tag, TextInput, TextTabs } from "../components/minimal";
+import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, Table, TextInput, TextTabs } from "../components/minimal";
 import { Hint } from "../components/widgets";
 
 type Market = "csi300" | "csi500" | "all";
@@ -35,6 +35,19 @@ export function BacktestPage() {
   const [pageError, setPageError] = useState("");
   const [library, setLibrary] = useState<Record<string, LibraryFactor>>({});
   const info = (f: FactorWeight) => library[key(f)];
+  // Model predictions are not in the factor library; their date span comes from /studio/predictions/coverage.
+  const [predCoverage, setPredCoverage] = useState<Record<string, Coverage | null>>({});
+  const coverageOf = (f: FactorWeight): Coverage | undefined =>
+    f.kind === "prediction" ? predCoverage[key(f)] || undefined : info(f)?.analysis?.coverage;
+  useEffect(() => {
+    for (const f of basket.items) {
+      if (f.kind !== "prediction" || key(f) in predCoverage) continue;
+      setPredCoverage((m) => ({ ...m, [key(f)]: null }));
+      studio.predictionCoverage(f.trace, f.loop_id)
+        .then((c) => setPredCoverage((m) => ({ ...m, [key(f)]: { start: c.start, end: c.end } })))
+        .catch(() => {});
+    }
+  }, [basket.items]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Default windows once the environment is known: the last year of data, and 1 + 1 years before it for a model.
   useEffect(() => {
@@ -68,11 +81,11 @@ export function BacktestPage() {
     return m;
   }, [correlation]);
   const coverage = useMemo(() => {
-    const spans = basket.items.map((f) => info(f)?.analysis?.coverage).filter((c): c is { start: string; end: string } => !!c);
+    const spans = basket.items.map(coverageOf).filter((c): c is Coverage => !!c);
     if (!spans.length) return null;
     return { start: spans.reduce((a, c) => (c.start > a ? c.start : a), spans[0].start), end: spans.reduce((a, c) => (c.end < a ? c.end : a), spans[0].end) };
-  }, [basket.items, library]); // eslint-disable-line react-hooks/exhaustive-deps
-  const coverageUnknown = basket.items.filter((f) => !info(f)?.analysis).length;
+  }, [basket.items, library, predCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+  const coverageUnknown = basket.items.filter((f) => !coverageOf(f)).length;
   const dateWarning = useMemo(() => {
     if (!coverage || !params.start || !params.end) return "";
     if (params.start <= coverage.start) return `回测开始日 ${params.start} 不晚于信号首日 ${coverage.start}：策略要用前一天的评分，请把开始日往后挪。`;
@@ -158,18 +171,18 @@ export function BacktestPage() {
                   rows={basket.items.map((f) => ({
                     key: key(f),
                     cells: [
-                      <span key="n"><span className="mm-mono mm-name">{f.name}</span>{f.kind === "prediction" && <Tag tone="dim"> · 模型预测</Tag>}</span>,
+                      <span key="n" className="mm-mono mm-name">{f.name}</span>,
                       <span key="s" className="mm-dim block truncate">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>,
                       <Num key="ic" value={info(f)?.analysis?.ic.mean} />,
                       <Num key="ric" value={info(f)?.analysis?.rank_ic.mean} />,
-                      <span key="cov" className="mm-mono mm-dim">{info(f)?.analysis ? `${info(f)!.analysis!.coverage.start.slice(0, 7)} → ${info(f)!.analysis!.coverage.end.slice(0, 7)}` : f.kind === "prediction" ? "模型测试期" : "未分析"}</span>,
+                      <span key="cov" className="mm-mono mm-dim">{coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}` : f.kind === "prediction" ? "读取中…" : "未分析"}</span>,
                       <NumberInput key="w" className="mm-weight" ariaLabel="权重" step={0.5} value={f.weight} disabled={method === "lgbm"} onChange={(v) => basket.setWeight(f, v)} />,
                       <Link key="x" onClick={() => basket.toggle(f)}>移除</Link>,
                     ],
                   }))} />
                 <P>
                   TopkDropoutStrategy · 前一日评分 · 当日收盘成交 · 权重为负 = 反向使用{method === "lgbm" ? "（LightGBM 模式下权重不生效）" : ""}
-                  {coverageUnknown ? ` · ${coverageUnknown} 个信号未做单因子分析，覆盖区间未计入` : ""} · <Link href="#/factors">去因子库增减</Link>
+                  {coverageUnknown ? ` · ${coverageUnknown} 个信号的覆盖区间未知，未计入` : ""} · <Link href="#/factors">去因子库增减</Link>
                 </P>
               </>
             ) : (

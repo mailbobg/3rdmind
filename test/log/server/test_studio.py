@@ -167,6 +167,22 @@ def test_experiments_summarise_loaded_traces(studio_client) -> None:
 
 
 @pytest.mark.offline
+def test_prediction_coverage_reads_pred_pkl(studio_client, tmp_path: Path) -> None:
+    import pandas as pd
+
+    artifacts = tmp_path / "ws" / "exp" / "mlruns" / "0" / "run" / "artifacts"
+    artifacts.mkdir(parents=True)
+    index = pd.MultiIndex.from_product([pd.to_datetime(["2025-01-02", "2025-01-03", "2025-06-30"]), ["SH600000", "SZ000001"]],
+                                       names=["datetime", "instrument"])
+    pd.Series(range(6), index=index, name="score").to_pickle(artifacts / "pred.pkl")
+    response = studio_client.get("/studio/predictions/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "0"})
+    assert response.status_code == 200
+    assert response.get_json() == {"start": "2025-01-02", "end": "2025-06-30", "days": 3, "rows": 6}
+    missing = studio_client.get("/studio/predictions/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "7"})
+    assert missing.status_code == 400
+
+
+@pytest.mark.offline
 def test_rounds_lists_factor_rounds(studio_client) -> None:
     response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
     assert response.status_code == 200

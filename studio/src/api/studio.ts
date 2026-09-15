@@ -122,6 +122,9 @@ export const factorCorrelation = (factors: FactorRef[]) => api<CorrelationMatrix
 export const traceStatusInfo = (trace: string) =>
   api<{ loaded: boolean; alive: boolean; messages: number }>(`/studio/trace-status?${new URLSearchParams({ trace })}`);
 export const rounds = (trace: string) => api<Round[]>(`/studio/rounds?${new URLSearchParams({ trace })}`);
+export interface Coverage { start: string; end: string }
+export const predictionCoverage = (trace: string, loop_id: number) =>
+  api<Coverage & { days: number; rows: number }>(`/studio/predictions/coverage?${new URLSearchParams({ trace, loop_id: String(loop_id) })}`);
 export const backtests = () => api<BacktestSummary[]>("/studio/backtests");
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);
 export const runBacktest = (config: BacktestRequest) => api<{ id: string }>("/studio/backtests", config);
