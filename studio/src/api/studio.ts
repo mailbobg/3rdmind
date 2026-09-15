@@ -43,7 +43,7 @@ export interface BacktestRequest {
   /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
   trace?: string; loop_id?: number;
 }
-export interface BacktestSummary { id: string; status: string; config: BacktestRequest & { provider_uri?: string }; total_return?: number | null }
+export interface BacktestSummary { id: string; status: string; config: BacktestRequest & { provider_uri?: string }; total_return?: number | null; created?: string }
 export interface BacktestRow {
   date: string; equity: number; benchmark: number; drawdown: number;
   return: number; cost: number; turnover: number; account: number;

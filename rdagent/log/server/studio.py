@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request
@@ -463,7 +464,8 @@ def backtests():
             result_path = path.parent / "result.json"
             result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
             jobs.append({"id": path.parent.name, "config": public_config(json.loads(path.read_text())), "status": result["status"],
-                         "total_return": (result.get("metrics") or {}).get("total_return")})
+                         "total_return": (result.get("metrics") or {}).get("total_return"),
+                         "created": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()})
         return jsonify(jobs)
     body = request.get_json() or {}
     try:
