@@ -22,12 +22,16 @@
       <EquityChart :rows="result.rows || []" />
       <p class="hint">{{ result.method }}</p>
     </template>
-    <details v-if="result.log"><summary>执行日志</summary><pre>{{ result.log }}</pre></details>
+  </section>
+  <TradeTables v-if="result.metrics" :trades="result.trades || []" :instruments="result.instruments || []" :holdings="result.holdings" />
+  <section class="surface" v-if="result.log">
+    <details><summary>执行日志</summary><pre>{{ result.log }}</pre></details>
   </section>
 </template>
 <script setup lang="ts">
 import { computed } from "vue";
 import EquityChart from "./EquityChart.vue";
+import TradeTables from "./TradeTables.vue";
 import type { BacktestResult } from "../../api/studio";
 import { backtestStatusLabel } from "./backtestStatus";
 const props = defineProps<{ result: BacktestResult }>();

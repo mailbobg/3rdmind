@@ -470,3 +470,71 @@ def test_load_factor_frame_reads_prediction_pickle(tmp_path: Path) -> None:
                               pd.Timestamp("2025-01-01"), "2025-12-31")
     assert list(frame.columns) == ["模型预测"]
     assert len(frame) == 2
+
+
+class _Metric:
+    def __init__(self, values):
+        self._values = values
+
+    def to_dict(self):
+        return dict(self._values)
+
+
+class _Indicator:
+    """Mimics qlib's NumpyOrderIndicator: get_index_data(metric).to_dict() -> {instrument: value}."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def get_index_data(self, metric):
+        return _Metric({r["instrument"]: r[metric] for r in self._rows})
+
+
+class _Position:
+    def __init__(self, book, cash):
+        self._book = book
+        self._cash = cash
+
+    def get_stock_list(self):
+        return list(self._book)
+
+    def get_stock_amount(self, code):
+        return self._book[code][0]
+
+    def get_stock_price(self, code):
+        return self._book[code][1]
+
+    def get_stock_weight(self, code):
+        return self._book[code][0] * self._book[code][1] / self.calculate_value()
+
+    def get_cash(self, include_settle=False):
+        return self._cash
+
+    def calculate_value(self):
+        return self._cash + sum(a * p for a, p in self._book.values())
+
+
+@pytest.mark.offline
+def test_trades_and_holdings_are_flattened_for_the_ui() -> None:
+    from rdagent.log.server.studio_worker import holdings_from_position, instrument_summary, trades_from_indicator
+
+    his = {
+        pd.Timestamp("2025-01-03"): _Indicator([
+            {"instrument": "SH600000", "deal_amount": 100, "trade_price": 10.0, "trade_value": 1000.0, "trade_cost": 1.0, "trade_dir": 1},
+            {"instrument": "SH600009", "deal_amount": 0, "trade_price": 0.0, "trade_value": 0.0, "trade_cost": 0.0, "trade_dir": 1},
+        ]),
+        pd.Timestamp("2025-01-06"): _Indicator([
+            {"instrument": "SH600000", "deal_amount": 50, "trade_price": 12.0, "trade_value": -600.0, "trade_cost": 1.5, "trade_dir": 0},
+        ]),
+    }
+    trades = trades_from_indicator(his)
+    assert trades == [
+        {"date": "2025-01-03", "instrument": "SH600000", "direction": "buy", "amount": 100.0, "price": 10.0, "value": 1000.0, "cost": 1.0},
+        {"date": "2025-01-06", "instrument": "SH600000", "direction": "sell", "amount": 50.0, "price": 12.0, "value": 600.0, "cost": 1.5},
+    ]
+    holdings = holdings_from_position(_Position({"SH600000": (50, 13.0)}, cash=397.5))
+    assert holdings["positions"] == [{"instrument": "SH600000", "amount": 50.0, "price": 13.0, "value": 650.0, "weight": 650.0 / 1047.5}]
+    assert holdings["cash"] == 397.5
+    summary = instrument_summary(trades, holdings)
+    assert summary == [{"instrument": "SH600000", "trades": 2, "buy_value": 1000.0, "sell_value": 600.0, "cost": 2.5,
+                        "holding_value": 650.0, "pnl": 247.5, "held": True}]

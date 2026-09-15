@@ -128,6 +128,70 @@ def load_factor_frame(factor, start, end):
     return frame[(dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))]
 
 
+def trades_from_indicator(order_indicator_his):
+    """Flatten Qlib's per-day order indicators into one row per filled order.
+
+    ``order_indicator_his`` maps a trade date to a Qlib order indicator exposing
+    ``get_index_data(metric).to_dict()`` (instrument -> value) for deal_amount, trade_price,
+    trade_value (signed: + buy, - sell), trade_cost and trade_dir (1 buy, 0 sell). Qlib's
+    ``to_series`` is avoided on purpose: it breaks under pandas 2 with custom Index objects.
+    """
+    trades = []
+    for day, indicator in order_indicator_his.items():
+        metric = lambda name: indicator.get_index_data(name).to_dict()  # noqa: E731
+        deal = metric("deal_amount")
+        if not deal:
+            continue
+        price, value, cost, direction = metric("trade_price"), metric("trade_value"), metric("trade_cost"), metric("trade_dir")
+        for instrument, amount in deal.items():
+            if not amount:
+                continue
+            trades.append({
+                "date": str(getattr(day, "date", lambda: day)()),
+                "instrument": str(instrument),
+                "direction": "buy" if int(direction.get(instrument, 1)) == 1 else "sell",
+                "amount": float(amount),
+                "price": float(price.get(instrument, 0.0)),
+                "value": abs(float(value.get(instrument, 0.0))),
+                "cost": float(cost.get(instrument, 0.0)),
+            })
+    return trades
+
+
+def holdings_from_position(position):
+    """The final book: one row per held instrument plus the cash line."""
+    rows = []
+    for instrument in position.get_stock_list():
+        amount = float(position.get_stock_amount(instrument))
+        price = float(position.get_stock_price(instrument))
+        rows.append({"instrument": str(instrument), "amount": amount, "price": price,
+                     "value": amount * price, "weight": float(position.get_stock_weight(instrument))})
+    rows.sort(key=lambda r: -r["value"])
+    return {"positions": rows, "cash": float(position.get_cash()), "total": float(position.calculate_value())}
+
+
+def instrument_summary(trades, holdings):
+    """Per-instrument realised + unrealised P&L: sells - buys - costs + what is still held."""
+    held = {row["instrument"]: row["value"] for row in holdings["positions"]}
+    summary = {}
+    for trade in trades:
+        row = summary.setdefault(trade["instrument"], {"instrument": trade["instrument"], "trades": 0,
+                                                          "buy_value": 0.0, "sell_value": 0.0, "cost": 0.0})
+        row["trades"] += 1
+        row["cost"] += trade["cost"]
+        row["buy_value" if trade["direction"] == "buy" else "sell_value"] += trade["value"]
+    for instrument, value in held.items():
+        summary.setdefault(instrument, {"instrument": instrument, "trades": 0, "buy_value": 0.0, "sell_value": 0.0, "cost": 0.0})
+    result = []
+    for row in summary.values():
+        row["holding_value"] = held.get(row["instrument"], 0.0)
+        row["pnl"] = row["sell_value"] - row["buy_value"] - row["cost"] + row["holding_value"]
+        row["held"] = row["instrument"] in held
+        result.append(row)
+    result.sort(key=lambda r: -r["pnl"])
+    return result
+
+
 def run(config):
     # Use the user's adjacent Qlib checkout, not an unrelated installed checkout.
     checkout = Path(__file__).resolve().parents[4] / "qlib"
@@ -171,7 +235,7 @@ def run(config):
     require_signal_coverage(score.index.get_level_values("datetime"), prior[-1], end_day)
     strategy = {"class": "TopkDropoutStrategy", "module_path": "qlib.contrib.strategy",
                 "kwargs": {"signal": score, "topk": config["topk"], "n_drop": config["n_drop"]}}
-    portfolios, _ = backtest(
+    portfolios, indicators = backtest(
         start_time=config["start"], end_time=config["end"], strategy=strategy,
         executor={"class": "SimulatorExecutor", "module_path": "qlib.backtest.executor",
                   "kwargs": {"time_per_step": "day", "generate_portfolio_metrics": True}},
@@ -179,7 +243,12 @@ def run(config):
         exchange_kwargs={"freq": "day", "limit_threshold": 0.095, "deal_price": "close",
                          "open_cost": config["open_cost"], "close_cost": config["close_cost"], "min_cost": 5},
     )
-    report, _ = portfolios["1day"]
+    report, positions = portfolios["1day"]
+    _, indicator = indicators["1day"]
+    trades = trades_from_indicator(getattr(indicator, "order_indicator_his", {}))
+    last_day = max(positions) if positions else None
+    holdings = holdings_from_position(positions[last_day]) if last_day is not None else {"positions": [], "cash": None, "total": None}
+    instruments = instrument_summary(trades, holdings)
     if report.empty:
         raise ValueError("Backtest returned no daily report")
     net = report["return"] - report["cost"]
@@ -208,6 +277,7 @@ def run(config):
                     "sharpe": sharpe, "max_drawdown": float(drawdown.min()),
                     "benchmark_return": float(benchmark.iloc[-1] - 1), "days": len(net)},
                   "rows": rows, "config": config,
+                  "trades": trades, "holdings": holdings, "instruments": instruments,
                   "method": "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})
 
 

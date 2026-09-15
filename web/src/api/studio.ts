@@ -28,8 +28,14 @@ export interface BacktestRow {
   date: string; equity: number; benchmark: number; drawdown: number;
   return: number; cost: number; turnover: number; account: number;
 }
+export interface Trade { date: string; instrument: string; direction: "buy" | "sell"; amount: number; price: number; value: number; cost: number }
+export interface Holding { instrument: string; amount: number; price: number; value: number; weight: number }
+export interface InstrumentSummary {
+  instrument: string; trades: number; buy_value: number; sell_value: number; cost: number; holding_value: number; pnl: number; held: boolean;
+}
 export interface BacktestResult extends BacktestSummary {
   error?: string; log?: string; method?: string; rows?: BacktestRow[];
+  trades?: Trade[]; holdings?: { positions: Holding[]; cash: number | null; total: number | null }; instruments?: InstrumentSummary[];
   metrics?: {
     total_return: number; annualized_return: number; sharpe: number | null;
     max_drawdown: number; benchmark_return: number; days: number;
