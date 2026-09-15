@@ -7,7 +7,6 @@ import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
 import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
 import { BacktestResultView } from "../components/BacktestResultView";
-import { SelectBox } from "../components/fields";
 import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, Table, Tag, TextInput, TextTabs } from "../components/minimal";
 import { Hint } from "../components/widgets";
 
@@ -111,7 +110,7 @@ export function BacktestPage() {
       resultsTitle={result ? `回测 ${result.id.slice(0, 8)}` : "回测结果"}
       resultsActions={
         <>
-          <SelectBox label="回测历史" isLabelHidden placeholder="回测历史" width={320} value={backtests.selectedId || null} onChange={(id) => { backtests.select(id); layout.openResults(); }}
+          <SelectInput ariaLabel="回测历史" placeholder="回测历史" className="w-80" value={backtests.selectedId || ""} onChange={(id) => { backtests.select(id); layout.openResults(); }}
             options={backtests.jobs.map((j) => ({ value: j.id, label: jobLabel(j) }))} />
           {result?.metrics && <Btn kind="text" onClick={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>导出 JSON</Btn>}
         </>
