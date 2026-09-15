@@ -13,6 +13,7 @@
     </div>
     <p class="hint">
       {{ result.config.start }} → {{ result.config.end }} · {{ result.config.market }} · 基准 {{ result.config.benchmark || "SH000300" }} · topk {{ result.config.topk }} / n_drop {{ result.config.n_drop }}
+      · {{ result.config.model?.method === "lgbm" ? `LightGBM（训练 ${result.config.model.train.join("→")}，验证 ${result.config.model.valid.join("→")}）` : "排名加权" }}
     </p>
     <div v-if="result.error" class="notice">{{ result.error }}</div>
     <template v-if="result.metrics">
@@ -22,6 +23,25 @@
       <EquityChart :rows="result.rows || []" />
       <p class="hint">{{ result.method }}</p>
     </template>
+  </section>
+  <section class="surface" v-if="result.model">
+    <div class="section-heading"><h3>LightGBM 训练</h3><span>{{ result.model.train_rows.toLocaleString() }} 训练样本 · {{ result.model.valid_rows.toLocaleString() }} 验证样本</span></div>
+    <div class="cards">
+      <div><small>最佳迭代</small><strong>{{ result.model.best_iteration }}</strong></div>
+      <div><small>验证 L2</small><strong>{{ result.model.valid_l2.toFixed(4) }}</strong></div>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>信号</th><th class="num">重要性（gain）</th><th style="width: 40%"></th></tr></thead>
+        <tbody>
+          <tr v-for="[name, gain] in importance" :key="name">
+            <td><code>{{ name }}</code></td>
+            <td class="num">{{ gain.toFixed(1) }}</td>
+            <td><div class="bar" :style="{ width: (gain / importance[0][1]) * 100 + '%' }"></div></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </section>
   <TradeTables v-if="result.metrics" :trades="result.trades || []" :instruments="result.instruments || []" :holdings="result.holdings" />
   <section class="surface" v-if="result.log">
@@ -49,7 +69,14 @@ const cards = computed(() => {
     { label: "最大回撤", value: percent(m.max_drawdown) },
     { label: "基准收益", value: percent(m.benchmark_return) },
     { label: "交易日数", value: String(m.days ?? "—") },
+    { label: "信号 IC", value: typeof m.signal_ic === "number" ? m.signal_ic.toFixed(4) : "—" },
+    { label: "信号 Rank IC", value: typeof m.signal_rank_ic === "number" ? m.signal_rank_ic.toFixed(4) : "—" },
   ];
 });
+const importance = computed(() =>
+  Object.entries(props.result.model?.feature_importance || {}).sort((a, b) => b[1] - a[1]) as [string, number][]);
 </script>
 
+<style scoped>
+.bar { height: 8px; border-radius: 4px; background: var(--green); min-width: 2px; }
+</style>

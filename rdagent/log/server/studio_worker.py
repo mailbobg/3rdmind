@@ -37,6 +37,7 @@ def validate_config(config):
     if not isinstance(benchmark, str) or not benchmark.strip() or len(benchmark) > 20:
         raise ValueError("Invalid benchmark")
     result["benchmark"] = benchmark.strip()
+    result["model"] = validate_model(result.get("model"), result["start"])
     factors = result.get("factors", [])
     if not isinstance(factors, list) or not 1 <= len(factors) <= 20:
         raise ValueError("Select 1 to 20 factors")
@@ -52,6 +53,132 @@ def validate_config(config):
     if total == 0:
         raise ValueError("At least one factor must have a non-zero weight")
     return result
+
+
+LGBM_DEFAULTS = {"learning_rate": 0.05, "num_leaves": 63, "max_depth": 8, "colsample_bytree": 0.8,
+                 "subsample": 0.8, "subsample_freq": 1, "lambda_l1": 0.0, "lambda_l2": 1.0,
+                 "n_estimators": 1000, "early_stopping_rounds": 50}
+LGBM_LIMITS = {"learning_rate": (0.001, 1.0), "num_leaves": (2, 1024), "max_depth": (-1, 64),
+               "colsample_bytree": (0.1, 1.0), "subsample": (0.1, 1.0), "subsample_freq": (0, 100),
+               "lambda_l1": (0.0, 10000.0), "lambda_l2": (0.0, 10000.0),
+               "n_estimators": (10, 5000), "early_stopping_rounds": (0, 1000)}
+INTEGER_LGBM = {"num_leaves", "max_depth", "subsample_freq", "n_estimators", "early_stopping_rounds"}
+
+
+def validate_model(model, backtest_start):
+    """Normalise the signal-synthesis block.
+
+    ``{"method": "rank"}`` (default) is the weighted percentile-rank blend. ``{"method": "lgbm", "train":
+    [start, end], "valid": [start, end], "params": {...}}`` trains LightGBM on the selected signals and uses
+    its prediction as the portfolio score. Windows must be ordered train < valid < backtest so the model never
+    sees the period it is evaluated on.
+    """
+    from datetime import date
+    model = dict(model or {})
+    method = model.get("method", "rank")
+    if method == "rank":
+        return {"method": "rank"}
+    if method != "lgbm":
+        raise ValueError("Unsupported signal method")
+    windows = {}
+    for key in ("train", "valid"):
+        window = model.get(key)
+        if not isinstance(window, (list, tuple)) or len(window) != 2:
+            raise ValueError(f"Model {key} window must be [start, end]")
+        for value in window:
+            date.fromisoformat(value)
+        if window[0] >= window[1]:
+            raise ValueError(f"Model {key} window start must be earlier than its end")
+        windows[key] = [window[0], window[1]]
+    if not windows["train"][1] < windows["valid"][0]:
+        raise ValueError("Validation window must start after the training window ends")
+    if not windows["valid"][1] < backtest_start:
+        raise ValueError("Backtest must start after the validation window ends")
+    params = dict(LGBM_DEFAULTS)
+    for key, value in (model.get("params") or {}).items():
+        if key not in LGBM_LIMITS:
+            raise ValueError(f"Unknown LightGBM parameter {key}")
+        value = float(value)
+        lower, upper = LGBM_LIMITS[key]
+        if not math.isfinite(value) or not lower <= value <= upper:
+            raise ValueError(f"Invalid LightGBM parameter {key}")
+        params[key] = int(value) if key in INTEGER_LGBM else value
+    return {"method": "lgbm", **windows, "params": params}
+
+
+def cross_sectional_zscore(series):
+    """Per-day z-score, the label normalisation Qlib's templates apply (CSZScoreNorm)."""
+    grouped = series.groupby(level="datetime")
+    std = grouped.transform("std")
+    return ((series - grouped.transform("mean")) / std.where(std > 0)).dropna()
+
+
+def require_window_coverage(features, window, purpose):
+    """Name every signal column that has no observation inside ``window`` instead of failing on an empty join."""
+    import pandas as pd
+
+    start, end = pd.Timestamp(window[0]), pd.Timestamp(window[1])
+    dates = features.index.get_level_values("datetime")
+    inside = features[(dates >= start) & (dates <= end)]
+    missing = [column for column in features.columns if inside[column].notna().sum() == 0]
+    if missing:
+        spans = []
+        for column in missing:
+            observed = features[column].dropna().index.get_level_values("datetime")
+            spans.append(f"{column} ({observed.min().date()} to {observed.max().date()})" if len(observed) else f"{column} (no data)")
+        raise ValueError(f"No {purpose} data for: {', '.join(spans)}; remove these signals or move the {purpose} window")
+
+
+def train_lgbm_signal(features, label, model, log=print):
+    """Fit LightGBM on ``features`` (already cross-sectionally ranked) and return scores for every row.
+
+    Returns ``(score, report)`` where ``report`` carries the best iteration, validation loss and feature importances.
+    """
+    import lightgbm as lgb
+    import pandas as pd
+
+    dates = features.index.get_level_values("datetime")
+    def window(name):
+        start, end = pd.Timestamp(model[name][0]), pd.Timestamp(model[name][1])
+        return features[(dates >= start) & (dates <= end)]
+    train_x, valid_x = window("train"), window("valid")
+    require_window_coverage(features, model["train"], "training")
+    require_window_coverage(features, model["valid"], "validation")
+    train = train_x.join(label.rename("label"), how="inner").dropna()
+    valid = valid_x.join(label.rename("label"), how="inner").dropna()
+    if len(train) < 100:
+        raise ValueError(f"Training window has only {len(train)} labelled rows; widen it")
+    if len(valid) < 20:
+        raise ValueError(f"Validation window has only {len(valid)} labelled rows; widen it")
+    params = dict(model["params"])
+    rounds = params.pop("n_estimators")
+    patience = params.pop("early_stopping_rounds")
+    params.update({"objective": "regression", "metric": "l2", "verbosity": -1, "seed": 0, "num_threads": 4})
+    columns = list(features.columns)
+    dtrain = lgb.Dataset(train[columns], train["label"])
+    dvalid = lgb.Dataset(valid[columns], valid["label"], reference=dtrain)
+    callbacks = [lgb.log_evaluation(period=100)]
+    if patience > 0:
+        callbacks.append(lgb.early_stopping(patience, verbose=False))
+    booster = lgb.train(params, dtrain, num_boost_round=rounds, valid_sets=[dvalid], valid_names=["valid"], callbacks=callbacks)
+    score = pd.Series(booster.predict(features[columns], num_iteration=booster.best_iteration or None), index=features.index)
+    importance = dict(zip(columns, (float(v) for v in booster.feature_importance("gain"))))
+    report = {"best_iteration": int(booster.best_iteration or rounds),
+              "valid_l2": float(booster.best_score.get("valid", {}).get("l2", float("nan"))),
+              "train_rows": int(len(train)), "valid_rows": int(len(valid)), "feature_importance": importance}
+    log(f"LightGBM trained: {report}")
+    return score, report
+
+
+def information_coefficient(score, label):
+    """Mean daily Pearson and Spearman IC between a score and the forward-return label."""
+    frame = score.rename("score").to_frame().join(label.rename("label"), how="inner").dropna()
+    if frame.empty:
+        return None, None
+    by_day = frame.groupby(level="datetime")
+    ic = by_day.apply(lambda d: d["score"].corr(d["label"]) if len(d) > 2 else float("nan")).dropna()
+    rank_ic = by_day.apply(lambda d: d["score"].corr(d["label"], method="spearman") if len(d) > 2 else float("nan")).dropna()
+    return (float(ic.mean()) if len(ic) else None, float(rank_ic.mean()) if len(rank_ic) else None)
 
 
 def write_json(path, data):
@@ -215,22 +342,38 @@ def run(config):
     if not len(prior):
         raise ValueError("At least one trading day of signal history is required")
     factors = config["factors"]
-    frames = [load_factor_frame(f, prior[-1], config["end"]) for f in factors]
+    model = config.get("model") or {"method": "rank"}
+    # A trained model needs its training history as well; the rank blend only needs the backtest window.
+    feature_start = pd.Timestamp(model["train"][0]) if model["method"] == "lgbm" else prior[-1]
+    frames = [load_factor_frame(f, feature_start, config["end"]) for f in factors]
     features = pd.concat(frames, axis=1).sort_index()
     if features.empty:
         raise ValueError("No factor observations for this date range")
     universe = set(D.list_instruments(D.instruments(config["market"]),
-                                      start_time=prior[-1], end_time=config["end"], as_list=True))
+                                      start_time=feature_start, end_time=config["end"], as_list=True))
     features = features[features.index.get_level_values("instrument").isin(universe)]
     if features.empty:
         raise ValueError("No factor observations inside the selected universe")
     # Require all selected factors on a row; do not silently treat missing data as zero.
-    ranks = features.groupby(level="datetime").rank(pct=True)
-    weights = np.array([float(f["weight"]) for f in factors])
-    score = ranks.mul(weights, axis=1).sum(axis=1, min_count=len(factors)) / abs(weights).sum()
+    ranks = features.groupby(level="datetime").rank(pct=True).dropna()
+    # Next-day close-to-close return, the label Qlib's templates use with close execution.
+    label_raw = D.features(D.instruments(config["market"]), ["Ref($close, -2)/Ref($close, -1) - 1"],
+                           start_time=feature_start, end_time=config["end"], freq="day").iloc[:, 0]
+    if label_raw.index.names[0] == "instrument":  # Qlib returns (instrument, datetime); signals are (datetime, instrument)
+        label_raw = label_raw.swaplevel(0, 1)
+    label_raw = label_raw.sort_index()
+    label = cross_sectional_zscore(label_raw)
+    model_report = None
+    if model["method"] == "lgbm":
+        score, model_report = train_lgbm_signal(ranks, label, model)
+        score = score[score.index.get_level_values("datetime") >= prior[-1]]
+    else:
+        weights = np.array([float(f["weight"]) for f in factors])
+        score = ranks.mul(weights, axis=1).sum(axis=1) / abs(weights).sum()
     score = score.dropna().sort_index()
     if score.empty:
         raise ValueError("Selected factors have no complete observations")
+    test_ic, test_rank_ic = information_coefficient(score, label)
     end_day = trading_day_on_or_before(calendar, config["end"])
     require_signal_coverage(score.index.get_level_values("datetime"), prior[-1], end_day)
     strategy = {"class": "TopkDropoutStrategy", "module_path": "qlib.contrib.strategy",
@@ -275,7 +418,9 @@ def run(config):
     return clean({"metrics": {"total_return": float(equity.iloc[-1] - 1),
                     "annualized_return": float(equity.iloc[-1] ** (252 / len(net)) - 1),
                     "sharpe": sharpe, "max_drawdown": float(drawdown.min()),
-                    "benchmark_return": float(benchmark.iloc[-1] - 1), "days": len(net)},
+                    "benchmark_return": float(benchmark.iloc[-1] - 1), "days": len(net),
+                    "signal_ic": test_ic, "signal_rank_ic": test_rank_ic},
+                  "model": model_report,
                   "rows": rows, "config": config,
                   "trades": trades, "holdings": holdings, "instruments": instruments,
                   "method": "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})

@@ -16,8 +16,17 @@ export interface FactorWeight { name: string; weight: number; trace: string; loo
 export interface LibraryFactor {
   trace: string; loop_id: number; name: string; metrics: Record<string, number>; code: string | null;
 }
+export interface LgbmParams {
+  learning_rate: number; num_leaves: number; max_depth: number; colsample_bytree: number; subsample: number;
+  subsample_freq: number; lambda_l1: number; lambda_l2: number; n_estimators: number; early_stopping_rounds: number;
+}
+/** How the selected signals become one portfolio score: weighted rank blend, or a LightGBM model trained on them. */
+export type SignalModel =
+  | { method: "rank" }
+  | { method: "lgbm"; train: [string, string]; valid: [string, string]; params?: Partial<LgbmParams> };
 export interface BacktestRequest {
   factors: FactorWeight[];
+  model?: SignalModel;
   start: string; end: string; market: "csi300" | "csi500" | "all"; benchmark: string;
   topk: number; n_drop: number; account: number; open_cost: number; close_cost: number;
   /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
@@ -39,7 +48,12 @@ export interface BacktestResult extends BacktestSummary {
   metrics?: {
     total_return: number; annualized_return: number; sharpe: number | null;
     max_drawdown: number; benchmark_return: number; days: number;
+    signal_ic?: number | null; signal_rank_ic?: number | null;
   };
+  model?: {
+    best_iteration: number; valid_l2: number; train_rows: number; valid_rows: number;
+    feature_importance: Record<string, number>;
+  } | null;
 }
 
 export class ApiError extends Error {

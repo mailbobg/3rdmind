@@ -8,6 +8,13 @@ export function validateRequest(c: BacktestRequest): string | null {
   if (!c.factors.every((f) => Number.isFinite(f.weight))) return "因子权重必须是数字。";
   if (c.factors.reduce((s, f) => s + Math.abs(f.weight), 0) === 0) return "至少一个因子的权重不为 0。";
   if (!c.start || !c.end || c.start >= c.end) return "开始日期必须早于结束日期。";
+  if (c.model?.method === "lgbm") {
+    const [ts, te] = c.model.train, [vs, ve] = c.model.valid;
+    if (!ts || !te || !vs || !ve) return "请填写训练和验证区间。";
+    if (ts >= te || vs >= ve) return "训练、验证区间的开始必须早于结束。";
+    if (te >= vs) return "验证区间必须在训练区间之后。";
+    if (ve >= c.start) return "回测必须在验证区间之后开始。";
+  }
   if (!["csi300", "csi500", "all"].includes(c.market)) return "不支持的股票池。";
   if (!c.benchmark || !c.benchmark.trim()) return "请填写基准指数代码。";
   if (!Number.isInteger(c.topk) || c.topk < 1 || c.topk > 500) return "topk 应为 1–500 的整数。";

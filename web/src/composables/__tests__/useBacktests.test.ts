@@ -99,3 +99,12 @@ describe("useBacktests lifecycle", () => {
     bt.dispose();
   });
 });
+
+describe("validateRequest with a trained model", () => {
+  const lgbm = { method: "lgbm" as const, train: ["2023-01-01", "2023-12-31"] as [string, string], valid: ["2024-01-01", "2024-12-31"] as [string, string] };
+  it("accepts ordered windows", () => expect(validateRequest({ ...base, model: lgbm })).toBeNull());
+  it("rejects a validation window overlapping training", () =>
+    expect(validateRequest({ ...base, model: { ...lgbm, valid: ["2023-06-01", "2024-12-31"] } })).toMatch("验证"));
+  it("rejects a validation window reaching into the backtest", () =>
+    expect(validateRequest({ ...base, model: { ...lgbm, valid: ["2024-01-01", "2025-03-01"] } })).toMatch("回测"));
+});

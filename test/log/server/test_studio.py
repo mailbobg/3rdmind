@@ -538,3 +538,64 @@ def test_trades_and_holdings_are_flattened_for_the_ui() -> None:
     summary = instrument_summary(trades, holdings)
     assert summary == [{"instrument": "SH600000", "trades": 2, "buy_value": 1000.0, "sell_value": 600.0, "cost": 2.5,
                         "holding_value": 650.0, "pnl": 247.5, "held": True}]
+
+
+@pytest.mark.offline
+def test_validate_model_defaults_to_rank_and_orders_lgbm_windows() -> None:
+    from rdagent.log.server.studio_worker import LGBM_DEFAULTS, validate_model
+
+    assert validate_model(None, "2025-01-02") == {"method": "rank"}
+    model = validate_model({"method": "lgbm", "train": ["2023-01-01", "2023-12-31"], "valid": ["2024-01-01", "2024-12-31"],
+                            "params": {"num_leaves": "31", "learning_rate": 0.1}}, "2025-01-02")
+    assert model["train"] == ["2023-01-01", "2023-12-31"] and model["valid"] == ["2024-01-01", "2024-12-31"]
+    assert model["params"]["num_leaves"] == 31 and model["params"]["learning_rate"] == 0.1
+    assert model["params"]["n_estimators"] == LGBM_DEFAULTS["n_estimators"]
+    for bad in (
+        {"method": "lgbm", "train": ["2023-01-01", "2024-06-30"], "valid": ["2024-01-01", "2024-12-31"]},  # overlap
+        {"method": "lgbm", "train": ["2023-01-01", "2023-12-31"], "valid": ["2024-01-01", "2025-03-31"]},  # leaks into backtest
+        {"method": "lgbm", "train": ["2023-01-01", "2023-12-31"], "valid": ["2024-01-01", "2024-12-31"], "params": {"num_leaves": 1}},
+        {"method": "lgbm", "train": ["2023-01-01", "2023-12-31"], "valid": ["2024-01-01", "2024-12-31"], "params": {"boosting": "dart"}},
+        {"method": "mlp"},
+    ):
+        with pytest.raises(ValueError):
+            validate_model(bad, "2025-01-02")
+
+
+@pytest.mark.offline
+def test_lgbm_signal_and_ic_on_synthetic_data() -> None:
+    import numpy as np
+    from rdagent.log.server.studio_worker import cross_sectional_zscore, information_coefficient, train_lgbm_signal
+
+    rng = np.random.default_rng(0)
+    days = pd.bdate_range("2024-01-01", periods=120)
+    stocks = [f"S{i:03d}" for i in range(40)]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    f1 = pd.Series(rng.normal(size=len(index)), index=index)
+    f2 = pd.Series(rng.normal(size=len(index)), index=index)
+    label_raw = 0.8 * f1 - 0.3 * f2 + 0.2 * rng.normal(size=len(index))
+    features = pd.concat([f1.rename("f1"), f2.rename("f2")], axis=1).groupby(level="datetime").rank(pct=True)
+    label = cross_sectional_zscore(pd.Series(label_raw, index=index))
+    assert abs(label.groupby(level="datetime").mean()).max() < 1e-9
+
+    model = {"method": "lgbm", "train": [str(days[0].date()), str(days[79].date())],
+             "valid": [str(days[80].date()), str(days[99].date())],
+             "params": {"learning_rate": 0.1, "num_leaves": 15, "max_depth": 4, "colsample_bytree": 1.0, "subsample": 1.0,
+                        "subsample_freq": 0, "lambda_l1": 0.0, "lambda_l2": 1.0, "n_estimators": 200, "early_stopping_rounds": 20}}
+    score, report = train_lgbm_signal(features, label, model, log=lambda *_: None)
+    assert report["train_rows"] == 80 * 40 and report["valid_rows"] == 20 * 40
+    assert set(report["feature_importance"]) == {"f1", "f2"}
+    test = score[score.index.get_level_values("datetime") >= days[100]]
+    ic, rank_ic = information_coefficient(test, label)
+    assert ic is not None and ic > 0.5 and rank_ic > 0.5
+
+
+@pytest.mark.offline
+def test_window_coverage_names_the_missing_signal() -> None:
+    from rdagent.log.server.studio_worker import require_window_coverage
+
+    days = pd.bdate_range("2024-01-01", periods=10)
+    index = pd.MultiIndex.from_product([days, ["A"]], names=["datetime", "instrument"])
+    features = pd.DataFrame({"f1": 1.0, "pred": [None] * 5 + [1.0] * 5}, index=index)
+    require_window_coverage(features, [str(days[5].date()), str(days[9].date())], "training")
+    with pytest.raises(ValueError, match="pred \\(2024-01-08 to 2024-01-12\\)"):
+        require_window_coverage(features, [str(days[0].date()), str(days[4].date())], "training")

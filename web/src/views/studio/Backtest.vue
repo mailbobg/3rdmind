@@ -38,6 +38,36 @@
       </section>
 
       <section class="surface">
+        <div class="section-heading"><h3>信号合成</h3><span>{{ method === "lgbm" ? "LightGBM 回归 · 标签为次日收益的截面 z-score" : "截面百分位排名 · 按权重加权" }}</span></div>
+        <div class="actions" style="margin: 0 0 10px">
+          <label class="radio"><input type="radio" value="rank" v-model="method" /> 排名加权</label>
+          <label class="radio"><input type="radio" value="lgbm" v-model="method" /> 训练 LightGBM</label>
+        </div>
+        <template v-if="method === 'lgbm'">
+          <div class="form-grid">
+            <label>训练开始<input type="date" v-model="lgbm.train[0]" /></label>
+            <label>训练结束<input type="date" v-model="lgbm.train[1]" /></label>
+            <label>验证开始<input type="date" v-model="lgbm.valid[0]" /></label>
+            <label>验证结束<input type="date" v-model="lgbm.valid[1]" /></label>
+          </div>
+          <p class="hint" style="margin: 8px 0 0">训练 → 验证 → 回测三段必须依次不重叠；验证集用于早停。权重列在此模式下不生效。</p>
+          <details>
+            <summary>LightGBM 参数</summary>
+            <div class="form-grid">
+              <label>learning_rate<input type="number" step="0.01" min="0.001" max="1" v-model.number="lgbm.params.learning_rate" /></label>
+              <label>num_leaves<input type="number" min="2" max="1024" v-model.number="lgbm.params.num_leaves" /></label>
+              <label>max_depth<input type="number" min="-1" max="64" v-model.number="lgbm.params.max_depth" /></label>
+              <label>n_estimators<input type="number" min="10" max="5000" v-model.number="lgbm.params.n_estimators" /></label>
+              <label>early_stopping<input type="number" min="0" max="1000" v-model.number="lgbm.params.early_stopping_rounds" /></label>
+              <label>colsample_bytree<input type="number" step="0.05" min="0.1" max="1" v-model.number="lgbm.params.colsample_bytree" /></label>
+              <label>subsample<input type="number" step="0.05" min="0.1" max="1" v-model.number="lgbm.params.subsample" /></label>
+              <label>lambda_l2<input type="number" step="1" min="0" v-model.number="lgbm.params.lambda_l2" /></label>
+            </div>
+          </details>
+        </template>
+      </section>
+
+      <section class="surface">
         <div class="section-heading"><h3>策略与回测参数</h3><span>TopkDropoutStrategy · 前一日信号 · 收盘成交</span></div>
         <div class="form-grid">
           <label>开始<input type="date" v-model="params.start" /></label>
@@ -97,6 +127,14 @@ const params = reactive({
   topk: 10, n_drop: 2, account: 1000000, open_cost: 0.0005, close_cost: 0.0015,
   ...(saved.params || {}),
 });
+const method = ref<"rank" | "lgbm">(saved.model?.method === "lgbm" ? "lgbm" : "rank");
+const lgbm = reactive({
+  train: ["", ""] as [string, string],
+  valid: ["", ""] as [string, string],
+  params: { learning_rate: 0.05, num_leaves: 63, max_depth: 8, n_estimators: 1000, early_stopping_rounds: 50,
+            colsample_bytree: 0.8, subsample: 0.8, lambda_l2: 1 },
+  ...(saved.model?.method === "lgbm" ? { train: saved.model.train, valid: saved.model.valid, params: { ...saved.model.params } } : {}),
+});
 const pageError = ref("");
 const source = ref("");
 const result = computed(() => backtests.result.value);
@@ -104,14 +142,20 @@ const shortName = (id: string) => id.split("/").slice(1).join("/") || id;
 const jobLabel = (job: BacktestSummary) =>
   `${backtestStatusLabel(job.status)} · ${job.config.factors?.length ?? 0} 因子 · ${job.config.start} → ${job.config.end}`;
 
+const shiftYears = (date: string, years: number) => { const d = new Date(date); d.setFullYear(d.getFullYear() + years); return d.toISOString().slice(0, 10); };
+const dayBefore = (date: string) => { const d = new Date(date); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10); };
 function defaultDates() {
-  if (params.start && params.end) return;
-  const end = env.value?.end;
-  if (!end) return;
-  params.end = end;
-  const start = new Date(end);
-  start.setFullYear(start.getFullYear() - 1);
-  params.start = start.toISOString().slice(0, 10);
+  if (!params.start || !params.end) {
+    const end = env.value?.end;
+    if (!end) return;
+    params.end = end;
+    params.start = shiftYears(end, -1);
+  }
+  // Default model windows: the two years before the backtest, split 1 + 1, and never overlapping it.
+  if (!lgbm.train[0] && params.start) {
+    lgbm.valid = [shiftYears(params.start, -1), dayBefore(params.start)];
+    lgbm.train = [shiftYears(params.start, -2), dayBefore(lgbm.valid[0])];
+  }
 }
 watch(env, defaultDates, { immediate: true });
 
@@ -119,9 +163,15 @@ async function toggleSource() {
   if (source.value) { source.value = ""; return; }
   try { source.value = (await studio.strategySource()).code; } catch (e) { pageError.value = e instanceof Error ? e.message : String(e); }
 }
+function modelConfig() {
+  return method.value === "lgbm"
+    ? { method: "lgbm" as const, train: [...lgbm.train] as [string, string], valid: [...lgbm.valid] as [string, string], params: { ...lgbm.params } }
+    : { method: "rank" as const };
+}
 async function submit() {
-  persistStudioState({ params: { ...params } });
-  await backtests.run({ factors: basket.items.map((f) => ({ ...f, weight: Number(f.weight) })), ...params });
+  const model = modelConfig();
+  persistStudioState({ params: { ...params }, model });
+  await backtests.run({ factors: basket.items.map((f) => ({ ...f, weight: Number(f.weight) })), model, ...params });
 }
 function exportResult() {
   if (result.value) download(`backtest-${result.value.id.slice(0, 8)}.json`, JSON.stringify(result.value, null, 2), "application/json");
@@ -132,3 +182,6 @@ onMounted(async () => {
   if (!backtests.selectedId.value && backtests.jobs.value.length) await backtests.select(backtests.jobs.value[0].id);
 });
 </script>
+<style scoped>
+.radio { flex-direction: row; align-items: center; gap: 6px; color: var(--ink); }
+</style>
