@@ -1,6 +1,7 @@
 <template>
   <section class="surface">
     <div class="section-heading"><h3>RD-Agent 等待你的确认</h3><span>{{ event.timestamp }}</span></div>
+    <p class="hint" style="margin: 0 0 8px">{{ stageHint }}</p>
     <label v-for="field in fields" :key="field.key">
       {{ field.label }}
       <textarea v-if="typeof field.value === 'string'" :value="field.value" rows="3" @input="update(field.key, ($event.target as HTMLTextAreaElement).value)" />
@@ -12,7 +13,7 @@
     </details>
     <div v-if="parseError" class="notice">{{ parseError }}</div>
     <div class="actions">
-      <button class="primary" :disabled="busy || !!parseError" @click="submit">提交确认</button>
+      <button class="primary" :disabled="busy || !!parseError" @click="submit">{{ edited ? "提交修改" : "按原案继续" }}</button>
     </div>
   </section>
 </template>
@@ -34,6 +35,16 @@ watch(() => props.event.timestamp, () => {
 }, { immediate: true });
 const parsed = computed(() => { try { return { value: JSON.parse(text.value), error: "" }; } catch { return { value: null, error: "JSON 格式错误。" }; } });
 const parseError = computed(() => parsed.value.error);
+const original = computed(() => JSON.stringify(props.event.content, null, 2));
+const edited = computed(() => text.value !== original.value);
+const stageHint = computed(() => {
+  const c = props.event.content || {};
+  if ("features" in c) return "基础特征集：agent 会在这些 Qlib 特征之上补充新因子，不改直接继续。";
+  if ("user_instruction" in c) return "开始前的总体指示：可留空，agent 会自行选题。";
+  if ("hypothesis" in c) return "这一轮 agent 提出的假设：认可就直接继续，也可以改写后提交。";
+  if ("decision" in c) return "这一轮的评估结论：不同意 agent 的判断可以在这里改。";
+  return "不改直接提交即按 agent 的原案继续。";
+});
 const labels: Record<string, string> = { user_instruction: "研究方向", hypothesis: "研究假设", reason: "依据与反馈", decision: "评估决定" };
 const fields = computed(() => {
   const data = parsed.value.value;

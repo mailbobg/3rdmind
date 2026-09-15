@@ -35,9 +35,10 @@
           <div class="panel-head"><h3>{{ mode.name }}</h3><span class="status">{{ env?.chat_model || "未配置研究模型" }}</span></div>
           <div class="panel-body">
             <p class="hint" style="margin: 0 0 8px">{{ mode.desc }}</p>
-            <label v-if="mode.objective">研究方向（agent 首次确认时预填）
-              <textarea v-model="form.objective" rows="5" placeholder="例如：研究沪深300中量价动量因子的增量信息，并评估与现有特征组合后的效果。"></textarea>
+            <label v-if="mode.objective">研究方向（可选）
+              <textarea v-model="form.objective" rows="5" placeholder="留空则由 agent 自行选题。填了会作为总体指示进入每一轮的假设生成，例如：研究沪深300中量价动量因子的增量信息。"></textarea>
             </label>
+            <p v-if="mode.objective" class="hint" style="margin: 8px 0 0">假设由 agent 自己提出并按前几轮的成败迭代。运行中它会在三个节点停下来让你确认（开始前的方向与基础特征、每轮的假设、每轮的反馈），面板里不改直接提交就按它的原案继续；不提交它会一直等。</p>
             <p v-if="files.length" class="hint" style="margin: 8px 0 0">已选文件：{{ files.map((f) => f.name).join("，") }}</p>
           </div>
           <div class="panel-foot"><button class="dark" :disabled="trace.busy.value" @click="start">▶ 开始研究</button></div>
