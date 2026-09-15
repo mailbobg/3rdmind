@@ -142,7 +142,7 @@ export function ResearchPage() {
             {mode.objective && (
               <Field label="研究方向（可选）" wide>
                 <textarea rows={5} className="mm-control" value={form.objective} onChange={(e) => setForm((f) => ({ ...f, objective: e.target.value }))}
-                  placeholder="留空则由 agent 自行选题。填了会作为总体指示进入每一轮的假设生成，例如：研究沪深300中量价动量因子的增量信息。" />
+                  placeholder="留空则由 Agent 自行选题。填了会作为总体指示进入每一轮的假设生成，例如：研究沪深300中量价动量因子的增量信息。" />
               </Field>
             )}
           </FieldGrid>
@@ -150,12 +150,12 @@ export function ResearchPage() {
             <Btn kind="primary" disabled={trace.busy} onClick={start}>{trace.busy ? "启动中…" : "开始研究"}</Btn>
             <span className="mm-dim" style={{ fontSize: 12 }}>{mode.desc}{files.length ? ` · 已选 ${files.map((f) => f.name).join("，")}` : ""}</span>
           </div>
-          {mode.objective && <P>假设由 agent 自己提出并按前几轮的成败迭代。运行中它会在三个节点停下来让你确认（开始前的方向与基础特征、每轮的假设、每轮的反馈），面板里不改直接提交就按它的原案继续；不提交它会一直等。</P>}
+          {mode.objective && <P>假设由 Agent 自己提出并按前几轮的成败迭代。运行中它会在三个节点停下来让你确认（开始前的方向与基础特征、每轮的假设、每轮的反馈），面板里不改直接提交就按它的原案继续；不提交它会一直等。</P>}
         </Block>
       ) : (
         <Block title="研究轮次" count={trace.rounds.length} note={trace.traceId ? <StatusTag status={status} /> : undefined}>
           {!trace.traceId ? <Empty>从右上角选择一个实验，或新建研究。</Empty>
-            : status === "启动中" ? <Empty>agent 正在初始化，第一条事件到达前这里是空的，通常几十秒。</Empty>
+            : status === "启动中" ? <Empty>Agent 正在初始化，第一条事件到达前这里是空的，通常几十秒。</Empty>
             : status === "未加载" ? <Note tone="info">服务端没有加载这个实验的事件。<small>已结束的实验需要后端以 UI_LOAD_LEGACY_PICKLE_TRACES=true 启动才可回看。</small></Note>
             : status === "已结束" && !trace.rounds.length ? <Note>这个实验的进程已结束，且没有留下任何事件；看日志里的报错。</Note>
             : status === "运行中" && !trace.rounds.length ? <Empty>研究已启动，等待第一轮假设…</Empty>

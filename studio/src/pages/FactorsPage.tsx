@@ -81,7 +81,7 @@ export function FactorsPage() {
       title="因子库"
       description={`${all.length} 个因子来自 ${new Set(all.map((f) => f.trace)).size} 个实验 · 单因子 IC 由后端计算并缓存 · 篮内相关性实时计算`}
       tag={`篮内 ${basket.items.length}`}
-      tabs={<TextTabs label="筛选" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部因子" }, { key: "accepted", label: "agent 接受的轮次" }]} />}
+      tabs={<TextTabs label="筛选" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部因子" }, { key: "accepted", label: "Agent 接受的轮次" }]} />}
       actions={
         <>
           <TextInput type="search" ariaLabel="搜索因子" placeholder="搜索因子或实验" value={query} onChange={setQuery} className="w-44" />
@@ -95,15 +95,15 @@ export function FactorsPage() {
         selected ? (
           <div className="flex flex-col gap-3">
             <Section title="这是什么" note={`${selected.trace} · 第 ${selected.loop_id + 1} 轮`}>
-              <p className="m-0 text-xs">{selected.description || "agent 没有记录描述。"}</p>
+              <p className="m-0 text-xs">{selected.description || "Agent 没有记录描述。"}</p>
               {selected.formulation && <Formula source={selected.formulation} />}
               {selected.variables && Object.keys(selected.variables).length > 0 && (
                 <Hint>变量：{Object.entries(selected.variables).map(([v, meaning]) => <span key={v}><Mono>{v}</Mono> {meaning}； </span>)}</Hint>
               )}
             </Section>
-            <Section title="为什么提出" note={selected.decision === true ? <Chip size="sm" variant="soft" color="success">agent 接受本轮</Chip> : selected.decision === false ? <Chip size="sm" variant="soft" color="danger">agent 拒绝本轮</Chip> : undefined}>
+            <Section title="为什么提出" note={selected.decision === true ? <Chip size="sm" variant="soft" color="success">Agent 接受本轮</Chip> : selected.decision === false ? <Chip size="sm" variant="soft" color="danger">Agent 拒绝本轮</Chip> : undefined}>
               {selected.hypothesis ? <p className="m-0 text-xs">{selected.hypothesis}</p> : <Hint>这一轮没有记录假设文本。</Hint>}
-              {selected.reason && <Hint>agent 评价：{selected.reason}</Hint>}
+              {selected.reason && <Hint>Agent 评价：{selected.reason}</Hint>}
             </Section>
             <Section title="单因子分析" note="沪深300 · 次日收益">
               {selected.analysis ? (

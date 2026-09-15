@@ -61,10 +61,10 @@ export function InteractionPanel({ event, busy, defaultInstruction, onSubmit }: 
   const fields = parsed.value && typeof parsed.value === "object" ? Object.keys(LABELS).filter((k) => k in parsed.value).map((k) => ({ key: k, value: parsed.value[k] })) : [];
   const update = (k: string, v: unknown) => { if (parsed.value) setText(JSON.stringify({ ...parsed.value, [k]: v }, null, 2)); };
   const c = event.content || {};
-  const stageHint = "features" in c ? "基础特征集：agent 会在这些 Qlib 特征之上补充新因子，不改直接继续。"
-    : "user_instruction" in c ? "开始前的总体指示：可留空，agent 会自行选题。"
-    : "hypothesis" in c ? "这一轮 agent 提出的假设：认可就直接继续，也可以改写后提交。"
-    : "decision" in c ? "这一轮的评估结论：不同意 agent 的判断可以在这里改。" : "不改直接提交即按 agent 的原案继续。";
+  const stageHint = "features" in c ? "基础特征集：Agent 会在这些 Qlib 特征之上补充新因子，不改直接继续。"
+    : "user_instruction" in c ? "开始前的总体指示：可留空，Agent 会自行选题。"
+    : "hypothesis" in c ? "这一轮 Agent 提出的假设：认可就直接继续，也可以改写后提交。"
+    : "decision" in c ? "这一轮的评估结论：不同意 Agent 的判断可以在这里改。" : "不改直接提交即按 Agent 的原案继续。";
   const submit = () => {
     const d = parsed.value;
     if (!d || typeof d !== "object" || Array.isArray(d)) return;
