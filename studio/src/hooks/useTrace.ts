@@ -28,7 +28,8 @@ export function useTrace() {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const failures = useRef(0);
   const disposed = useRef(false);
-  useEffect(() => () => { disposed.current = true; clearTimeout(timer.current); }, []);
+  // StrictMode runs mount → unmount → mount on the same instance, so the flag must be reset on (re)mount.
+  useEffect(() => { disposed.current = false; return () => { disposed.current = true; clearTimeout(timer.current); }; }, []);
 
   const rounds = useMemo(() => groupRounds(events), [events]);
   const status = useMemo(() => traceStatus(events, liveness), [events, liveness]);

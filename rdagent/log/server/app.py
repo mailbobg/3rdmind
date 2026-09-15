@@ -643,6 +643,12 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.route("/app/", methods=["GET"])
+def studio_app():
+    """The React Studio build (rd-agent/studio, `npm run build` → static/app/)."""
+    return send_from_directory(Path(app.static_folder) / "app", "index.html")
+
+
 @app.route("/<path:fn>", methods=["GET"])
 def server_static_files(fn):
     return send_from_directory(app.static_folder, _normalize_static_request_path(fn))

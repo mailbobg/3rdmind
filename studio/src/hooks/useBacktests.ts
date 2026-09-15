@@ -19,7 +19,8 @@ export function useBacktests() {
   resultRef.current = result;
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const disposed = useRef(false);
-  useEffect(() => () => { disposed.current = true; clearTimeout(timer.current); }, []);
+  // StrictMode runs mount → unmount → mount on the same instance, so the flag must be reset on (re)mount.
+  useEffect(() => { disposed.current = false; return () => { disposed.current = true; clearTimeout(timer.current); }; }, []);
 
   const guarded = useCallback(async (fn: () => Promise<void>) => {
     setBusy(true);

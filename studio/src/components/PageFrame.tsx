@@ -1,78 +1,65 @@
 import type { ReactNode } from "react";
-import { Layout, LayoutContent, LayoutHeader, LayoutPanel, VStack, HStack } from "@astryxdesign/core/Layout";
-import { ResizeHandle, useResizable } from "@astryxdesign/core/Resizable";
-import { Toolbar } from "@astryxdesign/core/Toolbar";
-import { Button } from "@astryxdesign/core/Button";
-import { Heading, Text } from "@astryxdesign/core/Text";
-import { Badge } from "@astryxdesign/core/Badge";
+import { Button, Chip } from "@heroui/react";
 import { useStudio } from "../hooks/studioContext";
+import { useResizablePanel } from "../hooks/useResizablePanel";
 
 export interface PageFrameProps {
-  /** Object bar: what is being worked on. */
   title: string;
   description?: string;
   tag?: string;
   titleEnd?: ReactNode;
-  /** Middle column head: left slot (tabs) and right slot (actions). */
   tabs?: ReactNode;
   actions?: ReactNode;
-  /** Middle column body. */
   children: ReactNode;
-  /** Results column head and body; the column is collapsible and resizable. */
   resultsTitle: ReactNode;
   resultsActions?: ReactNode;
   results: ReactNode;
 }
 
 /**
- * The three-layer frame every Studio page shares: an object bar across both columns, then a work column
- * (tabs + actions toolbar, then content) beside a resizable results panel that the user can hide.
+ * The three-layer frame every page shares: an object bar across both columns, then a work column
+ * (tabs + actions, content) beside a results panel the user can hide and drag wider.
  */
 export function PageFrame(p: PageFrameProps) {
   const { layout } = useStudio();
-  const panel = useResizable({ defaultSize: 680, minSize: 360, maxSize: 1400, autoSaveId: "studio-results" });
-  const toggle = <Button size="sm" variant="ghost" label={layout.resultsOpen ? "隐藏结果 ▸" : "◂ 显示结果"} onClick={layout.toggleResults} />;
-
+  const panel = useResizablePanel();
   return (
-    <Layout
-      height="fill"
-      header={
-        <LayoutHeader hasDivider paddingBlockEnd={2}>
-          <HStack gap={3} align="center" justify="between">
-            <VStack gap={0}>
-              <Heading level={4} accessibilityLevel={1}>{p.title}</Heading>
-              {p.description && <Text type="supporting" maxLines={1}>{p.description}</Text>}
-            </VStack>
-            <HStack gap={2} align="center">
-              {p.titleEnd}
-              {p.tag && <Badge label={p.tag} />}
-            </HStack>
-          </HStack>
-        </LayoutHeader>
-      }
-      content={
-        <Layout
-          height="fill"
-          header={
-            <Toolbar label="工作区操作" size="sm" dividers={["bottom"]} startContent={p.tabs} endContent={<>{p.actions}{toggle}</>} />
-          }
-          content={<LayoutContent padding={3}>{p.children}</LayoutContent>}
-        />
-      }
-      end={
-        layout.resultsOpen ? (
+    <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2">
+      <header className="flex min-h-[52px] items-center gap-3.5 rounded-2xl border border-border bg-surface px-4.5 py-2.5">
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-sm font-semibold text-foreground" title={p.title}>{p.title}</h1>
+          {p.description && <div className="truncate text-[11px] text-muted" title={p.description}>{p.description}</div>}
+        </div>
+        {p.titleEnd}
+        {p.tag && <Chip size="sm" variant="tertiary">{p.tag}</Chip>}
+      </header>
+      <div className="grid min-h-0 gap-0.5" style={{ gridTemplateColumns: layout.resultsOpen ? `minmax(360px,1fr) 6px ${panel.width}px` : "minmax(360px,1fr)" }}>
+        <main className="flex min-h-0 min-w-0 flex-col rounded-2xl border border-border bg-surface">
+          <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-border px-3.5 py-2.5">
+            <div className="flex items-center gap-2">{p.tabs}</div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {p.actions}
+              <Button size="sm" variant="ghost" onPress={layout.toggleResults}>{layout.resultsOpen ? "隐藏结果 ▸" : "◂ 显示结果"}</Button>
+            </div>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3.5">{p.children}</div>
+        </main>
+        {layout.resultsOpen && (
           <>
-            <ResizeHandle direction="horizontal" hasDivider resizable={panel.props} label="调整结果栏宽度" />
-            <LayoutPanel width={panel.size} hasDivider={false} padding={0} label="结果">
-              <Layout
-                height="fill"
-                header={<Toolbar label="结果操作" size="sm" dividers={["bottom"]} startContent={<Text weight="semibold">{p.resultsTitle}</Text>} endContent={p.resultsActions} />}
-                content={<LayoutContent padding={3}>{p.results}</LayoutContent>}
-              />
-            </LayoutPanel>
+            <div role="separator" aria-orientation="vertical" aria-label="调整结果栏宽度" onPointerDown={panel.onPointerDown}
+              className="group relative cursor-col-resize touch-none rounded hover:bg-border active:bg-border">
+              <span className="absolute left-0.5 top-1/2 h-9 w-0.5 -translate-y-1/2 rounded bg-border" />
+            </div>
+            <aside className="flex min-h-0 min-w-0 flex-col rounded-2xl border border-border bg-surface">
+              <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-border px-3.5 py-2.5">
+                <div className="text-[13px] font-semibold text-foreground">{p.resultsTitle}</div>
+                <div className="flex flex-wrap items-center gap-1.5">{p.resultsActions}</div>
+              </div>
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3.5">{p.results}</div>
+            </aside>
           </>
-        ) : undefined
-      }
-    />
+        )}
+      </div>
+    </div>
   );
 }

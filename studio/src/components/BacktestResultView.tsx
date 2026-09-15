@@ -1,18 +1,9 @@
 import { useMemo, useState } from "react";
-import { VStack, HStack } from "@astryxdesign/core/Stack";
-import { Text } from "@astryxdesign/core/Text";
-import { Badge } from "@astryxdesign/core/Badge";
-import { Banner } from "@astryxdesign/core/Banner";
-import { Table, pixel, proportional } from "@astryxdesign/core/Table";
-import { TextInput } from "@astryxdesign/core/TextInput";
-import { Pagination } from "@astryxdesign/core/Pagination";
-import { Collapsible } from "@astryxdesign/core/Collapsible";
-import { Code } from "@astryxdesign/core/Code";
-import { ProgressBar } from "@astryxdesign/core/ProgressBar";
+import { Alert, Chip, Disclosure, Input, ProgressBar } from "@heroui/react";
 import type { BacktestResult, InstrumentSummary, Trade } from "../api/studio";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { Section } from "./Section";
-import { CodeView, EquityChart, MetricGrid, Signed, StatusBadge, fixed, money, percent } from "./widgets";
+import { CodeView, DataTable, EquityChart, Hint, MetricGrid, Mono, Signed, StatusChip, money, percent } from "./widgets";
 
 export function BacktestResultView({ result }: { result: BacktestResult }) {
   const legacy = (result.config.loop_id === undefined || result.config.loop_id === null)
@@ -36,60 +27,66 @@ export function BacktestResultView({ result }: { result: BacktestResult }) {
   const importance = useMemo(() => Object.entries(result.model?.feature_importance || {}).sort((a, b) => b[1] - a[1]), [result.model]);
 
   return (
-    <VStack gap={3}>
-      <Section title={`回测 ${result.id.slice(0, 8)}`} note={<StatusBadge status={backtestStatusLabel(result.status)} />}>
-        <HStack gap={1} wrap="wrap">
-          {legacy ? <Badge label={`旧格式回测 · ${result.config.factors.length} 个因子`} /> :
-            result.config.factors.map((f) => <Badge key={`${f.trace}#${f.loop_id}#${f.name}`} variant="neutral" label={`${f.kind === "prediction" ? "模型 · " : ""}${f.name}${f.weight !== 1 ? ` ×${f.weight}` : ""}`} />)}
-        </HStack>
-        <Text type="supporting">
+    <div className="flex flex-col gap-3">
+      <Section title={`回测 ${result.id.slice(0, 8)}`} note={<StatusChip status={backtestStatusLabel(result.status)} />}>
+        <div className="flex flex-wrap gap-1">
+          {legacy ? <Chip size="sm">旧格式回测 · {result.config.factors.length} 个因子</Chip> :
+            result.config.factors.map((f) => <Chip key={`${f.trace}#${f.loop_id}#${f.name}`} size="sm" variant="soft">{f.kind === "prediction" ? "模型 · " : ""}{f.name}{f.weight !== 1 ? ` ×${f.weight}` : ""}</Chip>)}
+        </div>
+        <Hint>
           {result.config.start} → {result.config.end} · {result.config.market} · 基准 {result.config.benchmark || "SH000300"} · topk {result.config.topk} / n_drop {result.config.n_drop}
           {" · "}{result.config.model?.method === "lgbm" ? `LightGBM（训练 ${result.config.model.train.join("→")}，验证 ${result.config.model.valid.join("→")}）` : "排名加权"}
-        </Text>
-        {result.error && <Banner status="error" title={result.error} collapsible={false} />}
+        </Hint>
+        {result.error && <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{result.error}</Alert.Title></Alert.Content></Alert>}
         {m && (
           <>
             <MetricGrid items={[
               { label: "总收益（扣费）", value: <Signed value={m.total_return} format={(v) => percent(v)} />, hint: "回测区间内的净值变化，已扣手续费" },
               { label: "超额收益", value: <Signed value={excess} format={(v) => percent(v)} />, hint: "总收益减去基准指数同期收益" },
-              { label: "基准收益", value: <Text hasTabularNumbers>{percent(m.benchmark_return)}</Text>, hint: "基准指数同期收益" },
+              { label: "基准收益", value: percent(m.benchmark_return), hint: "基准指数同期收益" },
               { label: "复利年化", value: <Signed value={m.annualized_return} format={(v) => percent(v)} />, hint: "按 252 个交易日折算" },
-              { label: "夏普", value: <Text hasTabularNumbers>{typeof m.sharpe === "number" ? m.sharpe.toFixed(2) : "—"}</Text>, hint: "日收益均值 ÷ 波动 × √252；1 以上算不错，0.5 以下基本靠运气" },
-              { label: "最大回撤", value: <Text hasTabularNumbers>{percent(m.max_drawdown)}</Text>, hint: "净值从高点回落的最大幅度" },
+              { label: "夏普", value: typeof m.sharpe === "number" ? m.sharpe.toFixed(2) : "—", hint: "日收益均值 ÷ 波动 × √252；1 以上算不错，0.5 以下基本靠运气" },
+              { label: "最大回撤", value: percent(m.max_drawdown), hint: "净值从高点回落的最大幅度" },
               { label: "信号 IC", value: <Signed value={m.signal_ic} />, hint: "最终评分与次日收益的日均相关；|IC| < 0.01 接近噪声" },
               { label: "信号 Rank IC", value: <Signed value={m.signal_rank_ic} />, hint: "评分排名与次日收益排名的日均相关" },
-              { label: "交易日数", value: <Text hasTabularNumbers>{String(m.days ?? "—")}</Text>, hint: "样本太短（< 120 天）时以上指标都不可靠" },
+              { label: "交易日数", value: String(m.days ?? "—"), hint: "样本太短（< 120 天）时以上指标都不可靠" },
             ]} />
-            {verdict.map((line) => <Banner key={line} status={line.startsWith("跑赢") ? "success" : "info"} title={line} collapsible={false} />)}
+            <div className="flex flex-col gap-1">
+              {verdict.map((line) => (
+                <Alert key={line} status={line.startsWith("跑赢") ? "success" : "default"} className="py-1.5">
+                  <Alert.Indicator /><Alert.Content><Alert.Title className="text-xs font-normal">{line}</Alert.Title></Alert.Content>
+                </Alert>
+              ))}
+            </div>
             <EquityChart rows={result.rows || []} />
-            <Text type="supporting">{result.method}</Text>
+            <Hint>{result.method}</Hint>
           </>
         )}
       </Section>
       {result.model && (
         <Section title="LightGBM 训练" note={`${result.model.train_rows.toLocaleString()} 训练样本 · ${result.model.valid_rows.toLocaleString()} 验证样本`}>
-          <MetricGrid columns={2} items={[
-            { label: "最佳迭代", value: String(result.model.best_iteration) },
-            { label: "验证 L2", value: result.model.valid_l2.toFixed(4) },
-          ]} />
-          <VStack gap={1}>
+          <MetricGrid columns={2} items={[{ label: "最佳迭代", value: String(result.model.best_iteration) }, { label: "验证 L2", value: result.model.valid_l2.toFixed(4) }]} />
+          <div className="flex flex-col gap-1.5">
             {importance.map(([name, gain]) => (
-              <HStack key={name} gap={2} align="center">
-                <Code>{name}</Code>
-                <ProgressBar value={importance[0][1] ? (gain / importance[0][1]) * 100 : 0} label={`${name} 重要性`} isLabelHidden />
-                <Text type="supporting" hasTabularNumbers>{gain.toFixed(1)}</Text>
-              </HStack>
+              <div key={name} className="grid grid-cols-[120px_1fr_60px] items-center gap-2">
+                <Mono>{name}</Mono>
+                <ProgressBar aria-label={`${name} 重要性`} value={importance[0][1] ? (gain / importance[0][1]) * 100 : 0} size="sm"><ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track></ProgressBar>
+                <span className="text-right text-[11px] tabular-nums text-muted">{gain.toFixed(1)}</span>
+              </div>
             ))}
-          </VStack>
+          </div>
         </Section>
       )}
       {m && <TradeTables trades={result.trades || []} instruments={result.instruments || []} holdings={result.holdings} />}
       {result.log && (
         <Section title="执行日志">
-          <Collapsible trigger={<Text type="supporting">展开日志</Text>} defaultIsOpen={false}><CodeView code={result.log} language="plaintext" /></Collapsible>
+          <Disclosure>
+            <Disclosure.Heading><Disclosure.Trigger className="text-xs">展开日志<Disclosure.Indicator /></Disclosure.Trigger></Disclosure.Heading>
+            <Disclosure.Content><CodeView code={result.log} /></Disclosure.Content>
+          </Disclosure>
         </Section>
       )}
-    </VStack>
+    </div>
   );
 }
 
@@ -108,50 +105,51 @@ function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instr
     const q = tradeQuery.trim().toUpperCase();
     return q ? trades.filter((t) => t.instrument.toUpperCase().includes(q) || t.date.includes(q)) : trades;
   }, [trades, tradeQuery]);
-  const paged = filteredTrades.slice((page - 1) * PAGE, page * PAGE).map((t, i) => ({ ...t, _id: `${t.date}-${t.instrument}-${i}` }));
+  const pageCount = Math.max(1, Math.ceil(filteredTrades.length / PAGE));
+  const paged = filteredTrades.slice((page - 1) * PAGE, page * PAGE);
   if (!instruments.length && !trades.length) return null;
   return (
     <>
       {instruments.length > 0 && (
         <Section title="持仓与标的收益" note={`${holdings?.positions.length ?? 0} 只在手 · 共 ${instruments.length} 只交易过`}>
-          <MetricGrid columns={3} items={[
-            { label: "持仓市值", value: money(marketValue) }, { label: "现金", value: money(holdings?.cash) }, { label: "手续费合计", value: money(totalCost) },
-          ]} />
-          <TextInput label="搜索标的" isLabelHidden placeholder="搜索合约代码" value={instrumentQuery} onChange={setInstrumentQuery} size="sm" />
-          <Table
-            data={filteredInstruments.slice(0, 50).map((r) => ({ ...r }))}
-            idKey="instrument"
-            density="compact"
-            columns={[
-              { key: "instrument", header: "标的", width: proportional(1), renderCell: (r) => <HStack gap={1} align="center"><Code>{r.instrument}</Code>{r.held && <Badge variant="success" label="持有" />}</HStack> },
-              { key: "trades", header: "成交笔数", width: pixel(80), align: "end" },
-              { key: "holding_value", header: "在手市值", width: pixel(120), align: "end", renderCell: (r) => <Text hasTabularNumbers>{r.holding_value ? money(r.holding_value) : "—"}</Text> },
-              { key: "cost", header: "手续费", width: pixel(100), align: "end", renderCell: (r) => <Text hasTabularNumbers>{money(r.cost)}</Text> },
-              { key: "pnl", header: "最终收益", width: pixel(120), align: "end", renderCell: (r) => <Signed value={r.pnl} format={money} /> },
-            ]}
-          />
-          {filteredInstruments.length > 50 && <Text type="supporting">只显示前 50 只，用搜索缩小范围。</Text>}
+          <MetricGrid columns={3} items={[{ label: "持仓市值", value: money(marketValue) }, { label: "现金", value: money(holdings?.cash) }, { label: "手续费合计", value: money(totalCost) }]} />
+          <Input aria-label="搜索标的" placeholder="搜索合约代码" value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
+          <DataTable label="持仓与标的收益" head={[["标的"], ["成交笔数", "end"], ["在手市值", "end"], ["手续费", "end"], ["最终收益", "end"]]}
+            rows={filteredInstruments.slice(0, 50).map((r) => ({
+              key: r.instrument,
+              cells: [
+                <span key="i" className="flex items-center gap-1"><Mono>{r.instrument}</Mono>{r.held && <Chip size="sm" color="success" variant="soft">持有</Chip>}</span>,
+                <span key="t" className="tabular-nums">{r.trades}</span>,
+                <span key="h" className="tabular-nums">{r.holding_value ? money(r.holding_value) : "—"}</span>,
+                <span key="c" className="tabular-nums">{money(r.cost)}</span>,
+                <Signed key="p" value={r.pnl} format={money} />,
+              ],
+            }))} />
+          {filteredInstruments.length > 50 && <Hint>只显示前 50 只，用搜索缩小范围。</Hint>}
         </Section>
       )}
       {trades.length > 0 && (
-        <Section title="交易时间线" note={`共 ${filteredTrades.length} 笔`}>
-          <TextInput label="搜索成交" isLabelHidden placeholder="搜索合约代码或日期" value={tradeQuery} onChange={(v) => { setTradeQuery(v); setPage(1); }} size="sm" />
-          <Table
-            data={paged}
-            idKey="_id"
-            density="compact"
-            columns={[
-              { key: "date", header: "时间", width: pixel(100) },
-              { key: "instrument", header: "标的", width: proportional(1), renderCell: (r) => <Code>{r.instrument}</Code> },
-              { key: "direction", header: "方向", width: pixel(56), renderCell: (r) => <Badge variant={r.direction === "buy" ? "success" : "error"} label={r.direction === "buy" ? "买入" : "卖出"} /> },
-              { key: "price", header: "价格", width: pixel(80), align: "end", renderCell: (r) => <Text hasTabularNumbers>{r.price.toFixed(3)}</Text> },
-              { key: "amount", header: "数量", width: pixel(90), align: "end", renderCell: (r) => <Text hasTabularNumbers>{Math.round(r.amount).toLocaleString()}</Text> },
-              { key: "value", header: "金额", width: pixel(120), align: "end", renderCell: (r) => <Text hasTabularNumbers>{money(r.value)}</Text> },
-              { key: "cost", header: "手续费", width: pixel(90), align: "end", renderCell: (r) => <Text hasTabularNumbers>{money(r.cost)}</Text> },
-            ]}
-          />
-          <Pagination page={page} onChange={setPage} totalItems={filteredTrades.length} pageSize={PAGE} variant="compact" size="sm" />
-          <Text type="supporting">价格为 Qlib 复权价，与交易所原始报价不同。</Text>
+        <Section title="交易时间线" note={`共 ${filteredTrades.length} 笔 · 第 ${page} / ${pageCount} 页`}>
+          <Input aria-label="搜索成交" placeholder="搜索合约代码或日期" value={tradeQuery} onChange={(e) => { setTradeQuery(e.target.value); setPage(1); }} />
+          <DataTable label="交易时间线" head={[["时间"], ["标的"], ["方向"], ["价格", "end"], ["数量", "end"], ["金额", "end"], ["手续费", "end"]]}
+            rows={paged.map((t, i) => ({
+              key: `${t.date}-${t.instrument}-${i}`,
+              cells: [
+                <span key="d" className="tabular-nums">{t.date}</span>,
+                <Mono key="i">{t.instrument}</Mono>,
+                <Chip key="dir" size="sm" variant="soft" color={t.direction === "buy" ? "success" : "danger"}>{t.direction === "buy" ? "买入" : "卖出"}</Chip>,
+                <span key="p" className="tabular-nums">{t.price.toFixed(3)}</span>,
+                <span key="a" className="tabular-nums">{Math.round(t.amount).toLocaleString()}</span>,
+                <span key="v" className="tabular-nums">{money(t.value)}</span>,
+                <span key="c" className="tabular-nums">{money(t.cost)}</span>,
+              ],
+            }))} />
+          <div className="flex items-center justify-center gap-2 text-[11px] text-muted">
+            <button className="rounded border border-border px-2 py-0.5 disabled:opacity-40" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>上一页</button>
+            <span>{page} / {pageCount}</span>
+            <button className="rounded border border-border px-2 py-0.5 disabled:opacity-40" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>下一页</button>
+          </div>
+          <Hint>价格为 Qlib 复权价，与交易所原始报价不同。</Hint>
         </Section>
       )}
     </>
