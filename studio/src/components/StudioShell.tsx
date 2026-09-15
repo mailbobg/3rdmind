@@ -34,9 +34,9 @@ export function StudioShell() {
     <StudioContext.Provider value={value}>
       <div className="grid h-full grid-cols-[230px_minmax(0,1fr)] gap-2 bg-background p-2">
         <aside className="flex min-h-0 flex-col overflow-y-auto rounded-2xl border border-border bg-surface px-3.5 py-5">
-          <a href="#/research" className="flex items-center gap-2.5 text-xs font-bold tracking-wide text-foreground no-underline">
-            <span className="grid size-9 place-items-center rounded-[10px] bg-neutral-900 font-serif text-2xl text-white">R</span>
-            <span>RESEARCH STUDIO<small className="block text-[11px] font-normal tracking-normal text-muted">RD-Agent × Qlib</small></span>
+          <a href="#/research" className="flex flex-col gap-1.5 text-foreground no-underline">
+            <img src={`${import.meta.env.BASE_URL}rd-agent-logo.png`} alt="R&D-Agent" className="h-7 w-auto self-start" />
+            <small className="block text-[11px] text-muted">Research Studio · Qlib</small>
           </a>
           <nav aria-label="工作任务" className="mt-8 grid gap-2">
             {MENU.map((item) => (
