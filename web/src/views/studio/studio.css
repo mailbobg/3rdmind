@@ -1,10 +1,18 @@
 .studio {
   --ink: #242923; --muted: #7b8078; --line: #e1e5dd; --green: #17674e; --paper: #fff; --bg: #f3f4f0; --danger: #b2483a; --soft: #f7f8f5;
-  display: grid; grid-template-columns: 230px minmax(400px, 1fr) minmax(380px, 460px); flex: 1; min-height: 0; width: 100%;
+  display: grid; grid-template-columns: 230px 6px minmax(360px, 1fr) 6px 440px; flex: 1; min-height: 0; width: 100%;
   background: var(--bg); color: var(--ink);
   font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; line-height: 1.6;
-  gap: 10px; padding: 10px; box-sizing: border-box; overflow: hidden;
+  gap: 2px; padding: 10px; box-sizing: border-box; overflow: hidden;
 }
+.studio .rail { grid-column: 1; }
+.studio .handle-rail { grid-column: 2; }
+.studio .workspace { grid-column: 3; }
+.studio .handle-results { grid-column: 4; }
+.studio .results { grid-column: 5; }
+.studio .handle { cursor: col-resize; border-radius: 3px; touch-action: none; position: relative; }
+.studio .handle::after { content: ""; position: absolute; inset: 0 -4px; }
+.studio .handle:hover, .studio .handle:active { background: #cfd5c9; }
 .studio * { box-sizing: border-box; }
 .studio .rail, .studio .workspace, .studio .results {
   background: var(--paper); border: 1px solid var(--line); border-radius: 16px; min-height: 0; min-width: 0; display: flex; flex-direction: column;

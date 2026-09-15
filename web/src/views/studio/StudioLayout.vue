@@ -1,5 +1,5 @@
 <template>
-  <div class="studio">
+  <div class="studio" :style="{ gridTemplateColumns: `${widths.rail}px 6px minmax(360px, 1fr) 6px ${widths.results}px` }">
     <aside class="rail">
       <a class="brand" href="#/studio/research"
         ><span class="brand-mark">R</span><span>RESEARCH STUDIO<small>RD-Agent × Qlib</small></span></a
@@ -30,7 +30,9 @@
         <a href="#/Playground">原生 Playground ↗</a>
       </div>
     </aside>
+    <div class="handle handle-rail" role="separator" aria-orientation="vertical" aria-label="调整左栏宽度" @pointerdown="startDrag('rail', $event)"></div>
     <router-view />
+    <div class="handle handle-results" role="separator" aria-orientation="vertical" aria-label="调整右栏宽度" @pointerdown="startDrag('results', $event)"></div>
   </div>
 </template>
 <script setup lang="ts">
@@ -39,12 +41,14 @@ import { useEnvironment } from "../../composables/useEnvironment";
 import { useTrace } from "../../composables/useTrace";
 import { useBacktests } from "../../composables/useBacktests";
 import { useFactorBasket } from "../../composables/useFactorBasket";
+import { useColumnWidths } from "../../composables/useColumnWidths";
 import "./studio.css";
 
 const { env, load: loadEnv } = useEnvironment();
 const trace = useTrace();
 const backtests = useBacktests();
 const basket = useFactorBasket();
+const { widths, startDrag } = useColumnWidths();
 provide("env", env);
 provide("trace", trace);
 provide("backtests", backtests);
