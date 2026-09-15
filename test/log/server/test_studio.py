@@ -146,6 +146,27 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.offline
+def test_experiments_summarise_loaded_traces(studio_client) -> None:
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/second"))
+    task.messages = [
+        {"tag": "research.hypothesis", "loop_id": "0", "timestamp": "2026-09-01T10:00:00", "content": {"hypothesis": "first"}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "0", "timestamp": "2026-09-01T11:00:00", "content": {"decision": True}},
+        {"tag": "research.hypothesis", "loop_id": "1", "timestamp": "2026-09-02T10:00:00", "content": {"hypothesis": "second"}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "1", "timestamp": "2026-09-02T11:00:00", "content": {"decision": False}},
+        {"tag": "END", "loop_id": "1", "timestamp": "2026-09-02T12:00:00", "content": {"end_code": 0}},
+    ]
+    rows = {r["id"]: r for r in studio_client.get("/studio/experiments").get_json()}
+    assert rows["Finance Data Building/second"] == {
+        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1,
+        "status": "completed", "updated": "2026-09-02T11:00:00", "hypothesis": "second", "messages": 5,
+    }
+    # The demo trace has events but no END and no live process: it ended without reporting.
+    assert rows["Finance Data Building/demo"]["status"] == "ended"
+    assert rows["Finance Data Building/demo"]["rounds"] == 1
+
+
+@pytest.mark.offline
 def test_rounds_lists_factor_rounds(studio_client) -> None:
     response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
     assert response.status_code == 200

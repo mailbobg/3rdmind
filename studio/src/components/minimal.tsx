@@ -131,7 +131,8 @@ export function Block({ title, count, note, noteTone, children }: { title: React
 }
 
 export interface Column { label: ReactNode; num?: boolean; width?: number | string; optional?: boolean }
-export interface Row { key: string; cells: ReactNode[]; selected?: boolean; onClick?: () => void; group?: boolean }
+/** `group` rows are sub-headings spanning every column; `span` rows hold arbitrary content (e.g. a nested table) under a parent row. */
+export interface Row { key: string; cells: ReactNode[]; selected?: boolean; onClick?: () => void; group?: boolean; span?: boolean; expanded?: boolean }
 
 /**
  * Hairline table. A `group` row spans all columns as a sub-heading; clickable rows highlight on hover and
@@ -159,10 +160,10 @@ export function Table({ columns, rows, label }: { columns: Column[]; rows: Row[]
     <table className="mm-table" aria-label={label}>
       <thead><tr>{shown.map((c, i) => <th key={i} className={cls(c)} style={{ width: c.width }}>{c.label}</th>)}</tr></thead>
       <tbody>
-        {rows.map((r) => r.group ? (
-          <tr key={r.key} className="mm-group"><td colSpan={shown.length}>{r.cells[0]}</td></tr>
+        {rows.map((r) => r.group || r.span ? (
+          <tr key={r.key} className={r.group ? "mm-group" : "mm-span"}><td colSpan={shown.length}>{r.cells[0]}</td></tr>
         ) : (
-          <tr key={r.key} data-clickable={r.onClick ? "" : undefined} aria-selected={r.onClick ? !!r.selected : undefined} onClick={r.onClick}
+          <tr key={r.key} data-clickable={r.onClick ? "" : undefined} aria-selected={r.onClick ? !!r.selected : undefined} aria-expanded={r.expanded} onClick={r.onClick}
             tabIndex={r.onClick ? 0 : undefined} onKeyDown={(e) => { if (r.onClick && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); r.onClick(); } }}>
             {r.cells.filter((_, i) => keep[i]).map((cell, i) => <td key={i} className={cls(shown[i])}>{cell}</td>)}
           </tr>

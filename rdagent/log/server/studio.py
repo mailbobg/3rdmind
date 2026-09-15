@@ -327,6 +327,62 @@ def trace_status():
     return jsonify({"loaded": True, "alive": bool(alive), "messages": len(task.messages)})
 
 
+def summarize_task(trace_id, task):
+    """One row of the experiment list: what a user needs to pick a run without loading it.
+
+    Everything comes from the messages already held in memory, so this is cheap enough to compute
+    for every loaded trace on each request.
+    """
+    loops, accepted, hypothesis, end, updated, ended_at = set(), 0, None, None, "", ""
+    for message in task.messages:
+        try:
+            loops.add(normalize_loop_id(message.get("loop_id")))
+        except ValueError:
+            pass
+        tag, content = message.get("tag") or "", message.get("content") or {}
+        if tag == "research.hypothesis" and isinstance(content, dict):
+            hypothesis = content.get("hypothesis") or hypothesis
+        elif tag == "feedback.hypothesis_feedback" and isinstance(content, dict) and content.get("decision") is True:
+            accepted += 1
+        timestamp = str(message.get("timestamp") or "")
+        if tag.lower() == "end":
+            # The END event of a trace read back from disk is stamped when the server loads it, not when
+            # the run finished, so it only stands in for "updated" when nothing else is there.
+            end, ended_at = (content if isinstance(content, dict) else {}), max(ended_at, timestamp)
+        else:
+            updated = max(updated, timestamp)
+    process = getattr(task, "process", None)
+    alive = process is not None and task.is_alive()
+    if end is not None:
+        code = end.get("end_code")
+        status = "completed" if code == 0 else "stopped" if code == -1 else "failed"
+    elif alive:
+        status = "running" if task.messages else "starting"
+    else:
+        status = "ended"
+    return {
+        "id": trace_id, "scenario": trace_id.split("/")[0], "rounds": len(loops), "accepted": accepted,
+        "status": status, "updated": updated or ended_at or None, "hypothesis": hypothesis, "messages": len(task.messages),
+    }
+
+
+@studio.get("/experiments")
+def experiments():
+    """Summaries of every trace this server has loaded (running or read back from disk)."""
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    root = Path(current_app.config["LOG_FOLDER_PATH"])
+    rows = []
+    for key, task in list(registry.items()):
+        if task is None:
+            continue
+        try:
+            trace_id = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            trace_id = key
+        rows.append(summarize_task(trace_id, task))
+    return jsonify(rows)
+
+
 @studio.get("/rounds")
 def rounds():
     trace_id = request.args.get("trace", "")

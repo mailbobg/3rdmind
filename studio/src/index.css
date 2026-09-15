@@ -109,6 +109,13 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .mm-table tr[aria-selected="true"] td:first-child { box-shadow: inset 2px 0 0 var(--mm-accent); }
 .mm-table tr.mm-group td { padding-top: 14px; padding-bottom: 6px; border-bottom-color: var(--mm-rule); font-weight: 500; background: transparent !important; }
 .mm-table tr.mm-group td .mm-dim { font-weight: 400; margin-left: 8px; }
+.mm-table tr.mm-span td { padding: 0 0 12px 22px; white-space: normal; }
+.mm-table tr[aria-expanded="true"] td { background: transparent; box-shadow: none; font-weight: 500; border-bottom-color: transparent; }
+.mm-table tr[aria-expanded="true"] td:first-child { box-shadow: none; }
+.mm-table .mm-table { font-size: 12px; }
+.mm-table .mm-table th { padding-top: 4px; }
+.mm-caret { display: inline-block; width: 6px; height: 6px; margin-left: 2px; border-right: 1.5px solid var(--mm-muted); border-bottom: 1.5px solid var(--mm-muted); transform: translateY(-1px) rotate(-45deg); transition: transform 120ms; }
+.mm-caret[data-open] { transform: translateY(-3px) rotate(45deg); border-color: var(--mm-ink); }
 .mm-mono { font-family: var(--mm-mono); font-variant-numeric: tabular-nums; }
 .mm-table .mm-mono { white-space: nowrap; }
 .mm-name { font-weight: 500; }

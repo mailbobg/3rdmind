@@ -99,7 +99,14 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
   return value as T;
 }
 
+export type ExperimentStatus = "starting" | "running" | "completed" | "stopped" | "failed" | "ended";
+export interface ExperimentSummary {
+  id: string; scenario: string; rounds: number; accepted: number; status: ExperimentStatus;
+  updated: string | null; hypothesis: string | null; messages: number;
+}
+
 export const traces = () => api<string[]>("/traces");
+export const experiments = () => api<ExperimentSummary[]>("/studio/experiments");
 export const traceSnapshot = (id: string) => api<TraceEvent[]>("/trace", { id, snapshot: true });
 export const startResearch = (form: FormData) => api<{ id: string }>("/upload", form);
 export const stopResearch = (id: string) => api<{ status: string }>("/control", { id, action: "stop" });

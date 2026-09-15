@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
+import type { ExperimentSummary } from "../api/studio";
 import type { RoundView } from "../hooks/rounds";
+import { EXPERIMENT_STATUS_LABELS, mergeExperiments, shortTime } from "../hooks/experiments";
 import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
 import { errorText, shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
 import { InteractionPanel, RoundDetail } from "../components/RoundViews";
 import { Block, Btn, Empty, Field, FieldGrid, Note, NumberInput, P, SelectInput, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
+import type { Row } from "../components/minimal";
 import { Hint, StatusChip } from "../components/widgets";
 
 interface Mode { name: string; desc: string; value: string; loops: boolean; duration: boolean; objective: boolean; input?: "reports" | "paper" }
@@ -35,7 +38,21 @@ export function ResearchPage() {
   const [files, setFiles] = useState<File[]>([]);
   const [roundId, setRoundId] = useState("");
   const [predictionLoops, setPredictionLoops] = useState<Set<number>>(new Set());
+  const [summaries, setSummaries] = useState<ExperimentSummary[]>([]);
   const mode = MODES.find((m) => m.value === form.scenario) || MODES[0];
+  const scenarioName = (id: string) => MODES.find((m) => id.startsWith(m.value + "/"))?.name || id.split("/")[0];
+
+  // The experiment list: ids from /traces, summaries from /studio/experiments. Re-read when the id list or
+  // the selected run's status changes, and every 15 s while any run is live.
+  const loadSummaries = useCallback(() => { studio.experiments().then(setSummaries).catch(() => {}); }, []);
+  useEffect(() => { loadSummaries(); }, [loadSummaries, trace.traceIds, trace.status]);
+  const anyLive = summaries.some((s) => s.status === "running" || s.status === "starting");
+  useEffect(() => {
+    if (!anyLive) return;
+    const t = setInterval(loadSummaries, 15000);
+    return () => clearInterval(t);
+  }, [anyLive, loadSummaries]);
+  const experiments = useMemo(() => mergeExperiments(trace.traceIds, summaries), [trace.traceIds, summaries]);
 
   useEffect(() => { if (search.get("new")) setTab("new"); }, [search]);
   useEffect(() => { persistStudioState({ objective: form.objective }); }, [form.objective]);
@@ -92,7 +109,45 @@ export function ResearchPage() {
     const last = trace.rounds[trace.rounds.length - 1];
     return last?.hypothesis?.hypothesis || trace.traceId;
   }, [trace.traceId, trace.rounds]);
-  const objectTag = trace.traceId ? (MODES.find((m) => trace.traceId.startsWith(m.value + "/"))?.name || trace.traceId.split("/")[0]) : undefined;
+  const objectTag = trace.traceId ? scenarioName(trace.traceId) : undefined;
+
+  // Rounds of the expanded experiment, nested under its row; the states before the first round are spelled out.
+  const roundsBody = () => {
+    if (trace.busy && !trace.events.length) return <Empty>加载中…</Empty>;
+    if (status === "启动中") return <Empty>Agent 正在初始化，第一条事件到达前这里是空的，通常几十秒。</Empty>;
+    if (status === "未加载") return <Note tone="info">服务端没有加载这个实验的事件。<small>已结束的实验需要后端以 UI_LOAD_LEGACY_PICKLE_TRACES=true 启动才可回看。</small></Note>;
+    if (status === "已结束" && !trace.rounds.length) return <Note>这个实验的进程已结束，且没有留下任何事件；看日志里的报错。</Note>;
+    if (status === "运行中" && !trace.rounds.length) return <Empty>研究已启动，等待第一轮假设…</Empty>;
+    return (
+      <Table label="研究轮次" columns={[{ label: "轮", width: 40 }, { label: "假设" }, { label: "阶段", width: 220, optional: true }, { label: "因子", num: true, width: 56, optional: true }, { label: "状态", width: 90 }]}
+        rows={trace.rounds.map((round) => ({
+          key: round.id, selected: round.id === (activeRound?.id ?? ""), onClick: () => { setRoundId(round.id); layout.openResults(); },
+          cells: [
+            <span key="n" className="mm-mono mm-dim">{Number(round.id) + 1}</span>,
+            <span key="h" className="block truncate" title={round.hypothesis.hypothesis}>{round.hypothesis.hypothesis || <span className="mm-dim">（无假设文本）</span>}</span>,
+            <span key="s" className="mm-tag">{stagesOf(round).map((st) => <span key={st.name} className={st.done ? "mm-pos" : "mm-dim"} style={{ marginRight: 8 }}>{st.done ? "●" : "○"} {st.name}</span>)}</span>,
+            round.factors.length ? String(round.factors.length) : <span key="f" className="mm-dim">—</span>,
+            <StatusTag key="st" status={round.status} />,
+          ],
+        }))} />
+    );
+  };
+  const experimentRows: Row[] = experiments.flatMap((e) => {
+    const open = e.id === trace.traceId;
+    const row: Row = {
+      key: e.id, expanded: open, onClick: () => { if (open) pick(""); else { pick(e.id); layout.openResults(); } },
+      cells: [
+        <span key="c" className="mm-caret" data-open={open || undefined} aria-hidden />,
+        <span key="n" className="block truncate" title={e.hypothesis || undefined}>{shortName(e.id)}</span>,
+        <span key="sc" className="mm-dim">{scenarioName(e.id)}</span>,
+        e.rounds == null ? <span key="r" className="mm-dim">—</span> : String(e.rounds),
+        e.accepted == null ? <span key="a" className="mm-dim">—</span> : String(e.accepted),
+        <StatusTag key="st" status={open && trace.events.length ? status : EXPERIMENT_STATUS_LABELS[e.status]} />,
+        <span key="u" className="mm-mono mm-dim">{shortTime(e.updated)}</span>,
+      ],
+    };
+    return open ? [row, { key: `${e.id}:rounds`, span: true, cells: [roundsBody()] }] : [row];
+  });
 
   return (
     <PageFrame
@@ -103,11 +158,9 @@ export function ResearchPage() {
       tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "rounds", label: "研究轮次" }, { key: "new", label: "新建研究" }]} />}
       actions={tab === "rounds" && (
         <>
-          <SelectInput ariaLabel="实验" placeholder="选择实验" className="w-56" value={trace.traceId} onChange={pick}
-            options={trace.traceIds.map((id) => ({ value: id, label: shortName(id), group: MODES.find((m) => id.startsWith(m.value + "/"))?.name || id.split("/")[0] }))} />
           {trace.active && <Btn kind="danger" disabled={trace.busy} onClick={trace.stop}>停止</Btn>}
           {trace.traceId && <Btn onClick={() => window.open(studio.stdoutUrl(trace.traceId), "_blank")}>日志</Btn>}
-          {trace.traceId && <Btn kind="text" onClick={() => pick("")}>取消选择</Btn>}
+          <Btn onClick={() => { trace.loadTraces(); loadSummaries(); }}>刷新</Btn>
         </>
       )}
       resultsTitle={activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情"}
@@ -153,28 +206,11 @@ export function ResearchPage() {
           {mode.objective && <P>假设由 Agent 自己提出并按前几轮的成败迭代。运行中它会在三个节点停下来让你确认（开始前的方向与基础特征、每轮的假设、每轮的反馈），面板里不改直接提交就按它的原案继续；不提交它会一直等。</P>}
         </Block>
       ) : (
-        <Block title="研究轮次" count={trace.rounds.length} note={trace.traceId ? <StatusTag status={status} /> : undefined}>
-          {!trace.traceId ? <Empty>从右上角选择一个实验，或新建研究。</Empty>
-            : status === "启动中" ? <Empty>Agent 正在初始化，第一条事件到达前这里是空的，通常几十秒。</Empty>
-            : status === "未加载" ? <Note tone="info">服务端没有加载这个实验的事件。<small>已结束的实验需要后端以 UI_LOAD_LEGACY_PICKLE_TRACES=true 启动才可回看。</small></Note>
-            : status === "已结束" && !trace.rounds.length ? <Note>这个实验的进程已结束，且没有留下任何事件；看日志里的报错。</Note>
-            : status === "运行中" && !trace.rounds.length ? <Empty>研究已启动，等待第一轮假设…</Empty>
-            : (
-              <>
-                <Table label="研究轮次" columns={[{ label: "轮", width: 48 }, { label: "假设" }, { label: "阶段", width: 220, optional: true }, { label: "因子", num: true, width: 56, optional: true }, { label: "状态", width: 72 }]}
-                  rows={trace.rounds.map((round) => ({
-                    key: round.id, selected: round.id === (activeRound?.id ?? ""), onClick: () => { setRoundId(round.id); layout.openResults(); },
-                    cells: [
-                      <span key="n" className="mm-mono mm-dim">{Number(round.id) + 1}</span>,
-                      <span key="h" className="block truncate" title={round.hypothesis.hypothesis}>{round.hypothesis.hypothesis || <span className="mm-dim">（无假设文本）</span>}</span>,
-                      <span key="s" className="mm-tag">{stagesOf(round).map((st) => <span key={st.name} className={st.done ? "mm-pos" : "mm-dim"} style={{ marginRight: 8 }}>{st.done ? "●" : "○"} {st.name}</span>)}</span>,
-                      round.factors.length ? String(round.factors.length) : <span key="f" className="mm-dim">—</span>,
-                      <StatusTag key="st" status={round.status} />,
-                    ],
-                  }))} />
-                <P>点一轮在右栏看假设、评估、反馈与代码；回测入口在右栏标题行。</P>
-              </>
-            )}
+        <Block title="实验" count={experiments.length} note={experiments.length ? "点一个实验展开它的轮次；再点一轮在右栏看详情" : undefined}>
+          {experiments.length ? (
+            <Table label="实验" columns={[{ label: "", width: 22 }, { label: "实验" }, { label: "场景", width: 110, optional: true }, { label: "轮", num: true, width: 44 }, { label: "接受", num: true, width: 50 }, { label: "状态", width: 64 }, { label: "更新", width: 100, optional: true }]}
+              rows={experimentRows} />
+          ) : <Empty>还没有实验。切到「新建研究」启动第一个。</Empty>}
         </Block>
       )}
     </PageFrame>
