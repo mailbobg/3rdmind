@@ -53,7 +53,9 @@
           </div>
           <div class="panel-body">
             <p v-if="!trace.traceId.value" class="empty">从右上角选择一个实验，或新建研究。</p>
+            <p v-else-if="status === '启动中'" class="empty">agent 正在初始化，第一条事件到达前这里是空的，通常几十秒。</p>
             <p v-else-if="status === '未加载'" class="hint">服务端没有加载这个实验的事件。已结束的实验需要后端以 <code>UI_LOAD_LEGACY_PICKLE_TRACES=true</code> 启动才可回看。</p>
+            <p v-else-if="status === '已结束' && !trace.rounds.value.length" class="hint">这个实验的进程已结束，且没有留下任何事件；看日志里的报错。</p>
             <p v-else-if="status === '运行中' && !trace.rounds.value.length" class="empty">研究已启动，等待第一轮假设…</p>
             <div class="rounds">
               <RoundCard v-for="round in trace.rounds.value" :key="round.id" :round="round" :selected="round.id === roundId" :has-prediction="hasPrediction(round)"
@@ -172,7 +174,7 @@ async function start() {
     trace.traceIds.value = [id, ...trace.traceIds.value.filter((t) => t !== id)];
     tab.value = "rounds";
     if (route.query.new) router.replace({ name: "studio-research" });
-    await trace.select(id);
+    await trace.select(id, true);
   } catch (e) {
     trace.error.value = e instanceof Error ? e.message : String(e);
   } finally {

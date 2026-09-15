@@ -72,8 +72,10 @@ export function groupRounds(events: TraceEvent[]): RoundView[] {
   });
 }
 
-export function traceStatus(events: TraceEvent[]) {
-  if (!events.length) return "未加载" as const;
+export function traceStatus(events: TraceEvent[], liveness?: "alive" | "dead" | "unknown") {
+  // No events yet: either the run is still starting (its process is alive), it never reported anything,
+  // or the server never loaded it. Only the server knows which.
+  if (!events.length) return liveness === "alive" ? ("启动中" as const) : liveness === "dead" ? ("已结束" as const) : ("未加载" as const);
   const end = [...events].reverse().find((e) => e.tag.toLowerCase() === "end");
   if (!end) return "运行中" as const;
   const code = Number(end.content?.end_code);
@@ -100,8 +102,9 @@ export function useTrace() {
   let disposed = false;
 
   const rounds = computed(() => groupRounds(events.value));
-  const status = computed(() => traceStatus(events.value));
-  const active = computed(() => status.value === "运行中");
+  const liveness = ref<"alive" | "dead" | "unknown">("unknown");
+  const status = computed(() => traceStatus(events.value, liveness.value));
+  const active = computed(() => status.value === "运行中" || status.value === "启动中");
   const interactionKey = (e: TraceEvent) => `${traceId.value}:${e.timestamp}:${JSON.stringify(e.content)}`;
   const interaction = computed(() =>
     active.value
@@ -124,6 +127,13 @@ export function useTrace() {
     const data = await studio.traceSnapshot(id);
     if (id !== traceId.value || disposed) return;
     events.value = data;
+    if (!data.length) {
+      // Ask the server whether the process is alive; an older server without this route leaves it unknown.
+      try {
+        const info = await studio.traceStatusInfo(id);
+        if (id === traceId.value) liveness.value = !info.loaded ? "unknown" : info.alive ? "alive" : "dead";
+      } catch { liveness.value = "unknown"; }
+    }
   }
 
   // Background polling deliberately does not touch `busy`: it is not a user action,
@@ -148,9 +158,10 @@ export function useTrace() {
   async function loadTraces() {
     await guarded(async () => { traceIds.value = await studio.traces(); });
   }
-  async function select(id: string) {
+  async function select(id: string, launching = false) {
     traceId.value = id;
     events.value = [];
+    liveness.value = launching ? "alive" : "unknown";
     persist({ traceId: id });
     await guarded(refresh);
     failures = 0;

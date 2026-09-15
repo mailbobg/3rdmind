@@ -673,3 +673,10 @@ def test_backtest_list_carries_total_return(studio_client, tmp_path: Path) -> No
     (folder / "result.json").write_text(json.dumps({"status": "completed", "metrics": {"total_return": 0.05}}))
     job = studio_client.get("/studio/backtests").get_json()[0]
     assert job["total_return"] == 0.05
+
+
+@pytest.mark.offline
+def test_trace_status_distinguishes_unknown_and_loaded(studio_client) -> None:
+    assert studio_client.get("/studio/trace-status", query_string={"trace": "nope/none"}).get_json() == {"loaded": False, "alive": False, "messages": 0}
+    status = studio_client.get("/studio/trace-status", query_string={"trace": "Finance Data Building/demo"}).get_json()
+    assert status["loaded"] is True and status["alive"] is False and status["messages"] >= 2

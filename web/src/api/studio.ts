@@ -112,6 +112,8 @@ export const factorLibrary = () => api<LibraryFactor[]>("/studio/factors");
 export const factorAnalysis = (ref: FactorRef, market = "csi300") =>
   api<FactorAnalysis>(`/studio/factors/analysis?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name, market })}`);
 export const factorCorrelation = (factors: FactorRef[]) => api<CorrelationMatrix>("/studio/factors/correlation", { factors });
+export const traceStatusInfo = (trace: string) =>
+  api<{ loaded: boolean; alive: boolean; messages: number }>(`/studio/trace-status?${new URLSearchParams({ trace })}`);
 export const rounds = (trace: string) => api<Round[]>(`/studio/rounds?${new URLSearchParams({ trace })}`);
 export const backtests = () => api<BacktestSummary[]>("/studio/backtests");
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);

@@ -311,6 +311,22 @@ def strategy_source():
     return jsonify({"name": "studio_worker.py", "code": Path(__file__).with_name("studio_worker.py").read_text()})
 
 
+@studio.get("/trace-status")
+def trace_status():
+    """Whether a trace is known to this server and whether its RD-Agent process is still running.
+
+    A freshly launched run has no events for a while; the UI uses this to tell "starting" apart from
+    "not loaded" and "finished without events".
+    """
+    trace_id = request.args.get("trace", "")
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    task = registry.get(str(Path(current_app.config["LOG_FOLDER_PATH"]) / trace_id)) if trace_id else None
+    if task is None:
+        return jsonify({"loaded": False, "alive": False, "messages": 0})
+    alive = task.process is not None and task.is_alive()
+    return jsonify({"loaded": True, "alive": bool(alive), "messages": len(task.messages)})
+
+
 @studio.get("/rounds")
 def rounds():
     trace_id = request.args.get("trace", "")
