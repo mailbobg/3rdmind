@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button } from "@heroui/react";
+import { Alert } from "@heroui/react";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
@@ -43,7 +43,7 @@ export function RunsPage() {
       tabs={<TextTabs label="类型" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部" }, { key: "research", label: "研究" }, { key: "backtest", label: "回测" }]} />}
       actions={<Btn onClick={() => { trace.loadTraces(); backtests.load(); }}>刷新</Btn>}
       resultsTitle={selected ? (selected.kind === "research" ? selected.name : `回测 ${selected.name}`) : "详情"}
-      resultsActions={selected ? <Button size="sm" variant="secondary" onPress={() => navigate(selected.kind === "research" ? `/research?trace=${encodeURIComponent(selected.id)}` : "/backtest")}>{selected.kind === "research" ? "在研究页打开 →" : "在回测页打开 →"}</Button> : undefined}
+      resultsActions={selected ? <Btn onClick={() => navigate(selected.kind === "research" ? `/research?trace=${encodeURIComponent(selected.id)}` : "/backtest")}>{selected.kind === "research" ? "在研究页打开 →" : "在回测页打开 →"}</Btn> : undefined}
       results={
         selected?.kind === "research" ? (
           <div className="flex flex-col gap-3">

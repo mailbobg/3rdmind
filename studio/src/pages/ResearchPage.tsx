@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button } from "@heroui/react";
 import * as studio from "../api/studio";
 import type { RoundView } from "../hooks/rounds";
 import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
@@ -114,8 +113,8 @@ export function ResearchPage() {
       resultsTitle={activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情"}
       resultsActions={activeRound ? (
         <>
-          {activeRound.factors.length > 0 && <Button size="sm" onPress={() => sendToBacktest(activeRound)}>用 {activeRound.factors.length} 个因子回测 →</Button>}
-          {hasPrediction(activeRound) && <Button size="sm" variant="secondary" onPress={() => sendPrediction(activeRound)}>用模型预测回测 →</Button>}
+          {activeRound.factors.length > 0 && <Btn kind="primary" onClick={() => sendToBacktest(activeRound)}>用 {activeRound.factors.length} 个因子回测 →</Btn>}
+          {hasPrediction(activeRound) && <Btn onClick={() => sendPrediction(activeRound)}>用模型预测回测 →</Btn>}
         </>
       ) : undefined}
       results={

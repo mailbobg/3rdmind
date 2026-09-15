@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Checkbox, Chip, Disclosure, TextArea } from "@heroui/react";
+import { Alert, Card, Checkbox, Chip, Disclosure, TextArea } from "@heroui/react";
+import { Btn } from "./minimal";
 import type { TraceEvent } from "../api/studio";
 import type { RoundView } from "../hooks/rounds";
 import { download } from "../hooks/studioContext";
@@ -32,7 +33,7 @@ export function RoundDetail({ round }: { round: RoundView }) {
         </Section>
       )}
       {round.files.length > 0 && (
-        <Section title="生成代码" note={current && <Button size="sm" variant="ghost" onPress={() => download(`${current.task || "round"}-${current.name}`, current.code)}>下载代码</Button>}>
+        <Section title="生成代码" note={current && <Btn kind="text" onClick={() => download(`${current.task || "round"}-${current.name}`, current.code)}>下载代码</Btn>}>
           {round.files.length > 1 && (
             <select className="rounded-lg border border-border bg-surface px-2 py-1 text-xs" value={file} onChange={(e) => setFile(Number(e.target.value))}>
               {round.files.map((f, i) => <option key={i} value={i}>{f.task ? f.task + " · " : ""}{f.name}</option>)}
@@ -86,7 +87,7 @@ export function InteractionPanel({ event, busy, defaultInstruction, onSubmit }: 
         <Disclosure.Content><TextArea aria-label="完整 JSON" rows={10} value={text} onChange={(e) => setText(e.target.value)} variant="secondary" className="w-full font-mono text-[11px]" /></Disclosure.Content>
       </Disclosure>
       {parsed.error && <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{parsed.error}</Alert.Title></Alert.Content></Alert>}
-      <div><Button size="sm" isDisabled={busy || !!parsed.error} onPress={submit}>{text !== original ? "提交修改" : "按原案继续"}</Button></div>
+      <div><Btn kind="primary" disabled={busy || !!parsed.error} onClick={submit}>{text !== original ? "提交修改" : "按原案继续"}</Btn></div>
     </Card>
   );
 }

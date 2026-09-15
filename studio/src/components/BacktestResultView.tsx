@@ -145,9 +145,9 @@ function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instr
               ],
             }))} />
           <div className="flex items-center justify-center gap-2 text-[11px] text-muted">
-            <button className="rounded border border-border px-2 py-0.5 disabled:opacity-40" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>上一页</button>
+            <button type="button" className="mm-btn" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>上一页</button>
             <span>{page} / {pageCount}</span>
-            <button className="rounded border border-border px-2 py-0.5 disabled:opacity-40" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>下一页</button>
+            <button type="button" className="mm-btn" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>下一页</button>
           </div>
           <Hint>价格为 Qlib 复权价，与交易所原始报价不同。</Hint>
         </Section>

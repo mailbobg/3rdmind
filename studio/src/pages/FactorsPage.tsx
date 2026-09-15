@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Chip } from "@heroui/react";
+import { Chip } from "@heroui/react";
 import * as studio from "../api/studio";
 import type { CorrelationMatrix as Corr, FactorRef, LibraryFactor } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
@@ -90,7 +90,7 @@ export function FactorsPage() {
         </>
       }
       resultsTitle={selected ? selected.name : "因子详情"}
-      resultsActions={selected ? <Button size="sm" variant={basket.has(selected) ? "secondary" : "primary"} onPress={() => basket.toggle(selected)}>{basket.has(selected) ? "移出组合" : "加入组合"}</Button> : undefined}
+      resultsActions={selected ? <Btn kind={basket.has(selected) ? undefined : "primary"} onClick={() => basket.toggle(selected)}>{basket.has(selected) ? "移出组合" : "加入组合"}</Btn> : undefined}
       results={
         selected ? (
           <div className="flex flex-col gap-3">
@@ -120,11 +120,11 @@ export function FactorsPage() {
                   <IcBars monthly={selected.analysis.monthly} field="rank_ic" />
                 </>
               ) : busyKey === key(selected) ? <Hint>分析中，约 10 秒…</Hint>
-                : <div className="flex items-center gap-2"><Hint>尚未计算。</Hint><Button size="sm" variant="secondary" onPress={() => analyze(selected)}>现在计算</Button></div>}
+                : <div className="flex items-center gap-2"><Hint>尚未计算。</Hint><Btn onClick={() => analyze(selected)}>现在计算</Btn></div>}
             </Section>
             {correlation && basketFactors.length >= 2 && <Section title="篮内相关性" note={`${basketFactors.length} 个因子`}><CorrelationMatrix data={correlation} /></Section>}
             <Section title="所在轮次的 Qlib 评估" note="与同轮其他因子合并训练的结果"><MetricTable metrics={selected.metrics} /></Section>
-            <Section title="factor.py" note={selected.code ? <Button size="sm" variant="ghost" onPress={() => download(`${selected.name}.py`, selected.code!)}>下载代码</Button> : undefined}>
+            <Section title="factor.py" note={selected.code ? <Btn kind="text" onClick={() => download(`${selected.name}.py`, selected.code!)}>下载代码</Btn> : undefined}>
               {selected.code ? <CodeView code={selected.code} /> : <Hint>这个实验没有记录代码。</Hint>}
             </Section>
           </div>

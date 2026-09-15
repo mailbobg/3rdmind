@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Button, Chip } from "@heroui/react";
+import { Chip } from "@heroui/react";
 import { useStudio } from "../hooks/studioContext";
 import { useResizablePanel } from "../hooks/useResizablePanel";
 

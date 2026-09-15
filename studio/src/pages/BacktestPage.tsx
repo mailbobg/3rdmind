@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button } from "@heroui/react";
 import * as studio from "../api/studio";
 import type { BacktestSummary, CorrelationMatrix as Corr, FactorRef, FactorWeight, LibraryFactor } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
@@ -114,7 +113,7 @@ export function BacktestPage() {
         <>
           <SelectBox label="回测历史" isLabelHidden placeholder="回测历史" width={320} value={backtests.selectedId || null} onChange={(id) => { backtests.select(id); layout.openResults(); }}
             options={backtests.jobs.map((j) => ({ value: j.id, label: jobLabel(j) }))} />
-          {result?.metrics && <Button size="sm" variant="ghost" onPress={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>导出 JSON</Button>}
+          {result?.metrics && <Btn kind="text" onClick={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>导出 JSON</Btn>}
         </>
       }
       results={result ? <BacktestResultView result={result} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
