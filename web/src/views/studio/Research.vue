@@ -13,6 +13,7 @@
           </select>
         </label>
         <button @click="showForm = !showForm">{{ showForm ? "收起表单" : "＋ 新建研究" }}</button>
+        <button class="results-toggle" :title="layout.resultsOpen.value ? '隐藏右栏' : '显示右栏'" @click="layout.toggleResults()">{{ layout.resultsOpen.value ? "隐藏结果 ▸" : "◂ 显示结果" }}</button>
       </div>
     </header>
     <div class="workspace-body">
@@ -60,7 +61,7 @@
           </span>
         </div>
         <p v-if="status === '未加载'" class="hint">服务端没有加载这个实验的事件。已结束的实验需要后端以 <code>UI_LOAD_LEGACY_PICKLE_TRACES=true</code> 启动才可回看。</p>
-        <RoundCard v-for="round in trace.rounds.value" :key="round.id" :round="round" :selected="round.id === roundId" @select="roundId = round.id" />
+        <RoundCard v-for="round in trace.rounds.value" :key="round.id" :round="round" :selected="round.id === roundId" @select="roundId = round.id; layout.openResults()" />
         <p v-if="status === '运行中' && !trace.rounds.value.length" class="empty">研究已启动，等待第一轮假设…</p>
       </template>
       <p v-else-if="!showForm" class="empty">选择一个实验，或新建研究。</p>
@@ -97,7 +98,7 @@ import RoundCard from "../../components/studio/RoundCard.vue";
 import RoundDetail from "../../components/studio/RoundDetail.vue";
 import type { RoundView } from "../../composables/useTrace";
 
-const { env, trace, basket } = useStudioContext();
+const { env, trace, basket, layout } = useStudioContext();
 const { stdoutUrl } = studio;
 const route = useRoute();
 const router = useRouter();
@@ -129,6 +130,7 @@ const activeRound = computed(() => {
   return rounds.find((r) => r.id === roundId.value) || rounds[rounds.length - 1] || null;
 });
 watch(() => form.objective, (objective) => persistStudioState({ objective }));
+watch(() => trace.interaction.value, (request) => { if (request) layout.openResults(); });
 
 async function pick(id: string) {
   roundId.value = "";

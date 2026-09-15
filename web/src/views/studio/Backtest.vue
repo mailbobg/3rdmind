@@ -8,6 +8,7 @@
       <div class="toolbar">
         <button @click="toggleSource">{{ source ? "隐藏策略源码" : "查看策略源码" }}</button>
         <button class="dark" :disabled="backtests.busy.value || !env?.data_ready || !basket.items.length" @click="submit">▶ 运行回测</button>
+        <button class="results-toggle" :title="layout.resultsOpen.value ? '隐藏右栏' : '显示右栏'" @click="layout.toggleResults()">{{ layout.resultsOpen.value ? "隐藏结果 ▸" : "◂ 显示结果" }}</button>
       </div>
     </header>
     <div class="workspace-body">
@@ -97,7 +98,7 @@
         <h2>{{ result ? `回测 ${result.id.slice(0, 8)}` : "回测结果" }}</h2>
       </div>
       <div class="toolbar">
-        <select :value="backtests.selectedId.value" aria-label="回测历史" @change="backtests.select(($event.target as HTMLSelectElement).value)">
+        <select :value="backtests.selectedId.value" aria-label="回测历史" @change="backtests.select(($event.target as HTMLSelectElement).value); layout.openResults()">
           <option value="">回测历史</option>
           <option v-for="job in backtests.jobs.value" :key="job.id" :value="job.id">{{ jobLabel(job) }}</option>
         </select>
@@ -120,7 +121,7 @@ import { download, useStudioContext } from "../../composables/studioContext";
 import { persistStudioState, restoreStudioState } from "../../composables/studioStorage";
 import { basketKey as key } from "../../composables/useFactorBasket";
 
-const { env, backtests, basket } = useStudioContext();
+const { env, backtests, basket, layout } = useStudioContext();
 const saved = restoreStudioState();
 const params = reactive({
   start: "", end: "", market: "csi300" as "csi300" | "csi500" | "all", benchmark: "SH000300",
@@ -172,6 +173,7 @@ async function submit() {
   const model = modelConfig();
   persistStudioState({ params: { ...params }, model });
   await backtests.run({ factors: basket.items.map((f) => ({ ...f, weight: Number(f.weight) })), model, ...params });
+  layout.openResults();
 }
 function exportResult() {
   if (result.value) download(`backtest-${result.value.id.slice(0, 8)}.json`, JSON.stringify(result.value, null, 2), "application/json");

@@ -8,6 +8,7 @@
       <div class="toolbar">
         <input v-model="query" placeholder="搜索因子或实验" aria-label="搜索因子" />
         <button @click="load">刷新</button>
+        <button class="results-toggle" :title="layout.resultsOpen.value ? '隐藏右栏' : '显示右栏'" @click="layout.toggleResults()">{{ layout.resultsOpen.value ? "隐藏结果 ▸" : "◂ 显示结果" }}</button>
       </div>
     </header>
     <div class="workspace-body">
@@ -24,7 +25,7 @@
               <tr><th></th><th>因子</th><th>轮次</th><th class="num">IC</th><th class="num">Rank IC</th><th class="num">年化超额</th></tr>
             </thead>
             <tbody>
-              <tr v-for="f in group.items" :key="key(f)" class="selectable" :class="{ selected: key(f) === selectedKey }" @click="selectedKey = key(f)">
+              <tr v-for="f in group.items" :key="key(f)" class="selectable" :class="{ selected: key(f) === selectedKey }" @click="selectedKey = key(f); layout.openResults()">
                 <td><input type="checkbox" :checked="basket.has(f)" @click.stop @change="basket.toggle(f)" aria-label="加入组合" /></td>
                 <td><code>{{ f.name }}</code></td>
                 <td>第 {{ f.loop_id + 1 }} 轮</td>
@@ -88,7 +89,7 @@ import MetricTable from "../../components/studio/MetricTable.vue";
 import { download, useStudioContext } from "../../composables/studioContext";
 import { basketKey as key } from "../../composables/useFactorBasket";
 
-const { basket } = useStudioContext();
+const { basket, layout } = useStudioContext();
 const all = ref<LibraryFactor[]>([]);
 const query = ref("");
 const error = ref("");

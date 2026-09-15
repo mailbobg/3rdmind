@@ -9,6 +9,7 @@
         <label><input type="checkbox" v-model="showResearch" /> 研究</label>
         <label><input type="checkbox" v-model="showBacktests" /> 回测</label>
         <button @click="refresh">刷新</button>
+        <button class="results-toggle" :title="layout.resultsOpen.value ? '隐藏右栏' : '显示右栏'" @click="layout.toggleResults()">{{ layout.resultsOpen.value ? "隐藏结果 ▸" : "◂ 显示结果" }}</button>
       </div>
     </header>
     <div class="workspace-body">
@@ -63,7 +64,7 @@ import { useStudioContext } from "../../composables/studioContext";
 
 interface Row { key: string; kind: "research" | "backtest"; name: string; detail: string; status: string; statusClass: string; id: string }
 
-const { trace, backtests } = useStudioContext();
+const { trace, backtests, layout } = useStudioContext();
 const showResearch = ref(true);
 const showBacktests = ref(true);
 const selectedKey = ref("");
@@ -92,6 +93,7 @@ const title = computed(() => (selected.value ? (selected.value.kind === "researc
 
 async function open(row: Row) {
   selectedKey.value = row.key;
+  layout.openResults();
   if (row.kind === "research") await trace.select(row.id);
   else await backtests.select(row.id);
 }

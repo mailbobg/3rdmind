@@ -4,6 +4,7 @@ import type { Environment } from "../api/studio";
 import type { useTrace } from "./useTrace";
 import type { useBacktests } from "./useBacktests";
 import type { useFactorBasket } from "./useFactorBasket";
+import type { useColumnWidths } from "./useColumnWidths";
 
 /** Typed access to the singletons StudioLayout provides to every section view. */
 export function useStudioContext() {
@@ -12,6 +13,7 @@ export function useStudioContext() {
     trace: inject<ReturnType<typeof useTrace>>("trace")!,
     backtests: inject<ReturnType<typeof useBacktests>>("backtests")!,
     basket: inject<ReturnType<typeof useFactorBasket>>("basket")!,
+    layout: inject<ReturnType<typeof useColumnWidths>>("layout")!,
   };
 }
 

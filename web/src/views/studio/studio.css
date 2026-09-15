@@ -12,7 +12,10 @@
 .studio .results { grid-column: 5; }
 .studio .handle { cursor: col-resize; border-radius: 3px; touch-action: none; position: relative; }
 .studio .handle::after { content: ""; position: absolute; inset: 0 -4px; }
+.studio .handle::before { content: ""; position: absolute; left: 2px; top: 50%; width: 2px; height: 36px; margin-top: -18px; border-radius: 2px; background: #cfd5c9; }
 .studio .handle:hover, .studio .handle:active { background: #cfd5c9; }
+.studio.results-collapsed .results { display: none; }
+.studio .results-toggle { margin-left: auto; white-space: nowrap; }
 .studio * { box-sizing: border-box; }
 .studio .rail, .studio .workspace, .studio .results {
   background: var(--paper); border: 1px solid var(--line); border-radius: 16px; min-height: 0; min-width: 0; display: flex; flex-direction: column;
