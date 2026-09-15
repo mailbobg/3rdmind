@@ -1,87 +1,78 @@
 <template>
+  <ObjectBar :title="trace.traceId.value ? shortName(trace.traceId.value) : 'AI 研究'" :description="objectDesc" :tag="objectTag">
+    <span v-if="trace.traceId.value" class="tag" :class="{ ok: status === '已完成', bad: status === '执行失败', live: status === '运行中' }">{{ status }}</span>
+  </ObjectBar>
+
   <main class="workspace">
-    <header class="workspace-head">
-      <div>
-        <div class="eyebrow">QUANTITATIVE RESEARCH / RESEARCH</div>
-        <h1>{{ trace.traceId.value ? shortName(trace.traceId.value) : "AI 研究" }}</h1>
+    <div class="col-head">
+      <div class="seg">
+        <button :class="{ on: tab === 'rounds' }" @click="tab = 'rounds'">◎ 研究轮次</button>
+        <button :class="{ on: tab === 'new' }" @click="tab = 'new'">＋ 新建研究</button>
       </div>
-      <div class="toolbar">
-        <label>实验
-          <select :value="trace.traceId.value" @change="pick(($event.target as HTMLSelectElement).value)">
-            <option value="">选择实验</option>
-            <option v-for="id in trace.traceIds.value" :key="id" :value="id">{{ id }}</option>
-          </select>
-        </label>
-        <button @click="showForm = !showForm">{{ showForm ? "收起表单" : "＋ 新建研究" }}</button>
-        <button class="results-toggle" :title="layout.resultsOpen.value ? '隐藏右栏' : '显示右栏'" @click="layout.toggleResults()">{{ layout.resultsOpen.value ? "隐藏结果 ▸" : "◂ 显示结果" }}</button>
+      <div class="col-actions">
+        <select :value="trace.traceId.value" style="max-width: 280px" @change="pick(($event.target as HTMLSelectElement).value)">
+          <option value="">选择实验</option>
+          <option v-for="id in trace.traceIds.value" :key="id" :value="id">{{ id }}</option>
+        </select>
+        <button v-if="trace.active.value" :disabled="trace.busy.value" @click="trace.stop">■ 停止</button>
+        <a v-if="trace.traceId.value" class="text-button" :href="stdoutUrl(trace.traceId.value)" download>日志</a>
+        <ResultsToggle />
       </div>
-    </header>
-    <div class="workspace-body">
+    </div>
+    <div class="col-body">
       <div v-if="trace.error.value" class="notice" role="alert">{{ trace.error.value }}<button class="text-button" @click="trace.error.value = ''">关闭</button></div>
 
-      <section v-if="showForm" class="surface">
-        <div class="section-heading"><h3>启动研究</h3><span>{{ env?.chat_model || "未配置研究模型" }}</span></div>
-        <div class="form-grid">
-          <label>场景
-            <select v-model="form.scenario">
-              <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.name }}</option>
-            </select>
-          </label>
-          <label v-if="mode.loops">轮数（1–30）<input v-model.number="form.loops" type="number" min="1" max="30" /></label>
-          <label v-if="mode.duration">时限（小时，0.1–24）<input v-model.number="form.duration" type="number" min="0.1" max="24" step="0.1" /></label>
+      <template v-if="tab === 'new'">
+        <div class="param-bar">
+          <span class="p">场景 <select v-model="form.scenario"><option v-for="m in modes" :key="m.value" :value="m.value">{{ m.name }}</option></select> <i class="info" :title="mode.desc">i</i></span>
+          <span class="p" v-if="mode.loops">轮数 <input type="number" v-model.number="form.loops" min="1" max="30" /> <i class="info" title="1–30">i</i></span>
+          <span class="p" v-if="mode.duration">时限（小时） <input type="number" v-model.number="form.duration" min="0.1" max="24" step="0.1" /> <i class="info" title="0.1–24">i</i></span>
+          <span class="p" v-if="mode.input === 'reports'">研报 PDF <input type="file" accept=".pdf,application/pdf" multiple @change="onFiles" /></span>
+          <span class="p" v-if="mode.input === 'paper'">论文 PDF <input type="file" accept=".pdf,application/pdf" @change="onFiles" /></span>
+          <span class="p" v-if="mode.input === 'paper'">或链接 <input v-model="form.link" placeholder="https://arxiv.org/pdf/…" style="width: 220px" /></span>
         </div>
-        <label v-if="mode.input === 'reports'" style="margin-top: 10px">研报 PDF（可多选）
-          <input type="file" accept=".pdf,application/pdf" multiple @change="onFiles" />
-          <span class="hint" v-if="files.length">{{ files.map((f) => f.name).join("，") }}</span>
-        </label>
-        <template v-if="mode.input === 'paper'">
-          <label style="margin-top: 10px">论文 PDF
-            <input type="file" accept=".pdf,application/pdf" @change="onFiles" />
-            <span class="hint" v-if="files.length">{{ files[0].name }}</span>
-          </label>
-          <label style="margin-top: 6px">或论文链接（未上传文件时使用）
-            <input v-model="form.link" placeholder="https://arxiv.org/pdf/…" />
-          </label>
-        </template>
-        <label v-if="mode.objective" style="margin-top: 10px">研究方向（agent 首次确认时预填）
-          <textarea v-model="form.objective" rows="2" placeholder="例如：研究沪深300中量价动量因子的增量信息，并评估与现有特征组合后的效果。"></textarea>
-        </label>
-        <div class="actions">
-          <button class="dark" :disabled="trace.busy.value" @click="start">开始研究</button>
-          <span class="hint">{{ mode.desc }}</span>
-        </div>
-      </section>
-
-      <template v-if="trace.traceId.value">
-        <div class="section-heading">
-          <h3>研究轮次</h3>
-          <span>
-            <span class="tag" :class="{ ok: status === '已完成', bad: status === '执行失败', live: status === '运行中' }">{{ status }}</span>
-            <button v-if="trace.active.value" :disabled="trace.busy.value" @click="trace.stop" style="margin-left: 8px">停止</button>
-          </span>
-        </div>
-        <p v-if="status === '未加载'" class="hint">服务端没有加载这个实验的事件。已结束的实验需要后端以 <code>UI_LOAD_LEGACY_PICKLE_TRACES=true</code> 启动才可回看。</p>
-        <RoundCard v-for="round in trace.rounds.value" :key="round.id" :round="round" :selected="round.id === roundId" :has-prediction="hasPrediction(round)"
-          @select="roundId = round.id; layout.openResults()" @backtest="sendToBacktest(round)" @backtest-prediction="sendPrediction(round)" />
-        <p v-if="status === '运行中' && !trace.rounds.value.length" class="empty">研究已启动，等待第一轮假设…</p>
+        <section class="panel grow">
+          <div class="panel-head"><h3>{{ mode.name }}</h3><span class="status">{{ env?.chat_model || "未配置研究模型" }}</span></div>
+          <div class="panel-body">
+            <p class="hint" style="margin: 0 0 8px">{{ mode.desc }}</p>
+            <label v-if="mode.objective">研究方向（agent 首次确认时预填）
+              <textarea v-model="form.objective" rows="5" placeholder="例如：研究沪深300中量价动量因子的增量信息，并评估与现有特征组合后的效果。"></textarea>
+            </label>
+            <p v-if="files.length" class="hint" style="margin: 8px 0 0">已选文件：{{ files.map((f) => f.name).join("，") }}</p>
+          </div>
+          <div class="panel-foot"><button class="dark" :disabled="trace.busy.value" @click="start">▶ 开始研究</button></div>
+        </section>
       </template>
-      <p v-else-if="!showForm" class="empty">选择一个实验，或新建研究。</p>
+
+      <template v-else>
+        <section class="panel grow">
+          <div class="panel-head">
+            <h3>研究轮次 <span class="hint">{{ trace.rounds.value.length }} 轮</span></h3>
+            <span class="status" v-if="trace.traceId.value">{{ status }}</span>
+          </div>
+          <div class="panel-body">
+            <p v-if="!trace.traceId.value" class="empty">从右上角选择一个实验，或新建研究。</p>
+            <p v-else-if="status === '未加载'" class="hint">服务端没有加载这个实验的事件。已结束的实验需要后端以 <code>UI_LOAD_LEGACY_PICKLE_TRACES=true</code> 启动才可回看。</p>
+            <p v-else-if="status === '运行中' && !trace.rounds.value.length" class="empty">研究已启动，等待第一轮假设…</p>
+            <div class="rounds">
+              <RoundCard v-for="round in trace.rounds.value" :key="round.id" :round="round" :selected="round.id === roundId" :has-prediction="hasPrediction(round)"
+                @select="roundId = round.id; layout.openResults()" @backtest="sendToBacktest(round)" @backtest-prediction="sendPrediction(round)" />
+            </div>
+          </div>
+        </section>
+      </template>
     </div>
   </main>
 
   <aside class="results">
-    <header class="result-head">
-      <div>
-        <div class="eyebrow">ROUND DETAIL</div>
-        <h2>{{ activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情" }}</h2>
+    <div class="col-head">
+      <div class="seg"><button class="on">{{ activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情" }}</button></div>
+      <div class="col-actions" v-if="activeRound">
+        <button v-if="activeRound.factors.length" class="primary small" @click="sendToBacktest(activeRound)">用 {{ activeRound.factors.length }} 个因子回测 →</button>
+        <button v-if="hasPrediction(activeRound)" class="small" @click="sendPrediction(activeRound)">用模型预测回测 →</button>
       </div>
-      <div class="toolbar" v-if="activeRound">
-        <button v-if="activeRound.factors.length" class="primary" @click="sendToBacktest(activeRound)">用 {{ activeRound.factors.length }} 个因子回测 →</button>
-        <button v-if="hasPrediction(activeRound)" class="primary" @click="sendPrediction(activeRound)">用模型预测回测 →</button>
-        <a v-if="trace.traceId.value" class="text-button" :href="stdoutUrl(trace.traceId.value)" download>日志</a>
-      </div>
-    </header>
-    <div class="result-scroll">
+    </div>
+    <div class="col-body">
       <InteractionPanel v-if="trace.interaction.value" :event="trace.interaction.value" :busy="trace.busy.value" :default-instruction="form.objective" @submit="trace.answer" />
       <RoundDetail v-if="activeRound" :round="activeRound" />
       <p v-else class="empty">在左侧选择一轮查看假设、评估与代码。</p>
@@ -95,6 +86,8 @@ import * as studio from "../../api/studio";
 import { useStudioContext } from "../../composables/studioContext";
 import { persistStudioState, restoreStudioState } from "../../composables/studioStorage";
 import InteractionPanel from "../../components/studio/InteractionPanel.vue";
+import ObjectBar from "../../components/studio/ObjectBar.vue";
+import ResultsToggle from "../../components/studio/ResultsToggle.vue";
 import RoundCard from "../../components/studio/RoundCard.vue";
 import RoundDetail from "../../components/studio/RoundDetail.vue";
 import type { RoundView } from "../../composables/useTrace";
@@ -121,8 +114,14 @@ watch(() => form.scenario, () => { files.value = []; });
 function onFiles(event: Event) {
   files.value = [...((event.target as HTMLInputElement).files || [])];
 }
-const showForm = ref(!!route.query.new || !trace.traceId.value);
-watch(() => route.query.new, (value) => { if (value) showForm.value = true; });
+const tab = ref<"rounds" | "new">(route.query.new || !trace.traceId.value ? "new" : "rounds");
+watch(() => route.query.new, (value) => { if (value) tab.value = "new"; });
+const objectDesc = computed(() => {
+  if (!trace.traceId.value) return "启动 RD-Agent 研究，查看假设、代码与评估";
+  const last = trace.rounds.value[trace.rounds.value.length - 1];
+  return last?.hypothesis?.hypothesis || trace.traceId.value;
+});
+const objectTag = computed(() => trace.traceId.value ? (modes.find((m) => trace.traceId.value.startsWith(m.value + "/"))?.name || trace.traceId.value.split("/")[0]) : undefined);
 const roundId = ref("");
 const shortName = (id: string) => id.split("/").slice(1).join("/") || id;
 // While the first snapshot of a freshly selected experiment is in flight there are no events yet;
@@ -170,7 +169,7 @@ async function start() {
     trace.busy.value = true;
     const { id } = await studio.startResearch(data);
     trace.traceIds.value = [id, ...trace.traceIds.value.filter((t) => t !== id)];
-    showForm.value = false;
+    tab.value = "rounds";
     if (route.query.new) router.replace({ name: "studio-research" });
     await trace.select(id);
   } catch (e) {
@@ -207,3 +206,6 @@ onMounted(async () => {
   if (route.query.trace) router.replace({ name: "studio-research" });
 });
 </script>
+<style scoped>
+.rounds { display: grid; gap: 8px; }
+</style>

@@ -17,8 +17,8 @@
     </p>
     <div v-if="result.error" class="notice">{{ result.error }}</div>
     <template v-if="result.metrics">
-      <div class="cards">
-        <div v-for="card in cards" :key="card.label" :title="card.hint"><small>{{ card.label }}</small><strong :class="card.tone">{{ card.value }}</strong></div>
+      <div class="metric-grid">
+        <div v-for="card in cards" :key="card.label" :title="card.hint"><small>{{ card.label }} <i class="info">i</i></small><strong :class="card.tone">{{ card.value }}</strong></div>
       </div>
       <p class="verdict" v-for="line in verdict" :key="line">{{ line }}</p>
       <EquityChart :rows="result.rows || []" />
@@ -99,7 +99,8 @@ const importance = computed(() =>
 
 <style scoped>
 .bar { height: 8px; border-radius: 4px; background: var(--green); min-width: 2px; }
-.verdict { margin: 4px 0; padding: 6px 10px; background: var(--soft); border-left: 3px solid var(--green); border-radius: 4px; font-size: 12px; }
+.verdict { margin: 6px 0 0; padding: 6px 10px; background: var(--soft); border-left: 3px solid var(--green); border-radius: 4px; font-size: 12px; }
+.info { display: inline-grid; place-items: center; width: 12px; height: 12px; border-radius: 50%; border: 1px solid var(--line); font-size: 8px; font-style: normal; color: var(--muted); vertical-align: middle; }
 .pos { color: var(--green); }
 .neg { color: var(--danger); }
 </style>

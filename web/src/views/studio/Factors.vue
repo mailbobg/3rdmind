@@ -1,55 +1,49 @@
 <template>
-  <main class="workspace">
-    <header class="workspace-head">
-      <div>
-        <div class="eyebrow">QUANTITATIVE RESEARCH / FACTORS</div>
-        <h1>因子库</h1>
-      </div>
-      <div class="toolbar">
-        <input v-model="query" placeholder="搜索因子、描述或实验" aria-label="搜索因子" />
-        <label class="check"><input type="checkbox" v-model="acceptedOnly" /> 只看 agent 接受的轮次</label>
-        <button :disabled="analyzing" @click="analyzeAll">{{ analyzing ? `分析中 ${analyzed}/${pending.length}…` : "分析全部" }}</button>
-        <button @click="load">刷新</button>
-        <button class="results-toggle" :title="layout.resultsOpen.value ? '隐藏右栏' : '显示右栏'" @click="layout.toggleResults()">{{ layout.resultsOpen.value ? "隐藏结果 ▸" : "◂ 显示结果" }}</button>
-      </div>
-    </header>
-    <div class="workspace-body">
-      <div v-if="error" class="notice" role="alert">{{ error }}<button class="text-button" @click="error = ''">关闭</button></div>
-      <section class="surface guide">
-        <strong>怎么挑因子</strong>
-        <ol>
-          <li><b>单独有没有用</b>：看单因子 IC 与 Rank IC 的符号和 ICIR（均值 ÷ 波动，越高越稳）。|IC| &lt; 0.01 且 ICIR 接近 0 的因子基本是噪声；IC 为负的因子回测时把权重设成 −1 即可反向使用。</li>
-          <li><b>放一起合不合适</b>：篮内两两相关性低（|ρ| &lt; 0.5）的因子才互补，高相关的只是同一个信号重复计权。</li>
-          <li><b>能不能覆盖回测期</b>：覆盖区间要包住你打算回测的日期，否则回测会直接报错。</li>
-        </ol>
-        <p class="hint">单因子指标由后端按逐日截面相关计算（标签为次日收益），首次计算每个因子约 10 秒，之后缓存。agent 结论是它在原生流程里对整轮假设的评价，不是对单个因子的。</p>
-      </section>
+  <ObjectBar title="因子库" :description="`${all.length} 个因子来自 ${groups.length || 0} 个实验 · 单因子 IC 由后端计算并缓存 · 篮内相关性实时计算`" :tag="`篮内 ${basket.items.length}`" />
 
-      <section v-for="group in groups" :key="group.trace" class="surface">
-        <div class="section-heading">
-          <h3>{{ shortName(group.trace) }}</h3>
-          <span>{{ group.trace.split("/")[0] }} · {{ group.items.length }} 个因子</span>
+  <main class="workspace">
+    <div class="col-head">
+      <div class="seg">
+        <button :class="{ on: !acceptedOnly }" @click="acceptedOnly = false">全部因子</button>
+        <button :class="{ on: acceptedOnly }" @click="acceptedOnly = true">agent 接受的轮次</button>
+      </div>
+      <div class="col-actions">
+        <input v-model="query" placeholder="搜索因子、描述或实验" aria-label="搜索因子" style="width: 200px" />
+        <button :disabled="analyzing || !pending.length" @click="analyzeAll">{{ analyzing ? `分析中 ${analyzed}/${pending.length}…` : `分析全部（${pending.length}）` }}</button>
+        <button @click="load">刷新</button>
+        <ResultsToggle />
+      </div>
+    </div>
+    <div class="col-body">
+      <div v-if="error" class="notice" role="alert">{{ error }}<button class="text-button" @click="error = ''">关闭</button></div>
+      <div class="param-bar hint">
+        <span class="p">怎么挑 <i class="info" title="① 单独有没有用：看 IC / Rank IC 的符号和 ICIR（均值÷波动）；|IC|<0.01 且 ICIR≈0 基本是噪声，IC 为负的回测时权重设 −1 反向。② 放一起合不合适：篮内两两相关 |ρ|<0.5 才互补，高相关只是重复计权。③ 覆盖区间要包住回测期。">i</i></span>
+        <span class="p">IC / Rank IC：因子值与次日收益的日均相关 · ICIR：IC 均值 ÷ 波动 · agent 结论针对整轮，不针对单因子</span>
+      </div>
+
+      <section class="panel grow">
+        <div class="panel-head">
+          <h3>因子 <span class="hint">{{ visibleCount }} 个</span></h3>
+          <span class="status" :class="{ bad: maxCorr >= 0.7 }" v-if="basketFactors.length >= 2">
+            <template v-if="correlation">篮内最高相关 {{ maxCorr.toFixed(2) }}<template v-if="maxCorr >= 0.7">（有因子重复）</template></template>
+            <template v-else-if="correlationError">相关性计算失败</template>
+            <template v-else>计算相关性…</template>
+          </span>
         </div>
-        <div class="table-scroll">
-          <table class="library">
+        <div class="panel-body flush">
+          <table class="library" v-if="groups.length">
             <thead>
-              <tr>
-                <th></th><th>因子</th><th>轮次 · agent 结论</th>
-                <th class="num">IC</th><th class="num">Rank IC</th><th class="num">ICIR</th><th>覆盖</th>
-              </tr>
+              <tr><th></th><th>因子</th><th>实验 · 轮次</th><th>agent</th><th class="num">IC</th><th class="num">Rank IC</th><th class="num">ICIR</th><th>覆盖</th></tr>
             </thead>
-            <tbody>
+            <tbody v-for="group in groups" :key="group.trace">
               <tr v-for="f in group.items" :key="key(f)" class="selectable" :class="{ selected: key(f) === selectedKey }" @click="select(f)">
                 <td><input type="checkbox" :checked="basket.has(f)" @click.stop @change="basket.toggle(f)" aria-label="加入组合" /></td>
-                <td class="name-cell">
-                  <code>{{ f.name }}</code>
-                  <div class="desc">{{ f.description || "（agent 没有记录描述）" }}</div>
-                </td>
+                <td class="name-cell"><code>{{ f.name }}</code><div class="desc hint">{{ f.description || "（agent 没有记录描述）" }}</div></td>
+                <td class="hint nowrap">{{ shortName(f.trace) }} · 第 {{ f.loop_id + 1 }} 轮</td>
                 <td>
-                  第 {{ f.loop_id + 1 }} 轮
                   <span v-if="f.decision === true" class="tag ok">接受</span>
                   <span v-else-if="f.decision === false" class="tag bad">拒绝</span>
-                  <span v-else class="tag">无结论</span>
+                  <span v-else class="tag">—</span>
                 </td>
                 <template v-if="f.analysis">
                   <td class="num" :class="sign(f.analysis.ic.mean)">{{ f.analysis.ic.mean.toFixed(4) }}</td>
@@ -60,53 +54,36 @@
                 <template v-else>
                   <td colspan="4" class="hint">
                     <span v-if="busyKey === key(f)">分析中…</span>
-                    <button v-else class="text-button" @click.stop="analyze(f)">计算单因子指标</button>
+                    <button v-else class="text-button" @click.stop="analyze(f)">计算</button>
                   </td>
                 </template>
               </tr>
             </tbody>
           </table>
+          <p v-else-if="!loading" class="empty">还没有带因子产物的研究轮次。先在「AI 研究」里跑一次因子研发。</p>
         </div>
-      </section>
-      <p v-if="!groups.length && !loading" class="empty">还没有带因子产物的研究轮次。先在「AI 研究」里跑一次因子研发。</p>
-    </div>
-
-    <footer class="basket-bar" v-if="basket.items.length">
-      <div class="basket-info">
-        <strong>组合篮 · {{ basket.items.length }} 个信号</strong>
-        <div class="chips">
-          <span class="chip" v-for="f in basket.items" :key="key(f)" :title="`${f.trace} · 第 ${f.loop_id + 1} 轮`">
-            {{ f.name }} <button class="chip-x" @click="basket.toggle(f)" aria-label="移出">×</button>
+        <div class="panel-foot basket" v-if="basket.items.length">
+          <strong>组合篮 · {{ basket.items.length }}</strong>
+          <div class="chips">
+            <span class="chip" v-for="f in basket.items" :key="key(f)" :title="`${f.trace} · 第 ${f.loop_id + 1} 轮`">{{ f.name }} <button class="chip-x" @click="basket.toggle(f)" aria-label="移出">×</button></span>
+          </div>
+          <span style="margin-left: auto" class="actions">
+            <button class="small" @click="basket.clear">清空</button>
+            <router-link :to="{ name: 'studio-backtest' }" custom v-slot="{ navigate }"><button class="dark small" @click="navigate">去组合回测 →</button></router-link>
           </span>
         </div>
-        <div class="hint" v-if="basketFactors.length >= 2">
-          <template v-if="correlation">最高两两相关 |ρ| = <b :class="maxCorr >= 0.7 ? 'neg' : maxCorr >= 0.5 ? '' : 'pos'">{{ maxCorr.toFixed(2) }}</b>
-            <span v-if="maxCorr >= 0.7">，有因子基本重复，建议只留一个</span>
-            <span v-else-if="maxCorr >= 0.5">，相关偏高</span>
-            <span v-else>，互补性好</span>
-          </template>
-          <template v-else-if="correlationError">相关性：{{ correlationError }}</template>
-          <template v-else>正在计算相关性…</template>
-        </div>
-      </div>
-      <div class="actions" style="margin: 0">
-        <button @click="basket.clear">清空</button>
-        <router-link :to="{ name: 'studio-backtest' }" custom v-slot="{ navigate }"><button class="dark" @click="navigate">去组合回测 →</button></router-link>
-      </div>
-    </footer>
+      </section>
+    </div>
   </main>
 
   <aside class="results">
-    <header class="result-head">
-      <div>
-        <div class="eyebrow">FACTOR DETAIL</div>
-        <h2>{{ selected ? selected.name : "因子详情" }}</h2>
+    <div class="col-head">
+      <div class="seg"><button class="on">{{ selected ? selected.name : "因子详情" }}</button></div>
+      <div class="col-actions" v-if="selected">
+        <button :class="basket.has(selected) ? 'small' : 'primary small'" @click="basket.toggle(selected)">{{ basket.has(selected) ? "移出组合" : "加入组合" }}</button>
       </div>
-      <div class="toolbar" v-if="selected">
-        <button :class="basket.has(selected) ? '' : 'primary'" @click="basket.toggle(selected)">{{ basket.has(selected) ? "移出组合" : "加入组合" }}</button>
-      </div>
-    </header>
-    <div class="result-scroll">
+    </div>
+    <div class="col-body">
       <template v-if="selected">
         <section class="surface">
           <div class="section-heading"><h3>这是什么</h3><span>{{ selected.trace }} · 第 {{ selected.loop_id + 1 }} 轮</span></div>
@@ -128,16 +105,15 @@
         <section class="surface">
           <div class="section-heading"><h3>单因子分析</h3><span>沪深300 · 次日收益</span></div>
           <template v-if="selected.analysis">
-            <div class="cards">
+            <div class="metric-grid">
               <div><small>IC 均值</small><strong :class="sign(selected.analysis.ic.mean)">{{ selected.analysis.ic.mean.toFixed(4) }}</strong></div>
               <div><small>ICIR</small><strong>{{ selected.analysis.ic.ir == null ? "—" : selected.analysis.ic.ir.toFixed(2) }}</strong></div>
-              <div><small>IC &gt; 0 的天数占比</small><strong>{{ (selected.analysis.ic.positive_ratio * 100).toFixed(0) }}%</strong></div>
+              <div><small>IC &gt; 0 天数占比</small><strong>{{ (selected.analysis.ic.positive_ratio * 100).toFixed(0) }}%</strong></div>
               <div><small>Rank IC 均值</small><strong :class="sign(selected.analysis.rank_ic.mean)">{{ selected.analysis.rank_ic.mean.toFixed(4) }}</strong></div>
               <div><small>Rank ICIR</small><strong>{{ selected.analysis.rank_ic.ir == null ? "—" : selected.analysis.rank_ic.ir.toFixed(2) }}</strong></div>
               <div><small>交易日 / 样本</small><strong>{{ selected.analysis.days }} / {{ selected.analysis.rows.toLocaleString() }}</strong></div>
             </div>
-            <p class="hint">覆盖 {{ selected.analysis.coverage.start }} → {{ selected.analysis.coverage.end }}。</p>
-            <p class="hint" style="margin: 8px 0 2px">按月 Rank IC</p>
+            <p class="hint" style="margin: 8px 0 2px">按月 Rank IC · 覆盖 {{ selected.analysis.coverage.start }} → {{ selected.analysis.coverage.end }}</p>
             <IcBars :monthly="selected.analysis.monthly" field="rank_ic" label="Rank IC" />
           </template>
           <p v-else-if="busyKey === key(selected)" class="hint">分析中，约 10 秒…</p>
@@ -148,9 +124,7 @@
           <CorrelationMatrix :data="correlation" />
         </section>
         <section class="surface">
-          <div class="section-heading">
-            <h3>所在轮次的 Qlib 评估</h3><span>与同轮其他因子合并训练的结果，不是单因子</span>
-          </div>
+          <div class="section-heading"><h3>所在轮次的 Qlib 评估</h3><span>与同轮其他因子合并训练的结果</span></div>
           <MetricTable :metrics="selected.metrics" />
         </section>
         <section class="surface">
@@ -178,6 +152,8 @@ import * as studio from "../../api/studio";
 import type { CorrelationMatrix as Corr, FactorRef, LibraryFactor } from "../../api/studio";
 import CorrelationMatrix from "../../components/studio/CorrelationMatrix.vue";
 import Formula from "../../components/studio/Formula.vue";
+import ObjectBar from "../../components/studio/ObjectBar.vue";
+import ResultsToggle from "../../components/studio/ResultsToggle.vue";
 import IcBars from "../../components/studio/IcBars.vue";
 import MetricTable from "../../components/studio/MetricTable.vue";
 import { download, useStudioContext } from "../../composables/studioContext";
@@ -208,6 +184,7 @@ const groups = computed(() => {
   return [...map.entries()].map(([trace, items]) => ({ trace, items }));
 });
 const selected = computed(() => all.value.find((f) => key(f) === selectedKey.value) || null);
+const visibleCount = computed(() => groups.value.reduce((n, g) => n + g.items.length, 0));
 const pending = computed(() => all.value.filter((f) => !f.analysis));
 
 async function load() {
@@ -261,16 +238,9 @@ watch(basketFactors, (refs) => {
 onMounted(load);
 </script>
 <style scoped>
-.guide { background: var(--soft); }
-.guide ol { margin: 6px 0 8px; padding-left: 20px; }
-.guide li { margin: 4px 0; }
-.check { flex-direction: row; align-items: center; gap: 6px; color: var(--ink); white-space: nowrap; }
-.library .name-cell { max-width: 640px; }
-.library .desc { color: var(--muted); font-size: 11px; line-height: 1.5; margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.library .name-cell { max-width: 560px; }
+.library .desc { font-size: 11px; line-height: 1.5; margin-top: 1px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .nowrap { white-space: nowrap; }
-.basket-bar { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 12px 22px; border-top: 1px solid var(--line); background: var(--paper); border-radius: 0 0 16px 16px; }
-.basket-info { display: grid; gap: 6px; min-width: 0; }
+.basket { gap: 10px; }
 .chip-x { border: 0; background: none; padding: 0 0 0 4px; color: var(--muted); cursor: pointer; font-size: 12px; }
-.pos { color: var(--green); }
-.neg { color: var(--danger); }
 </style>

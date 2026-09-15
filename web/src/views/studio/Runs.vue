@@ -1,51 +1,52 @@
 <template>
+  <ObjectBar title="运行记录" :description="`${backtests.jobs.value.length} 次回测 · ${trace.traceIds.value.length} 个研究实验`" />
+
   <main class="workspace">
-    <header class="workspace-head">
-      <div>
-        <div class="eyebrow">QUANTITATIVE RESEARCH / RUNS</div>
-        <h1>运行记录</h1>
+    <div class="col-head">
+      <div class="seg">
+        <button :class="{ on: showResearch && showBacktests }" @click="showResearch = true; showBacktests = true">全部</button>
+        <button :class="{ on: showResearch && !showBacktests }" @click="showResearch = true; showBacktests = false">研究</button>
+        <button :class="{ on: !showResearch && showBacktests }" @click="showResearch = false; showBacktests = true">回测</button>
       </div>
-      <div class="toolbar">
-        <label><input type="checkbox" v-model="showResearch" /> 研究</label>
-        <label><input type="checkbox" v-model="showBacktests" /> 回测</label>
+      <div class="col-actions">
         <button @click="refresh">刷新</button>
-        <button class="results-toggle" :title="layout.resultsOpen.value ? '隐藏右栏' : '显示右栏'" @click="layout.toggleResults()">{{ layout.resultsOpen.value ? "隐藏结果 ▸" : "◂ 显示结果" }}</button>
+        <ResultsToggle />
       </div>
-    </header>
-    <div class="workspace-body">
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>类型</th><th>名称</th><th>说明</th><th>状态</th></tr></thead>
-          <tbody>
-            <tr v-for="row in rows" :key="row.key" class="selectable" :class="{ selected: row.key === selectedKey }" @click="open(row)">
-              <td><span class="tag">{{ row.kind === 'research' ? '研究' : '回测' }}</span></td>
-              <td><code>{{ row.name }}</code></td>
-              <td class="hint">{{ row.detail }}</td>
-              <td><span class="tag" :class="row.statusClass">{{ row.status }}</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p v-if="!rows.length" class="empty">还没有记录。</p>
+    </div>
+    <div class="col-body">
+      <section class="panel grow">
+        <div class="panel-head"><h3>记录 <span class="hint">{{ rows.length }} 条</span></h3></div>
+        <div class="panel-body flush">
+          <table v-if="rows.length">
+            <thead><tr><th>类型</th><th>名称</th><th>说明</th><th>状态</th></tr></thead>
+            <tbody>
+              <tr v-for="row in rows" :key="row.key" class="selectable" :class="{ selected: row.key === selectedKey }" @click="open(row)">
+                <td><span class="tag">{{ row.kind === 'research' ? '研究' : '回测' }}</span></td>
+                <td><code>{{ row.name }}</code></td>
+                <td class="hint">{{ row.detail }}</td>
+                <td><span class="tag" :class="row.statusClass">{{ row.status }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="empty">还没有记录。</p>
+        </div>
+      </section>
     </div>
   </main>
 
   <aside class="results">
-    <header class="result-head">
-      <div>
-        <div class="eyebrow">DETAIL</div>
-        <h2>{{ title }}</h2>
-      </div>
-      <div class="toolbar" v-if="selected">
+    <div class="col-head">
+      <div class="seg"><button class="on">{{ title }}</button></div>
+      <div class="col-actions" v-if="selected">
         <router-link v-if="selected.kind === 'research'" :to="{ name: 'studio-research', query: { trace: selected.name } }" custom v-slot="{ navigate }">
-          <button @click="navigate">在研究页打开 →</button>
+          <button class="small" @click="navigate">在研究页打开 →</button>
         </router-link>
         <router-link v-else :to="{ name: 'studio-backtest' }" custom v-slot="{ navigate }">
-          <button @click="navigate">在回测页打开 →</button>
+          <button class="small" @click="navigate">在回测页打开 →</button>
         </router-link>
       </div>
-    </header>
-    <div class="result-scroll">
+    </div>
+    <div class="col-body">
       <template v-if="selected?.kind === 'research'">
         <p v-if="trace.status.value === '未加载'" class="hint">这个实验的事件未加载到服务端。</p>
         <RoundDetail v-for="round in trace.rounds.value" :key="round.id" :round="round" />
@@ -59,6 +60,8 @@
 import { computed, ref } from "vue";
 import BacktestResult from "../../components/studio/BacktestResult.vue";
 import RoundDetail from "../../components/studio/RoundDetail.vue";
+import ObjectBar from "../../components/studio/ObjectBar.vue";
+import ResultsToggle from "../../components/studio/ResultsToggle.vue";
 import { backtestStatusLabel } from "../../components/studio/backtestStatus";
 import { useStudioContext } from "../../composables/studioContext";
 

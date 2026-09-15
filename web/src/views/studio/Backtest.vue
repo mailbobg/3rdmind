@@ -1,135 +1,114 @@
 <template>
+  <ObjectBar title="组合回测" :description="objectDesc" :tag="method === 'lgbm' ? 'LightGBM' : '排名加权'" />
+
   <main class="workspace">
-    <header class="workspace-head">
-      <div>
-        <div class="eyebrow">QUANTITATIVE RESEARCH / PORTFOLIO</div>
-        <h1>组合回测</h1>
+    <div class="col-head">
+      <div class="seg">
+        <button :class="{ on: tab === 'params' }" @click="tab = 'params'">⚙ 参数设置</button>
+        <button :class="{ on: tab === 'source' }" @click="tab = 'source'; loadSource()">‹› 策略源码</button>
       </div>
-      <div class="toolbar">
-        <button @click="toggleSource">{{ source ? "隐藏策略源码" : "查看策略源码" }}</button>
+      <div class="col-actions">
         <button class="dark" :disabled="backtests.busy.value || !env?.data_ready || !basket.items.length" @click="submit">▶ 运行回测</button>
-        <button class="results-toggle" :title="layout.resultsOpen.value ? '隐藏右栏' : '显示右栏'" @click="layout.toggleResults()">{{ layout.resultsOpen.value ? "隐藏结果 ▸" : "◂ 显示结果" }}</button>
+        <ResultsToggle />
       </div>
-    </header>
-    <div class="workspace-body">
+    </div>
+    <div class="col-body">
       <div v-if="backtests.error.value || pageError" class="notice" role="alert">
         {{ backtests.error.value || pageError }}<button class="text-button" @click="backtests.error.value = ''; pageError = ''">关闭</button>
       </div>
       <div v-if="!env" class="notice">后端未连接，无法回测。运行 <code>scripts/start-backend.sh</code> 后刷新。</div>
       <div v-else-if="!env.data_ready" class="notice">Qlib 数据未就绪（{{ env.provider_uri }}），无法回测。</div>
 
-      <section class="surface">
-        <div class="section-heading">
-          <h3>回测什么：信号篮</h3>
-          <span>{{ basket.items.length }} 个信号 · <router-link :to="{ name: 'studio-factors' }">去因子库增减</router-link></span>
+      <template v-if="tab === 'params'">
+        <div class="param-bar">
+          <span class="p">时间 <input type="date" v-model="params.start" /> <span class="arrow">→</span> <input type="date" v-model="params.end" /></span>
+          <span class="p">初始资金 <input type="number" v-model.number="params.account" min="1000" step="100000" /></span>
+          <span class="p">股票池 <select v-model="params.market"><option value="csi300">沪深300</option><option value="csi500">中证500</option><option value="all">全市场</option></select></span>
+          <span class="p">基准 <input v-model="params.benchmark" /></span>
+          <span class="p">持股数 <input type="number" v-model.number="params.topk" min="1" max="500" /> <i class="info" title="每天按评分从高到低持有前 topk 只">i</i></span>
+          <span class="p">每日换出 <input type="number" v-model.number="params.n_drop" min="0" max="500" /> <i class="info" title="已持有但跌出前列的，每天最多换出 n_drop 只；换手越高费率影响越大">i</i></span>
+          <span class="p">买入费率 <input type="number" v-model.number="params.open_cost" min="0" max="0.1" step="0.0001" /> <i class="info" title="0.0005 = 万分之五">i</i></span>
+          <span class="p">卖出费率 <input type="number" v-model.number="params.close_cost" min="0" max="0.1" step="0.0001" /> <i class="info" title="0.0015 = 千分之一点五，含印花税">i</i></span>
         </div>
-        <div v-if="basket.items.length" class="table-scroll">
-          <table>
-            <thead><tr><th>信号</th><th>来源</th><th class="num">IC</th><th class="num">Rank IC</th><th>覆盖</th><th class="num">权重</th><th></th></tr></thead>
-            <tbody>
-              <tr v-for="f in basket.items" :key="key(f)">
-                <td>
-                  <span v-if="f.kind === 'prediction'" class="tag">模型</span> <code>{{ f.name }}</code>
-                  <div class="hint desc" v-if="info(f)?.description">{{ info(f)!.description }}</div>
-                </td>
-                <td class="hint nowrap">{{ shortName(f.trace) }} · 第 {{ f.loop_id + 1 }} 轮</td>
-                <td class="num" :class="sign(info(f)?.analysis?.ic.mean)">{{ fmt4(info(f)?.analysis?.ic.mean) }}</td>
-                <td class="num" :class="sign(info(f)?.analysis?.rank_ic.mean)">{{ fmt4(info(f)?.analysis?.rank_ic.mean) }}</td>
-                <td class="hint nowrap">{{ info(f)?.analysis ? `${info(f)!.analysis!.coverage.start} → ${info(f)!.analysis!.coverage.end}` : f.kind === "prediction" ? "模型测试期" : "未分析" }}</td>
-                <td class="num"><input type="number" step="0.5" :value="f.weight" style="width: 72px" :title="'负权重 = 反向使用这个信号'" @change="basket.setWeight(f, Number(($event.target as HTMLInputElement).value))" /></td>
-                <td><button class="text-button" @click="basket.toggle(f)">移除</button></td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="param-bar">
+          <span class="p">信号合成
+            <select v-model="method"><option value="rank">排名加权</option><option value="lgbm">训练 LightGBM</option></select>
+            <i class="info" :title="method === 'lgbm' ? '用训练区间学信号与次日收益的关系，验证区间早停，预测值当评分；三段区间依次不重叠，权重列不生效' : '每天把每个信号做截面百分位排名，按权重求和；不用训练，可解释'">i</i>
+          </span>
+          <template v-if="method === 'lgbm'">
+            <span class="sep"></span>
+            <span class="p">训练 <input type="date" v-model="lgbm.train[0]" /> <span class="arrow">→</span> <input type="date" v-model="lgbm.train[1]" /></span>
+            <span class="p">验证 <input type="date" v-model="lgbm.valid[0]" /> <span class="arrow">→</span> <input type="date" v-model="lgbm.valid[1]" /></span>
+            <span class="p">learning_rate <input type="number" step="0.01" min="0.001" max="1" v-model.number="lgbm.params.learning_rate" /></span>
+            <span class="p">num_leaves <input type="number" min="2" max="1024" v-model.number="lgbm.params.num_leaves" /></span>
+            <span class="p">max_depth <input type="number" min="-1" max="64" v-model.number="lgbm.params.max_depth" /></span>
+            <span class="p">n_estimators <input type="number" min="10" max="5000" v-model.number="lgbm.params.n_estimators" /></span>
+            <span class="p">early_stopping <input type="number" min="0" max="1000" v-model.number="lgbm.params.early_stopping_rounds" /></span>
+          </template>
         </div>
-        <p v-else class="hint">还没有选信号。去 <router-link :to="{ name: 'studio-factors' }">因子库</router-link> 勾选，或在研究轮次里点"用 N 个因子回测"。</p>
-        <div v-if="basket.items.length" class="hint" style="margin-top: 8px">
-          <div>IC 为负的信号请把权重设为 −1 反向使用（排名加权模式下有效；LightGBM 会自己学方向）。</div>
-          <div v-if="factorRefs.length >= 2">
-            <template v-if="correlation">篮内最高两两相关 |ρ| = <b :class="maxCorr >= 0.7 ? 'neg' : ''">{{ maxCorr.toFixed(2) }}</b><span v-if="maxCorr >= 0.7">，有信号基本重复，建议只留一个。</span></template>
-            <template v-else-if="correlationError">相关性：{{ correlationError }}</template>
-            <template v-else>正在计算篮内相关性…</template>
-          </div>
-          <div v-if="coverage">信号共同覆盖 <b>{{ coverage.start }} → {{ coverage.end }}</b>
-            <span v-if="coverageUnknown"> （另有 {{ coverageUnknown }} 个信号未分析，未计入）</span>。
-            <button class="text-button" @click="fitToCoverage">按覆盖区间填回测日期</button>
-          </div>
-        </div>
-      </section>
+        <div v-if="dateWarning" class="notice">{{ dateWarning }}<button v-if="coverage" class="text-button" @click="fitToCoverage">按覆盖区间填日期</button></div>
 
-      <section class="surface">
-        <div class="section-heading"><h3>信号怎么变成评分</h3><span>{{ method === "lgbm" ? "LightGBM 回归 · 标签为次日收益的截面 z-score" : "截面百分位排名 · 按权重加权" }}</span></div>
-        <p class="hint" style="margin: 0 0 8px">排名加权：每天把每个信号在全市场做百分位排名，再按权重求和，简单、不用训练、结果可解释。训练 LightGBM：用历史区间学信号与次日收益的非线性关系，需要足够长的训练期，且信号弱时很快早停。</p>
-        <div class="actions" style="margin: 0 0 10px">
-          <label class="radio"><input type="radio" value="rank" v-model="method" /> 排名加权</label>
-          <label class="radio"><input type="radio" value="lgbm" v-model="method" /> 训练 LightGBM</label>
-        </div>
-        <template v-if="method === 'lgbm'">
-          <div class="form-grid">
-            <label>训练开始<input type="date" v-model="lgbm.train[0]" /></label>
-            <label>训练结束<input type="date" v-model="lgbm.train[1]" /></label>
-            <label>验证开始<input type="date" v-model="lgbm.valid[0]" /></label>
-            <label>验证结束<input type="date" v-model="lgbm.valid[1]" /></label>
+        <section class="panel grow">
+          <div class="panel-head">
+            <h3>信号篮 <span class="hint">{{ basket.items.length }} 个 · <router-link :to="{ name: 'studio-factors' }">去因子库增减</router-link></span></h3>
+            <span class="status" :class="{ bad: maxCorr >= 0.7 }">
+              <template v-if="coverage">覆盖 {{ coverage.start }} → {{ coverage.end }}</template>
+              <template v-if="coverage && factorRefs.length >= 2"> · </template>
+              <template v-if="factorRefs.length >= 2">
+                <template v-if="correlation">最高相关 {{ maxCorr.toFixed(2) }}<template v-if="maxCorr >= 0.7">（有信号重复）</template></template>
+                <template v-else-if="correlationError">相关性计算失败</template>
+                <template v-else>计算相关性…</template>
+              </template>
+            </span>
           </div>
-          <p class="hint" style="margin: 8px 0 0">训练 → 验证 → 回测三段必须依次不重叠；验证集用于早停。权重列在此模式下不生效。</p>
-          <details>
-            <summary>LightGBM 参数</summary>
-            <div class="form-grid">
-              <label>learning_rate<input type="number" step="0.01" min="0.001" max="1" v-model.number="lgbm.params.learning_rate" /></label>
-              <label>num_leaves<input type="number" min="2" max="1024" v-model.number="lgbm.params.num_leaves" /></label>
-              <label>max_depth<input type="number" min="-1" max="64" v-model.number="lgbm.params.max_depth" /></label>
-              <label>n_estimators<input type="number" min="10" max="5000" v-model.number="lgbm.params.n_estimators" /></label>
-              <label>early_stopping<input type="number" min="0" max="1000" v-model.number="lgbm.params.early_stopping_rounds" /></label>
-              <label>colsample_bytree<input type="number" step="0.05" min="0.1" max="1" v-model.number="lgbm.params.colsample_bytree" /></label>
-              <label>subsample<input type="number" step="0.05" min="0.1" max="1" v-model.number="lgbm.params.subsample" /></label>
-              <label>lambda_l2<input type="number" step="1" min="0" v-model.number="lgbm.params.lambda_l2" /></label>
-            </div>
-          </details>
-        </template>
-      </section>
+          <div class="panel-body flush">
+            <table v-if="basket.items.length">
+              <thead><tr><th>信号</th><th>来源</th><th class="num">IC</th><th class="num">Rank IC</th><th>覆盖</th><th class="num">权重 <i class="info" title="负权重 = 反向使用；LightGBM 模式下不生效">i</i></th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="f in basket.items" :key="key(f)">
+                  <td>
+                    <span v-if="f.kind === 'prediction'" class="tag">模型</span> <code>{{ f.name }}</code>
+                    <div class="hint desc" v-if="info(f)?.description">{{ info(f)!.description }}</div>
+                  </td>
+                  <td class="hint nowrap">{{ shortName(f.trace) }} · 第 {{ f.loop_id + 1 }} 轮</td>
+                  <td class="num" :class="sign(info(f)?.analysis?.ic.mean)">{{ fmt4(info(f)?.analysis?.ic.mean) }}</td>
+                  <td class="num" :class="sign(info(f)?.analysis?.rank_ic.mean)">{{ fmt4(info(f)?.analysis?.rank_ic.mean) }}</td>
+                  <td class="hint nowrap">{{ info(f)?.analysis ? `${info(f)!.analysis!.coverage.start} → ${info(f)!.analysis!.coverage.end}` : f.kind === "prediction" ? "模型测试期" : "未分析" }}</td>
+                  <td class="num"><input type="number" step="0.5" :value="f.weight" style="width: 64px; padding: 2px 6px" :disabled="method === 'lgbm'" @change="basket.setWeight(f, Number(($event.target as HTMLInputElement).value))" /></td>
+                  <td><button class="text-button" @click="basket.toggle(f)">移除</button></td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="empty">还没有选信号。去 <router-link :to="{ name: 'studio-factors' }">因子库</router-link> 勾选，或在研究轮次里点"用 N 个因子回测"。</p>
+          </div>
+          <div class="panel-foot" v-if="basket.items.length">
+            <span>TopkDropoutStrategy · 前一日评分 · 当日收盘成交</span>
+            <span v-if="coverageUnknown">{{ coverageUnknown }} 个信号未做单因子分析，覆盖区间未计入</span>
+          </div>
+        </section>
+      </template>
 
-      <section class="surface">
-        <div class="section-heading"><h3>评分怎么变成持仓</h3><span>TopkDropoutStrategy · 前一日评分 · 当日收盘成交</span></div>
-        <p class="hint" style="margin: 0 0 8px">每天按评分从高到低，持有前 topk 只；已持有但跌出前列的，每天最多换出 n_drop 只。换手越高，费率影响越大。</p>
-        <div class="form-grid">
-          <label>开始<input type="date" v-model="params.start" /></label>
-          <label>结束<input type="date" v-model="params.end" /></label>
-          <label>股票池<select v-model="params.market"><option value="csi300">沪深300</option><option value="csi500">中证500</option><option value="all">全市场</option></select></label>
-          <label title="用于对比的指数代码">基准指数<input v-model="params.benchmark" /></label>
-          <label title="每天持有的股票数量">持股数 topk<input type="number" v-model.number="params.topk" min="1" max="500" /></label>
-          <label title="每天最多换出的股票数量">每日换出 n_drop<input type="number" v-model.number="params.n_drop" min="0" max="500" /></label>
-          <label>初始资金<input type="number" v-model.number="params.account" min="1000" step="100000" /></label>
-          <label title="0.0005 = 万分之五">买入费率<input type="number" v-model.number="params.open_cost" min="0" max="0.1" step="0.0001" /></label>
-          <label title="0.0015 = 千分之一点五，含印花税">卖出费率<input type="number" v-model.number="params.close_cost" min="0" max="0.1" step="0.0001" /></label>
-        </div>
-        <div v-if="dateWarning" class="notice" style="margin: 10px 0 0">{{ dateWarning }}</div>
-        <p v-else class="hint" style="margin: 10px 0 0">回测区间必须落在信号覆盖范围内，超出会直接报错而不是延续持仓。</p>
-      </section>
-
-      <section v-if="source" class="surface">
-        <div class="section-heading"><h3>studio_worker.py</h3><span>只读 · 服务端执行</span></div>
-        <pre><code>{{ source }}</code></pre>
+      <section v-else class="panel grow">
+        <div class="panel-head"><h3>studio_worker.py</h3><span class="status">只读 · 服务端执行</span></div>
+        <div class="panel-body flush"><pre style="border: 0; border-radius: 0; height: 100%"><code>{{ source || "加载中…" }}</code></pre></div>
       </section>
     </div>
   </main>
 
   <aside class="results">
-    <header class="result-head">
-      <div>
-        <div class="eyebrow">BACKTEST RESULT</div>
-        <h2>{{ result ? `回测 ${result.id.slice(0, 8)}` : "回测结果" }}</h2>
-      </div>
-      <div class="toolbar">
-        <select :value="backtests.selectedId.value" aria-label="回测历史" @change="backtests.select(($event.target as HTMLSelectElement).value); layout.openResults()">
+    <div class="col-head">
+      <div class="seg"><button class="on">回测结果</button></div>
+      <div class="col-actions">
+        <select :value="backtests.selectedId.value" aria-label="回测历史" style="max-width: 300px" @change="backtests.select(($event.target as HTMLSelectElement).value); layout.openResults()">
           <option value="">回测历史</option>
           <option v-for="job in backtests.jobs.value" :key="job.id" :value="job.id">{{ jobLabel(job) }}</option>
         </select>
-        <button v-if="result?.metrics" class="text-button" @click="exportResult">导出 JSON</button>
+        <button v-if="result?.metrics" class="small" @click="exportResult">导出 JSON</button>
       </div>
-    </header>
-    <div class="result-scroll">
+    </div>
+    <div class="col-body">
       <BacktestResult v-if="result" :result="result" />
-      <p v-else class="empty">运行回测后在这里看指标、净值曲线与日志。</p>
+      <p v-else class="empty">运行回测后在这里看指标、净值曲线、持仓与成交。</p>
     </div>
   </aside>
 </template>
@@ -138,6 +117,8 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import * as studio from "../../api/studio";
 import type { BacktestSummary, CorrelationMatrix as Corr, FactorRef, FactorWeight, LibraryFactor } from "../../api/studio";
 import BacktestResult from "../../components/studio/BacktestResult.vue";
+import ObjectBar from "../../components/studio/ObjectBar.vue";
+import ResultsToggle from "../../components/studio/ResultsToggle.vue";
 import { backtestStatusLabel } from "../../components/studio/backtestStatus";
 import { download, useStudioContext } from "../../composables/studioContext";
 import { persistStudioState, restoreStudioState } from "../../composables/studioStorage";
@@ -160,6 +141,15 @@ const lgbm = reactive({
 });
 const pageError = ref("");
 const source = ref("");
+const tab = ref<"params" | "source">("params");
+const objectDesc = computed(() =>
+  basket.items.length
+    ? `${basket.items.length} 个信号：${basket.items.map((f) => f.name).join("、")} · ${params.start || "?"} → ${params.end || "?"} · ${params.market}`
+    : "信号篮为空，先去因子库挑选");
+async function loadSource() {
+  if (source.value) return;
+  try { source.value = (await studio.strategySource()).code; } catch (e) { pageError.value = e instanceof Error ? e.message : String(e); }
+}
 
 // Factor descriptions and cached single-factor analyses come from the library; keyed the same way as the basket.
 const library = ref<Record<string, LibraryFactor>>({});
@@ -235,10 +225,6 @@ function defaultDates() {
 }
 watch(env, defaultDates, { immediate: true });
 
-async function toggleSource() {
-  if (source.value) { source.value = ""; return; }
-  try { source.value = (await studio.strategySource()).code; } catch (e) { pageError.value = e instanceof Error ? e.message : String(e); }
-}
 function modelConfig() {
   return method.value === "lgbm"
     ? { method: "lgbm" as const, train: [...lgbm.train] as [string, string], valid: [...lgbm.valid] as [string, string], params: { ...lgbm.params } }
