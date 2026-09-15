@@ -16,5 +16,6 @@ export function useLayoutState() {
   const toggleResults = useCallback(() => setResultsOpen(!resultsOpen), [resultsOpen, setResultsOpen]);
   const openResults = useCallback(() => { if (!resultsOpen) setResultsOpen(true); }, [resultsOpen, setResultsOpen]);
   const toggleExpanded = useCallback(() => setResultsExpanded((v) => !v), []);
-  return { resultsOpen, setResultsOpen, toggleResults, openResults, resultsExpanded, toggleExpanded };
+  const resetExpanded = useCallback(() => setResultsExpanded(false), []);
+  return { resultsOpen, setResultsOpen, toggleResults, openResults, resultsExpanded, toggleExpanded, resetExpanded };
 }

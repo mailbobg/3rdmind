@@ -37,6 +37,8 @@ export function PageFrame(p: PageFrameProps) {
   const panel = useResizablePanel();
   // The remembered results width is clamped to what the window leaves next to the work column; when even
   // that is too little the two stack vertically.
+  // Every page mounts its own frame, so a page change always comes back to the two-column layout.
+  useLayoutEffect(() => { layout.resetExpanded(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const frame = useRef<HTMLDivElement>(null);
   const [available, setAvailable] = useState(Infinity);
   useLayoutEffect(() => {
