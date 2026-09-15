@@ -5,11 +5,14 @@
       <h3>回测 {{ result.id.slice(0, 8) }}</h3>
       <span class="tag" :class="{ ok: result.status === 'completed', bad: result.status === 'failed' }">{{ statusLabel }}</span>
     </div>
+    <div class="chips" style="margin-bottom: 8px">
+      <template v-if="legacy"><span class="tag">旧格式回测 · {{ result.config.factors.length }} 个因子</span></template>
+      <span v-else class="chip" v-for="f in result.config.factors" :key="`${f.trace}#${f.loop_id}#${f.name}`" :title="`${f.trace ?? result.config.trace} · 第 ${Number(f.loop_id ?? result.config.loop_id) + 1} 轮`">
+        {{ f.name }}<template v-if="f.weight !== 1"> ×{{ f.weight }}</template>
+      </span>
+    </div>
     <p class="hint">
-      <template v-if="result.config.loop_id === undefined || result.config.loop_id === null">旧格式回测 · {{ result.config.factors.length }} 个因子</template>
-      <template v-else>来自 {{ result.config.trace }} · 第 {{ Number(result.config.loop_id) + 1 }} 轮 ·
-      {{ result.config.factors.map((f) => `${f.name}×${f.weight}`).join("，") }}</template> ·
-      {{ result.config.start }} → {{ result.config.end }} · {{ result.config.market }} · topk {{ result.config.topk }} / n_drop {{ result.config.n_drop }}
+      {{ result.config.start }} → {{ result.config.end }} · {{ result.config.market }} · 基准 {{ result.config.benchmark || "SH000300" }} · topk {{ result.config.topk }} / n_drop {{ result.config.n_drop }}
     </p>
     <div v-if="result.error" class="notice">{{ result.error }}</div>
     <template v-if="result.metrics">
@@ -29,6 +32,9 @@ import type { BacktestResult } from "../../api/studio";
 import { backtestStatusLabel } from "./backtestStatus";
 const props = defineProps<{ result: BacktestResult }>();
 const statusLabel = computed(() => backtestStatusLabel(props.result.status));
+// Jobs written before factors carried their round have no loop_id anywhere in the config.
+const legacy = computed(() => (props.result.config.loop_id === undefined || props.result.config.loop_id === null)
+  && !props.result.config.factors.some((f) => f.loop_id !== undefined && f.loop_id !== null));
 const percent = (v?: number | null) => (typeof v === "number" && Number.isFinite(v) ? (v * 100).toFixed(2) + "%" : "—");
 const cards = computed(() => {
   const m = props.result.metrics!;
@@ -42,9 +48,4 @@ const cards = computed(() => {
   ];
 });
 </script>
-<style scoped>
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin: 10px 0; }
-.cards div { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
-.cards small { display: block; color: var(--muted); font-size: 11px; }
-.cards strong { font-size: 16px; }
-</style>
+

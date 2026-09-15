@@ -19,12 +19,19 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { TraceEvent } from "../../api/studio";
-const props = defineProps<{ event: TraceEvent; busy: boolean }>();
+const props = defineProps<{ event: TraceEvent; busy: boolean; defaultInstruction?: string }>();
 const emit = defineEmits<{ submit: [payload: object] }>();
 const text = ref("");
 // Keyed on timestamp (part of the interaction key) rather than the whole event object, so a
 // poll refresh that replaces `events` with an equal-but-new object does not wipe in-progress edits.
-watch(() => props.event.timestamp, () => { text.value = JSON.stringify(props.event.content, null, 2); }, { immediate: true });
+watch(() => props.event.timestamp, () => {
+  const content = props.event.content;
+  // The research objective typed on the start form pre-fills the agent's first user_instruction request.
+  const seeded = props.defaultInstruction && content && typeof content === "object" && "user_instruction" in content
+    ? { ...content, user_instruction: content.user_instruction || props.defaultInstruction }
+    : content;
+  text.value = JSON.stringify(seeded, null, 2);
+}, { immediate: true });
 const parsed = computed(() => { try { return { value: JSON.parse(text.value), error: "" }; } catch { return { value: null, error: "JSON 格式错误。" }; } });
 const parseError = computed(() => parsed.value.error);
 const labels: Record<string, string> = { user_instruction: "研究方向", hypothesis: "研究假设", reason: "依据与反馈", decision: "评估决定" };

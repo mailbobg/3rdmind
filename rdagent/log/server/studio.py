@@ -108,9 +108,15 @@ def factor_library(registry, log_folder):
             continue
         for round_ in metric_rounds(task.messages):
             for name in round_["factors"]:
+                code = factor_code(task.messages, round_["loop_id"], name)
+                if code is None:
+                    # A resumed run replays no code events; fall back to the factor.py left in its workspace.
+                    source = Path(round_["paths"].get(name, "")).resolve() / "factor.py"
+                    if WORKSPACE_ROOT in source.parents and source.is_file():
+                        code = source.read_text(errors="replace")
                 entries.append({
                     "trace": trace, "loop_id": round_["loop_id"], "name": name,
-                    "metrics": round_["metrics"], "code": factor_code(task.messages, round_["loop_id"], name),
+                    "metrics": round_["metrics"], "code": code,
                 })
     return entries
 

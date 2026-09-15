@@ -10,11 +10,16 @@ export interface Environment {
   start: string | null; end: string | null; python: string;
 }
 export interface Round { loop_id: number; factors: string[]; metrics: Record<string, number> }
-export interface FactorWeight { name: string; weight: number }
+export interface FactorWeight { name: string; weight: number; trace: string; loop_id: number }
+export interface LibraryFactor {
+  trace: string; loop_id: number; name: string; metrics: Record<string, number>; code: string | null;
+}
 export interface BacktestRequest {
-  trace: string; loop_id: number; factors: FactorWeight[];
-  start: string; end: string; market: "csi300" | "csi500" | "all";
+  factors: FactorWeight[];
+  start: string; end: string; market: "csi300" | "csi500" | "all"; benchmark: string;
   topk: number; n_drop: number; account: number; open_cost: number; close_cost: number;
+  /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
+  trace?: string; loop_id?: number;
 }
 export interface BacktestSummary { id: string; status: string; config: BacktestRequest & { provider_uri?: string } }
 export interface BacktestRow {
@@ -70,6 +75,7 @@ export const submitInteraction = (id: string, payload: unknown) =>
 export const stdoutUrl = (id: string) => `/stdout?${new URLSearchParams({ id })}`;
 export const environment = () => api<Environment>("/studio/environment");
 export const strategySource = () => api<{ name: string; code: string }>("/studio/strategy");
+export const factorLibrary = () => api<LibraryFactor[]>("/studio/factors");
 export const rounds = (trace: string) => api<Round[]>(`/studio/rounds?${new URLSearchParams({ trace })}`);
 export const backtests = () => api<BacktestSummary[]>("/studio/backtests");
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);

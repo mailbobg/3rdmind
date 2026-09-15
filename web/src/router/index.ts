@@ -9,7 +9,10 @@ const routes: Array<RouteRecordRaw> = [
     children: [
       { path: '', redirect: { name: 'studio-research' } },
       { path: 'research', name: 'studio-research', component: () => import('../views/studio/Research.vue') },
-      { path: 'strategy', name: 'studio-strategy', component: () => import('../views/studio/Strategy.vue') },
+      { path: 'factors', name: 'studio-factors', component: () => import('../views/studio/Factors.vue') },
+      { path: 'backtest', name: 'studio-backtest', component: () => import('../views/studio/Backtest.vue') },
+      { path: 'strategy', redirect: { name: 'studio-backtest' } },
+      { path: 'runs', name: 'studio-runs', component: () => import('../views/studio/Runs.vue') },
     ],
   },
   {

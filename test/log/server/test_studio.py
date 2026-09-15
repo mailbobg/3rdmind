@@ -403,3 +403,10 @@ def test_validate_config_checks_benchmark() -> None:
     assert validate_config(_config(benchmark=" SH000905 "))["benchmark"] == "SH000905"
     with pytest.raises(ValueError, match="benchmark"):
         validate_config(_config(benchmark=""))
+
+
+@pytest.mark.offline
+def test_factor_library_falls_back_to_workspace_source(studio_client, tmp_path: Path) -> None:
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print('from disk')")
+    entry = studio_client.get("/studio/factors").get_json()[0]
+    assert entry["code"] == "print('from disk')"

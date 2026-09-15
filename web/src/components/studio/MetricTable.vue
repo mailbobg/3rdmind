@@ -3,7 +3,7 @@
     <table>
       <thead><tr><th>指标</th><th class="num">值</th></tr></thead>
       <tbody>
-        <tr v-for="[key, value] in rows" :key="key"><td>{{ key }}</td><td class="num">{{ format(value) }}</td></tr>
+        <tr v-for="[key, value] in rows" :key="key"><td class="metric-key">{{ key }}</td><td class="num">{{ format(value) }}</td></tr>
       </tbody>
     </table>
   </div>
@@ -22,3 +22,7 @@ const rows = computed(() => {
 });
 const format = (v: number) => (Number.isFinite(v) ? Number(v.toPrecision(5)).toString() : "—");
 </script>
+<style scoped>
+.metric-key { word-break: break-all; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.num { white-space: nowrap; }
+</style>
