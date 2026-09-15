@@ -5,15 +5,12 @@
   --font-sans: "Avenir Next", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
 }
 
-/* One ground for the whole app: the work column's paper colour, with HeroUI's neutral surfaces and rules
-   retinted to match so the rail, object bar and results column sit on the same paper. */
+/* The four columns are white cards on HeroUI's default grey ground; the rules are the warm hairline
+   colour the work column uses, so both HeroUI and .mm-* elements draw the same lines. */
 :root {
-  --background: #fbfaf8;
-  --surface: #fbfaf8;
-  --surface-secondary: #f1efea;
-  --surface-tertiary: #ebe8e2;
-  --field-background: #fbfaf8;
-  --overlay: #fbfaf8;
+  --surface: #ffffff;
+  --field-background: #ffffff;
+  --overlay: #ffffff;
   --border: #e5e2dc;
   --separator: #efece7;
 }
@@ -35,7 +32,7 @@ label.field-label, .field-label { font-size: 12px; color: var(--muted); }
    boxes, 11px muted keys over mono values, plain outlined buttons. Scoped so the rail and the
    results column keep their HeroUI look. */
 :root {
-  --mm-paper: #fbfaf8; --mm-ink: #1b1b19; --mm-muted: #6f6e69; --mm-rule: #e5e2dc; --mm-rule-soft: #efece7;
+  --mm-paper: #ffffff; --mm-ink: #1b1b19; --mm-muted: #6f6e69; --mm-rule: #e5e2dc; --mm-rule-soft: #efece7;
   --mm-accent: #2f57c4; --mm-ok: #1f7a4d; --mm-warn: #a8730b; --mm-bad: #b23c2c;
   --mm-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -125,5 +122,5 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .mm-details summary { cursor: pointer; color: var(--mm-accent); font-size: 12px; list-style: none; }
 .mm-details summary::-webkit-details-marker { display: none; }
 .mm-details[open] summary { margin-bottom: 6px; }
-.mm-pre { margin: 0; overflow: auto; border: 1px solid var(--mm-rule); border-radius: 4px; padding: 12px 14px; font-family: var(--mm-mono); font-size: 12px; line-height: 1.6; background: #fff; }
+.mm-pre { margin: 0; overflow: auto; border: 1px solid var(--mm-rule); border-radius: 4px; padding: 12px 14px; font-family: var(--mm-mono); font-size: 12px; line-height: 1.6; background: var(--surface-secondary); }
 .mm-table + .mm-p, .mm-grid + .mm-p, .mm-row + .mm-p { margin-top: 12px; }
