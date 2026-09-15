@@ -3,7 +3,9 @@ import type { FactorWeight } from "../api/studio";
 import { persistStudioState, restoreStudioState } from "./studioStorage";
 
 /** Factors picked for the portfolio backtest. Shared by the factor library and the backtest page. */
-export const basketKey = (f: { trace: string; loop_id: number; name: string }) => `${f.trace}#${f.loop_id}#${f.name}`;
+export const basketKey = (f: { trace: string; loop_id: number; name: string; kind?: string }) =>
+  `${f.kind || "factor"}#${f.trace}#${f.loop_id}#${f.name}`;
+export const PREDICTION_NAME = "模型预测";
 
 const saved = restoreStudioState();
 const items = reactive<FactorWeight[]>(Array.isArray(saved.basket) ? saved.basket : []);
@@ -19,10 +21,15 @@ export function useFactorBasket() {
     persist();
   }
   function addRound(trace: string, loop_id: number, names: string[]) {
-    for (const name of names) if (!has({ trace, loop_id, name })) items.push({ name, trace, loop_id, weight: 1 });
+    for (const name of names) if (!has({ trace, loop_id, name })) items.push({ name, trace, loop_id, weight: 1, kind: "factor" });
+    persist();
+  }
+  function addPrediction(trace: string, loop_id: number) {
+    const item = { name: PREDICTION_NAME, trace, loop_id, kind: "prediction" as const };
+    if (!has(item)) items.push({ ...item, weight: 1 });
     persist();
   }
   function setWeight(f: FactorWeight, weight: number) { f.weight = weight; persist(); }
   function clear() { items.splice(0); persist(); }
-  return { items, has, toggle, addRound, setWeight, clear };
+  return { items, has, toggle, addRound, addPrediction, setWeight, clear };
 }

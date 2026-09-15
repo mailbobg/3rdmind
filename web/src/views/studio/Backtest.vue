@@ -18,15 +18,15 @@
 
       <section class="surface">
         <div class="section-heading">
-          <h3>因子信号</h3>
-          <span>{{ basket.items.length }} 个因子 · 截面百分位排名后按权重合成</span>
+          <h3>信号</h3>
+          <span>{{ basket.items.length }} 个信号 · 因子值或模型预测，截面百分位排名后按权重合成</span>
         </div>
         <div v-if="basket.items.length" class="table-scroll">
           <table>
-            <thead><tr><th>因子</th><th>来源</th><th class="num">权重</th><th></th></tr></thead>
+            <thead><tr><th>信号</th><th>来源</th><th class="num">权重</th><th></th></tr></thead>
             <tbody>
               <tr v-for="f in basket.items" :key="key(f)">
-                <td><code>{{ f.name }}</code></td>
+                <td><span v-if="f.kind === 'prediction'" class="tag">模型</span> <code>{{ f.name }}</code></td>
                 <td class="hint">{{ shortName(f.trace) }} · 第 {{ f.loop_id + 1 }} 轮</td>
                 <td class="num"><input type="number" step="0.5" :value="f.weight" style="width: 80px" @change="basket.setWeight(f, Number(($event.target as HTMLInputElement).value))" /></td>
                 <td><button class="text-button" @click="basket.toggle(f)">移除</button></td>

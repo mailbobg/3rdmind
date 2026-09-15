@@ -149,7 +149,7 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_rounds_lists_factor_rounds(studio_client) -> None:
     response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
     assert response.status_code == 200
-    assert response.get_json() == [{"loop_id": 0, "factors": ["STR_5"], "metrics": {"IC": 0.01, "Rank IC": 0.02}}]
+    assert response.get_json() == [{"loop_id": 0, "factors": ["STR_5"], "metrics": {"IC": 0.01, "Rank IC": 0.02}, "prediction": False}]
     assert studio_client.get("/studio/rounds", query_string={"trace": "nope/none"}).status_code == 404
 
 
@@ -166,7 +166,7 @@ def test_backtest_resolves_factor_paths(studio_client, tmp_path: Path) -> None:
     assert response.status_code == 202, response.get_json()
     job = response.get_json()["id"]
     config = json.loads((tmp_path / "traces" / "studio_backtests" / job / "config.json").read_text())
-    assert config["factors"] == [{"name": "STR_5", "weight": 1.0, "path": str(tmp_path / "ws" / "f0"),
+    assert config["factors"] == [{"name": "STR_5", "kind": "factor", "weight": 1.0, "path": str(tmp_path / "ws" / "f0"),
                                   "trace": "Finance Data Building/demo", "loop_id": 0}]
     assert config["trace"] == "Finance Data Building/demo"
 
@@ -378,7 +378,7 @@ def test_backtest_accepts_per_factor_rounds_without_request_defaults(studio_clie
     assert config["factors"][0]["loop_id"] == 0
     assert config["benchmark"] == "SH000905"
     listed = studio_client.get("/studio/backtests").get_json()[0]["config"]["factors"][0]
-    assert listed == {"name": "STR_5", "weight": 1.0, "trace": "Finance Data Building/demo", "loop_id": 0}
+    assert listed == {"name": "STR_5", "kind": "factor", "weight": 1.0, "trace": "Finance Data Building/demo", "loop_id": 0}
 
     unknown = dict(body, factors=[{"name": "STR_5", "weight": 1, "trace": "nope/none", "loop_id": 0}])
     assert studio_client.post("/studio/backtests", json=unknown).status_code == 400
@@ -410,3 +410,63 @@ def test_factor_library_falls_back_to_workspace_source(studio_client, tmp_path: 
     (tmp_path / "ws" / "f0" / "factor.py").write_text("print('from disk')")
     entry = studio_client.get("/studio/factors").get_json()[0]
     assert entry["code"] == "print('from disk')"
+
+
+def _write_prediction(workspace_root: Path) -> Path:
+    artifacts = workspace_root / "exp" / "mlruns" / "1" / "run" / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    index = pd.MultiIndex.from_tuples(
+        [(pd.Timestamp("2025-01-02"), "SH600000"), (pd.Timestamp("2025-01-02"), "SH600009")],
+        names=["datetime", "instrument"],
+    )
+    path = artifacts / "pred.pkl"
+    pd.DataFrame({"score": [0.2, 0.1]}, index=index).to_pickle(path)
+    return path
+
+
+@pytest.mark.offline
+def test_rounds_report_prediction_availability(studio_client, tmp_path: Path) -> None:
+    assert studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"}).get_json()[0]["prediction"] is False
+    _write_prediction(tmp_path / "ws")
+    rounds = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"}).get_json()
+    assert rounds[0]["prediction"] is True
+    assert "experiment" not in rounds[0] and "paths" not in rounds[0]
+
+
+@pytest.mark.offline
+def test_backtest_accepts_model_prediction_signal(studio_client, tmp_path: Path) -> None:
+    pred = _write_prediction(tmp_path / "ws")
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    body = {"factors": [{"kind": "prediction", "name": "模型预测", "weight": 1,
+                         "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / response.get_json()["id"] / "config.json").read_text())
+    assert config["factors"][0]["kind"] == "prediction"
+    assert config["factors"][0]["path"] == str(pred)
+    listed = studio_client.get("/studio/backtests").get_json()[0]["config"]["factors"][0]
+    assert listed["kind"] == "prediction" and "path" not in listed
+
+
+@pytest.mark.offline
+def test_backtest_rejects_prediction_when_round_has_none(studio_client, tmp_path: Path) -> None:
+    body = {"factors": [{"kind": "prediction", "name": "模型预测", "weight": 1,
+                         "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 400
+    assert "prediction" in response.get_json()["error"]
+
+
+@pytest.mark.offline
+def test_load_factor_frame_reads_prediction_pickle(tmp_path: Path) -> None:
+    pred = _write_prediction(tmp_path)
+    frame = load_factor_frame({"kind": "prediction", "name": "模型预测", "path": str(pred)},
+                              pd.Timestamp("2025-01-01"), "2025-12-31")
+    assert list(frame.columns) == ["模型预测"]
+    assert len(frame) == 2

@@ -89,19 +89,33 @@ def require_signal_coverage(score_index_dates, start, end):
     first = dates.min()
     last = dates.max()
     if last < pd.Timestamp(end) or first > pd.Timestamp(start):
+        # `start` here is the trading day BEFORE the first backtest day (TopkDropout trades on the
+        # previous day's signal), so spell out both constraints instead of quoting a range that may
+        # look identical to what the user asked for.
         raise ValueError(
-            f"Factor signals cover {first.date()} to {last.date()}; choose a window inside that range"
+            f"Signals cover {first.date()} to {last.date()}. The backtest needs a signal on the trading day "
+            f"before its start, so start after {first.date()} and end on or before {last.date()}"
         )
 
 
 def load_factor_frame(factor, start, end):
-    """Read one factor workspace's result.h5 as a single-column frame named after the factor."""
+    """Read one signal as a single-column frame named after it.
+
+    ``kind == "factor"`` (default) reads the workspace's result.h5; ``kind == "prediction"`` reads a Qlib
+    ``pred.pkl`` (model scores) so a research round's model can be backtested like any other signal.
+    """
     import pandas as pd
 
-    source = Path(factor["path"]) / "result.h5"
-    if not source.is_file():
-        raise ValueError(f"Factor {factor['name']} has no result.h5 at {factor['path']}")
-    frame = pd.read_hdf(source)
+    if factor.get("kind", "factor") == "prediction":
+        source = Path(factor["path"])
+        if not source.is_file():
+            raise ValueError(f"Prediction {factor['name']} is missing at {factor['path']}")
+        frame = pd.read_pickle(source)
+    else:
+        source = Path(factor["path"]) / "result.h5"
+        if not source.is_file():
+            raise ValueError(f"Factor {factor['name']} has no result.h5 at {factor['path']}")
+        frame = pd.read_hdf(source)
     if isinstance(frame, pd.Series):
         frame = frame.to_frame()
     if frame.empty or frame.shape[1] == 0:

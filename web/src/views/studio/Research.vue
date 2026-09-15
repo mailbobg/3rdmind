@@ -62,6 +62,7 @@
       </div>
       <div class="toolbar" v-if="activeRound">
         <button v-if="activeRound.factors.length" class="primary" @click="sendToBacktest(activeRound)">用 {{ activeRound.factors.length }} 个因子回测 →</button>
+        <button v-if="hasPrediction(activeRound)" class="primary" @click="sendPrediction(activeRound)">用模型预测回测 →</button>
         <a v-if="trace.traceId.value" class="text-button" :href="stdoutUrl(trace.traceId.value)" download>日志</a>
       </div>
     </header>
@@ -135,6 +136,23 @@ function sendToBacktest(round: RoundView) {
   basket.addRound(trace.traceId.value, Number(round.id), round.factors);
   router.push({ name: "studio-backtest" });
 }
+function sendPrediction(round: RoundView) {
+  basket.addPrediction(trace.traceId.value, Number(round.id));
+  router.push({ name: "studio-backtest" });
+}
+
+// Which rounds recorded a Qlib model prediction lives on disk, so it comes from /studio/rounds rather than the event stream.
+const predictionLoops = ref<Set<number>>(new Set());
+const hasPrediction = (round: RoundView) => predictionLoops.value.has(Number(round.id));
+async function loadPredictionLoops(id: string) {
+  predictionLoops.value = new Set();
+  if (!id) return;
+  try {
+    const rounds = await studio.rounds(id);
+    if (id === trace.traceId.value) predictionLoops.value = new Set(rounds.filter((r) => r.prediction).map((r) => r.loop_id));
+  } catch { /* the trace may not be loaded on the server; the round view already says so */ }
+}
+watch(() => [trace.traceId.value, trace.rounds.value.length] as const, ([id]) => loadPredictionLoops(id), { immediate: true });
 
 onMounted(async () => {
   const wanted = typeof route.query.trace === "string" ? route.query.trace : trace.traceId.value;

@@ -8,7 +8,7 @@
     <div class="chips" style="margin-bottom: 8px">
       <template v-if="legacy"><span class="tag">旧格式回测 · {{ result.config.factors.length }} 个因子</span></template>
       <span v-else class="chip" v-for="f in result.config.factors" :key="`${f.trace}#${f.loop_id}#${f.name}`" :title="`${f.trace ?? result.config.trace} · 第 ${Number(f.loop_id ?? result.config.loop_id) + 1} 轮`">
-        {{ f.name }}<template v-if="f.weight !== 1"> ×{{ f.weight }}</template>
+        <template v-if="f.kind === 'prediction'">模型 · </template>{{ f.name }}<template v-if="f.weight !== 1"> ×{{ f.weight }}</template>
       </span>
     </div>
     <p class="hint">

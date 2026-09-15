@@ -9,8 +9,10 @@ export interface Environment {
   chat_model: string; provider_uri: string; data_ready: boolean;
   start: string | null; end: string | null; python: string;
 }
-export interface Round { loop_id: number; factors: string[]; metrics: Record<string, number> }
-export interface FactorWeight { name: string; weight: number; trace: string; loop_id: number }
+export interface Round { loop_id: number; factors: string[]; metrics: Record<string, number>; prediction: boolean }
+export type SignalKind = "factor" | "prediction";
+/** One signal in the portfolio: a research factor's result.h5, or a round's Qlib model prediction (pred.pkl). */
+export interface FactorWeight { name: string; weight: number; trace: string; loop_id: number; kind?: SignalKind }
 export interface LibraryFactor {
   trace: string; loop_id: number; name: string; metrics: Record<string, number>; code: string | null;
 }

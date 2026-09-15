@@ -71,13 +71,26 @@ def metric_rounds(messages):
             loop_id = raw_loop_id
         if loop_id not in by_loop:
             order.append(loop_id)
+        workspaces = content.get("workspaces", {}) or {}
         by_loop[loop_id] = {
             "loop_id": loop_id,
-            "factors": [f["name"] for f in content.get("workspaces", {}).get("factors", [])],
-            "paths": {f["name"]: f["path"] for f in content.get("workspaces", {}).get("factors", [])},
+            "factors": [f["name"] for f in workspaces.get("factors", [])],
+            "paths": {f["name"]: f["path"] for f in workspaces.get("factors", [])},
+            "experiment": workspaces.get("experiment"),
             "metrics": {k: v for k, v in metrics.items() if isinstance(v, (int, float)) and not isinstance(v, bool)},
         }
     return [by_loop[loop_id] for loop_id in order]
+
+
+def prediction_file(experiment_path):
+    """The newest Qlib ``pred.pkl`` recorded under an experiment workspace, or None."""
+    if not experiment_path:
+        return None
+    root = Path(experiment_path).resolve()
+    if WORKSPACE_ROOT not in root.parents:
+        return None
+    candidates = sorted(root.glob("mlruns/*/*/artifacts/pred.pkl"), key=lambda p: p.stat().st_mtime)
+    return candidates[-1] if candidates else None
 
 
 def factor_code(messages, loop_id, name):
@@ -138,20 +151,27 @@ def resolve_factor_paths(default_trace, default_loop_id, factors):
         messages = trace_messages(str(trace or ""))
         if messages is None:
             raise ValueError(f"Trace {trace!r} is not loaded on this server")
-        paths = {}
-        for round_ in metric_rounds(messages):
-            if round_["loop_id"] == loop_id:
-                paths = round_["paths"]
-        if not paths:
-            raise ValueError(f"Round {loop_id} of {trace} has no factor workspaces")
-        if name not in paths:
-            raise ValueError(f"Unknown factor {name!r} in round {loop_id} of {trace}")
-        path = Path(paths[name]).resolve()
-        if WORKSPACE_ROOT not in path.parents:
-            raise ValueError(f"Factor {name} lives outside the RD-Agent workspace root")
-        if not (path / "result.h5").is_file():
-            raise ValueError(f"Factor {name} has no result.h5")
-        resolved.append({"name": name, "weight": float(factor.get("weight", 1)), "path": str(path),
+        round_ = next((r for r in metric_rounds(messages) if r["loop_id"] == loop_id), None)
+        if round_ is None:
+            raise ValueError(f"Round {loop_id} of {trace} has no evaluation")
+        kind = factor.get("kind", "factor")
+        if kind == "prediction":
+            # The round's Qlib model predictions (pred.pkl) used directly as the signal.
+            path = prediction_file(round_["experiment"])
+            if path is None:
+                raise ValueError(f"Round {loop_id} of {trace} recorded no model prediction")
+        elif kind == "factor":
+            paths = round_["paths"]
+            if name not in paths:
+                raise ValueError(f"Unknown factor {name!r} in round {loop_id} of {trace}")
+            path = Path(paths[name]).resolve()
+            if WORKSPACE_ROOT not in path.parents:
+                raise ValueError(f"Factor {name} lives outside the RD-Agent workspace root")
+            if not (path / "result.h5").is_file():
+                raise ValueError(f"Factor {name} has no result.h5")
+        else:
+            raise ValueError(f"Unknown signal kind {kind!r}")
+        resolved.append({"name": name, "kind": kind, "weight": float(factor.get("weight", 1)), "path": str(path),
                          "trace": trace, "loop_id": loop_id})
     return resolved
 
@@ -159,7 +179,7 @@ def resolve_factor_paths(default_trace, default_loop_id, factors):
 def public_config(config):
     """A copy of ``config`` with each factor's on-disk workspace ``path`` stripped for API responses."""
     public = dict(config)
-    public["factors"] = [{k: f[k] for k in ("name", "weight", "trace", "loop_id") if k in f} for f in config.get("factors", [])]
+    public["factors"] = [{k: f[k] for k in ("name", "kind", "weight", "trace", "loop_id") if k in f} for f in config.get("factors", [])]
     return public
 
 
@@ -185,7 +205,11 @@ def rounds():
     messages = trace_messages(trace_id) if trace_id else None
     if messages is None:
         return jsonify({"error": "Trace is not loaded on this server"}), 404
-    return jsonify([{k: v for k, v in r.items() if k != "paths"} for r in metric_rounds(messages)])
+    return jsonify([
+        {**{k: v for k, v in r.items() if k not in ("paths", "experiment")},
+         "prediction": prediction_file(r["experiment"]) is not None}
+        for r in metric_rounds(messages)
+    ])
 
 
 @studio.get("/factors")
