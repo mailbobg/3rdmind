@@ -6,4 +6,4 @@
 
 ---
 
-研究引擎基于 [microsoft/RD-Agent](https://github.com/microsoft/RD-Agent)（MIT），回测依赖 [microsoft/qlib](https://github.com/microsoft/qlib)（MIT）。原始版权声明见 [LICENSE](LICENSE)。
+本项目以 Apache-2.0 发布（[LICENSE](LICENSE)）。研究引擎基于 [microsoft/RD-Agent](https://github.com/microsoft/RD-Agent)，其 MIT 版权声明保留在 [LICENSE.RD-Agent](LICENSE.RD-Agent)；回测依赖 [microsoft/qlib](https://github.com/microsoft/qlib)（MIT）。
