@@ -66,10 +66,11 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
 
   return (
     <div className="mb-3 text-xs">
-      <button type="button" className="flex w-full items-center gap-2 text-left" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open}>
-        <i className={`inline-block size-[7px] rounded-full ${running ? "bg-warning" : newer ? "bg-accent" : "bg-success"}`} />
-        <span className="flex-1">同步数据</span>
-        <span className="text-[11px] text-muted">{headline}</span>
+      <button type="button" className="rail-tool" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open} title="打开同步面板">
+        <i className={`inline-block size-[7px] shrink-0 rounded-full ${running ? "bg-warning" : newer ? "bg-accent" : "bg-success"}`} />
+        <span className="rail-tool__label">同步数据</span>
+        <span className="rail-tool__hint">{headline}</span>
+        <span className="rail-tool__chevron" aria-hidden>›</span>
       </button>
       {open && createPortal(
         <>
