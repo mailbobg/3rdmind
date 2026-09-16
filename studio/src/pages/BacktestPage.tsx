@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
 import type { BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
@@ -34,7 +35,9 @@ export function BacktestPage() {
     train: ["", ""], valid: ["", ""], params: { ...LGBM_DEFAULTS },
     ...(saved.model?.method === "lgbm" ? { train: saved.model.train, valid: saved.model.valid, params: { ...LGBM_DEFAULTS, ...saved.model.params } } : {}),
   });
-  const [tab, setTab] = useState("params");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTab] = useState(searchParams.get("tab") === "search" ? "search" : "params");
+  useEffect(() => { if (searchParams.get("tab")) setSearchParams({}, { replace: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Portfolio search: the basket's factor signals are the candidates, the backtest parameters the setting.
   const searches = useSearches();
   const [objective, setObjective] = useState<SearchObjective>("sharpe");
@@ -317,7 +320,7 @@ export function BacktestPage() {
             </FieldGrid>
             <P>候选是信号篮里的因子（模型预测不参与）。先每个单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。{candidates.length} 个候选最多约 {candidates.length + (candidates.length * (candidates.length - 1)) / 2 + candidates.length + 3} 次回测。</P>
           </Block>
-          <Block title="候选信号" count={candidates.length} note={candidates.length < 2 ? "至少两个" : undefined}>
+          <Block title="候选信号" count={candidates.length} note={<><Link href="#/factors?return=search">去因子库增减</Link>{candidates.length < 2 ? " · 至少两个" : ""}</>}>
             {candidates.length ? (
               <Table label="候选信号" columns={[{ label: "信号" }, { label: "来源", width: 200, optional: true }, { label: "权重", num: true, width: 70 }, { label: "覆盖", width: 156, optional: true }]}
                 rows={candidates.map((f) => ({ key: key(f), cells: [
@@ -326,7 +329,7 @@ export function BacktestPage() {
                   String(f.weight),
                   <span key="c" className="mm-mono mm-dim">{coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}` : "—"}</span>,
                 ] }))} />
-            ) : <Empty>去 <Link href="#/factors">因子库</Link> 勾选至少两个因子。</Empty>}
+            ) : <Empty>去 <Link href="#/factors?return=search">因子库</Link> 勾选至少两个因子，勾好后底部按钮会带你回到这里。</Empty>}
           </Block>
           <Block title="搜索记录" count={searches.jobs.length}>
             {searches.jobs.length ? (

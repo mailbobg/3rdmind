@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import * as studio from "../api/studio";
 import type { CorrelationMatrix as Corr, FactorRef, LibraryFactor } from "../api/studio";
@@ -15,6 +15,9 @@ const GUIDE = "① 单独有没有用：看 IC / Rank IC 的符号和 ICIR（均
 export function FactorsPage() {
   const { basket, layout, env } = useStudio();
   const navigate = useNavigate();
+  // Arriving from the backtest page's search tab: the basket buttons lead back there instead of to the parameters.
+  const [search] = useSearchParams();
+  const returnTo = search.get("return") === "search" ? { path: "/backtest?tab=search", label: "回组合搜索 →" } : { path: "/backtest", label: "去组合回测 →" };
   const [all, setAll] = useState<LibraryFactor[]>([]);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
@@ -117,7 +120,7 @@ export function FactorsPage() {
         : (basket.items.length ? <>
             <Btn kind="text" onClick={basket.clear}>清空</Btn>
             <Btn disabled={!!refreshingKey} onClick={() => refreshMany(basket.items.map((f) => library.get(key(f))).filter((f): f is LibraryFactor => !!f))}>{refreshingKey ? "重算中…" : "重算到最新"}</Btn>
-            <Btn kind="primary" onClick={() => navigate("/backtest")}>去组合回测 →</Btn>
+            <Btn kind="primary" onClick={() => navigate(returnTo.path)}>{returnTo.label}</Btn>
           </> : undefined)}
       results={view === "factor" ? (
         selected ? (
@@ -242,7 +245,7 @@ export function FactorsPage() {
           <Link onClick={showBasket}><span className="mm-name" style={{ color: "var(--mm-ink)" }}>组合篮 <span className="mm-count mm-mono mm-dim" style={{ fontWeight: 400 }}>{basket.items.length}</span></span></Link>
           <span className="mm-mono mm-dim" style={{ fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{basket.items.map((f) => f.name).join(" · ")}</span>
           <Btn kind="text" onClick={basket.clear}>清空</Btn>
-          <Btn kind="primary" onClick={() => navigate("/backtest")}>去组合回测 →</Btn>
+          <Btn kind="primary" onClick={() => navigate(returnTo.path)}>{returnTo.label}</Btn>
         </div>
       )}
     </PageFrame>
