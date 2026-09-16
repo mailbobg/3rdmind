@@ -1,6 +1,7 @@
 """Local, persisted backtest jobs on top of RD-Agent research output. Registered under the server's auth gate."""
 import hashlib
 import json
+import re
 import os
 import subprocess
 import sys
@@ -461,7 +462,7 @@ def factors():
 @studio.get("/factors/analysis")
 def factor_analysis():
     market = request.args.get("market", "csi300")
-    if market not in ("csi300", "csi500", "all"):
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", market or ""):
         return jsonify({"error": "Unsupported instrument universe"}), 400
     try:
         workspace = factor_workspace(request.args.get("trace", ""), request.args.get("loop_id"), request.args.get("name", ""))

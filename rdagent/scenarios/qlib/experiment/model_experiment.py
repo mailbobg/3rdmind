@@ -37,6 +37,7 @@ class QlibModelScenario(Scenario):
         self._rich_style_description = deepcopy(T(".prompts:qlib_model_rich_style_description").r())
         self._experiment_setting = deepcopy(
             T(".prompts:qlib_model_experiment_setting").r(
+                market=MODEL_PROP_SETTING.market.upper(),
                 train_start=MODEL_PROP_SETTING.train_start,
                 train_end=MODEL_PROP_SETTING.train_end,
                 valid_start=MODEL_PROP_SETTING.valid_start,

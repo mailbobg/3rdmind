@@ -43,7 +43,7 @@ export type SignalModel =
 export interface BacktestRequest {
   factors: FactorWeight[];
   model?: SignalModel;
-  start: string; end: string; market: "csi300" | "csi500" | "all"; benchmark: string;
+  start: string; end: string; market: string; benchmark: string;
   topk: number; n_drop: number; account: number; open_cost: number; close_cost: number;
   /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
   trace?: string; loop_id?: number;
@@ -126,6 +126,11 @@ export interface ExperimentSummary {
 }
 
 export const traces = () => api<string[]>("/traces");
+/** Instrument universes the Qlib data ships with; `ready` = factor input data already built for research. */
+export interface Universe { market: string; benchmark: string; ready: boolean }
+export const universes = () => api<Universe[]>("/universes");
+export const UNIVERSE_LABELS: Record<string, string> = { csi300: "沪深300", csi500: "中证500", csi800: "中证800", csi1000: "中证1000", csiall: "中证全指", all: "全市场" };
+export const universeLabel = (m: string) => UNIVERSE_LABELS[m] || m.toUpperCase();
 export const experiments = () => api<ExperimentSummary[]>("/studio/experiments");
 export const traceSnapshot = (id: string) => api<TraceEvent[]>("/trace", { id, snapshot: true });
 export const startResearch = (form: FormData) => api<{ id: string }>("/upload", form);
@@ -172,7 +177,7 @@ export const search = async (id: string): Promise<SearchResult> => {
   return { ...(rest as unknown as SearchResult), recommended: portfolio?.members ?? null, recommended_portfolio: portfolio };
 };
 export const runSearch = (config: SearchRequest) => api<{ id: string }>("/studio/searches", config);
-export interface StrategyParams { market: "csi300" | "csi500" | "all"; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number }
+export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number }
 export interface StrategyRun { id: string; kind: "evidence" | "update"; status?: string; start?: string; end?: string; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; benchmark_return?: number | null; error?: string; created?: string }
 export interface Strategy {
   id: string; name: string; note: string; created: string; updated: string;

@@ -8,6 +8,12 @@ from rdagent.components.workflow.conf import BasePropSetting
 class ModelBasePropSetting(BasePropSetting):
     model_config = SettingsConfigDict(env_prefix="QLIB_MODEL_", protected_namespaces=())
 
+
+    market: str = "csi300"
+    """Qlib instrument universe the experiments train and backtest on (an instruments/*.txt name)"""
+
+    benchmark: str = "SH000300"
+    """Benchmark index for the backtest report"""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.model_experiment.QlibModelScenario"
     """Scenario class for Qlib Model"""
@@ -52,6 +58,12 @@ class ModelBasePropSetting(BasePropSetting):
 class FactorBasePropSetting(BasePropSetting):
     model_config = SettingsConfigDict(env_prefix="QLIB_FACTOR_", protected_namespaces=())
 
+
+    market: str = "csi300"
+    """Qlib instrument universe the experiments train and backtest on (an instruments/*.txt name)"""
+
+    benchmark: str = "SH000300"
+    """Benchmark index for the backtest report"""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.factor_experiment.QlibFactorScenario"
     """Scenario class for Qlib Factor"""
@@ -112,6 +124,12 @@ class FactorFromReportPropSetting(FactorBasePropSetting):
 class QuantBasePropSetting(BasePropSetting):
     model_config = SettingsConfigDict(env_prefix="QLIB_QUANT_", protected_namespaces=())
 
+
+    market: str = "csi300"
+    """Qlib instrument universe the experiments train and backtest on (an instruments/*.txt name)"""
+
+    benchmark: str = "SH000300"
+    """Benchmark index for the backtest report"""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.quant_experiment.QlibQuantScenario"
     """Scenario class for Qlib Model"""

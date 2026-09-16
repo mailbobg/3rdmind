@@ -5,6 +5,7 @@ factors into a single ranked signal, and runs a TopkDropoutStrategy backtest
 over the requested date range.
 """
 import json
+import re
 import math
 import sys
 import traceback
@@ -31,7 +32,7 @@ def validate_config(config):
         result[key] = int(value) if key in ("topk", "n_drop") else value
     if result["n_drop"] > result["topk"]:
         raise ValueError("n_drop cannot exceed topk")
-    if result.get("market") not in ("csi300", "csi500", "all"):
+    if not isinstance(result.get("market"), str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", result["market"]):
         raise ValueError("Unsupported instrument universe")
     benchmark = result.get("benchmark", "SH000300")
     if not isinstance(benchmark, str) or not benchmark.strip() or len(benchmark) > 20:

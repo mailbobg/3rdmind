@@ -43,6 +43,7 @@ class QlibFactorScenario(Scenario):
         self._rich_style_description = deepcopy(T(".prompts:qlib_factor_rich_style_description").r())
         self._experiment_setting = deepcopy(
             T(".prompts:qlib_factor_experiment_setting").r(
+                market=FACTOR_PROP_SETTING.market.upper(),
                 train_start=FACTOR_PROP_SETTING.train_start,
                 train_end=FACTOR_PROP_SETTING.train_end,
                 valid_start=FACTOR_PROP_SETTING.valid_start,

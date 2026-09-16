@@ -73,6 +73,8 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
         fbps = FactorBasePropSetting()
         env_to_use = {
             "PYTHONPATH": "./",
+            "market": fbps.market,
+            "benchmark": fbps.benchmark,
             "train_start": fbps.train_start,
             "train_end": fbps.train_end,
             "valid_start": fbps.valid_start,

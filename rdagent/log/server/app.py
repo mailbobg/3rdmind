@@ -1,7 +1,10 @@
 import hmac
+import json
 import logging
 import os
 import random
+import subprocess
+import sys
 import traceback
 from collections import defaultdict
 from contextlib import redirect_stderr, redirect_stdout
@@ -100,9 +103,13 @@ class RDAgentTask:
         trace_name: str,
         ui_server_port: int | None = None,
         create_process: bool = True,
+        env: dict[str, str] | None = None,
     ) -> None:
         self.target_name = target_name
         self.kwargs = kwargs
+        # Per-run settings (e.g. the instrument universe) delivered as environment variables, applied in the
+        # child before any rdagent settings module is imported so pydantic-settings picks them up.
+        self.env: dict[str, str] = dict(env or {})
         self.stdout_path = stdout_path
         self.log_trace_path = log_trace_path
         self.scenario = scenario
@@ -154,6 +161,7 @@ class RDAgentTask:
                 pass
 
     def _run(self) -> None:
+        os.environ.update(self.env)
         from rdagent.log.conf import LOG_SETTINGS
 
         LOG_SETTINGS.trace_path = self.log_trace_path
@@ -442,6 +450,64 @@ def list_traces():
     return jsonify(trace_ids), 200
 
 
+UNIVERSE_BENCHMARKS = {"csi300": "SH000300", "csi500": "SH000905", "csi1000": "SH000852", "all": "SH000300"}
+
+
+def available_universes() -> list[str]:
+    """Instrument lists the Qlib data ships with, ordered small to large."""
+    provider = Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser()
+    names = {p.stem for p in (provider / "instruments").glob("*.txt")}
+    order = ["csi300", "csi500", "csi1000", "all"]
+    return [n for n in order if n in names] + sorted(n for n in names if n not in order)
+
+
+def universe_env(market: str) -> dict[str, str]:
+    """Environment for a run on ``market``: the universe/benchmark settings and a factor data folder built for it.
+
+    CSI300 keeps the folders configured in .env (the data every existing experiment used); any other universe
+    gets ``traces/studio_data/universe/<market>/{full,debug}/daily_pv.h5``, built on first use by
+    studio_universe.py over the configured research window (train start to test end).
+    """
+    market = market.strip().lower()
+    if market not in available_universes():
+        raise ValueError(f"Unknown universe {market!r}; available: {', '.join(available_universes())}")
+    env = {f"QLIB_{kind}_MARKET": market for kind in ("FACTOR", "MODEL", "QUANT")}
+    env.update({f"QLIB_{kind}_BENCHMARK": UNIVERSE_BENCHMARKS.get(market, "SH000300") for kind in ("FACTOR", "MODEL", "QUANT")})
+    if market == "csi300":
+        return env
+    out = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe" / market
+    if not (out / "full" / "daily_pv.h5").is_file():
+        provider = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
+        start = os.environ.get("QLIB_FACTOR_TRAIN_START", "2023-01-01")
+        end = os.environ.get("QLIB_FACTOR_TEST_END", "2030-12-31")
+        # Factor code needs history before the training window for rolling features; give it a quarter.
+        from datetime import date, timedelta
+
+        start = (date.fromisoformat(start) - timedelta(days=90)).isoformat()
+        completed = subprocess.run(
+            [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_universe.py")),
+             provider, market, start, end, str(out)],
+            capture_output=True, text=True, timeout=1800,
+        )
+        line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+        try:
+            status = json.loads(line)
+        except ValueError:
+            raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "universe data build produced no output")
+        if status.get("status") != "completed":
+            raise RuntimeError(status.get("error") or "universe data build failed")
+    env["FACTOR_COSTEER_DATA_FOLDER"] = str(out / "full")
+    env["FACTOR_COSTEER_DATA_FOLDER_DEBUG"] = str(out / "debug")
+    return env
+
+
+@app.route("/universes", methods=["GET"])
+def list_universes():
+    prepared = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe"
+    return jsonify([{"market": m, "benchmark": UNIVERSE_BENCHMARKS.get(m, "SH000300"),
+                     "ready": m == "csi300" or (prepared / m / "full" / "daily_pv.h5").is_file()} for m in available_universes()])
+
+
 @app.route("/upload", methods=["POST"])
 def upload_file():
     # 获取请求体中的字段
@@ -454,6 +520,15 @@ def upload_file():
     competition = request.form.get("competition")
     loop_n = request.form.get("loops")
     all_duration = request.form.get("all_duration")
+    market = (request.form.get("market") or "csi300").strip().lower()
+    run_env: dict[str, str] = {}
+    if scenario.startswith("Finance"):
+        try:
+            run_env = universe_env(market)
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            return jsonify({"error": f"准备 {market} 股票池数据失败：{error}"}), 500
 
     # scenario = "Data Science Loop"
     if scenario == "Data Science":
@@ -529,9 +604,10 @@ def upload_file():
         scenario=scenario,
         trace_name=trace_name,
         ui_server_port=app.config["UI_SERVER_PORT"],
+        env=run_env,
     )
     task.start()
-    app.logger.warning(f"Task {log_trace_path} started.")
+    app.logger.warning(f"Task {log_trace_path} started (universe {market}).")
     rdagent_processes[str(log_trace_path)] = task
     return (
         jsonify(
@@ -712,8 +788,14 @@ def research_from_strategy():
     if not members:
         return jsonify({"error": "策略里没有可作为基础特征的因子"}), 400
     kwargs = {"loop_n": loop_n, "all_duration": f"{all_duration}h", "base_features_path": str(trace_files_path)}
+    try:
+        run_env = universe_env(str((strategy.get("params") or {}).get("market") or "csi300"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        return jsonify({"error": f"准备股票池数据失败：{error}"}), 500
     task = RDAgentTask(target_name="fin_factor", kwargs=kwargs, stdout_path=str(stdout_path), log_trace_path=str(log_trace_path),
-                       scenario=scenario, trace_name=trace_name, ui_server_port=app.config["UI_SERVER_PORT"])
+                       scenario=scenario, trace_name=trace_name, ui_server_port=app.config["UI_SERVER_PORT"], env=run_env)
     task.start()
     rdagent_processes[str(log_trace_path)] = task
     app.logger.warning(f"Started research on strategy {strategy['id']} ({', '.join(members)}) at {log_trace_path}.")

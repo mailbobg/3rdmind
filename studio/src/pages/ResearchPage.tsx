@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
-import type { ExperimentSummary } from "../api/studio";
+import type { ExperimentSummary, Universe } from "../api/studio";
+import { universeLabel } from "../api/studio";
 import type { RoundView } from "../hooks/rounds";
 import { EXPERIMENT_STATUS_LABELS, mergeExperiments, shortTime } from "../hooks/experiments";
 import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
@@ -49,7 +50,10 @@ export function ResearchPage() {
   const [search, setSearch] = useSearchParams();
   const navigate = useNavigate();
   const [tab, setTab] = useState(search.get("trace") ? "rounds" : search.get("new") || !trace.traceId ? "new" : "rounds");
-  const [form, setForm] = useState(() => ({ scenario: MODES[0].value, loops: 3, duration: 2, objective: restoreStudioState().objective || "", link: "" }));
+  const [form, setForm] = useState(() => ({ scenario: MODES[0].value, loops: 3, duration: 2, objective: restoreStudioState().objective || "", link: "", market: "csi300" }));
+  const [universes, setUniverses] = useState<Universe[]>([]);
+  useEffect(() => { studio.universes().then(setUniverses).catch(() => {}); }, []);
+  const chosenUniverse = universes.find((u) => u.market === form.market);
   const [files, setFiles] = useState<File[]>([]);
   const [roundId, setRoundId] = useState("");
   const [predictionLoops, setPredictionLoops] = useState<Set<number>>(new Set());
@@ -107,6 +111,7 @@ export function ResearchPage() {
     data.append("scenario", form.scenario);
     if (mode.loops) data.append("loops", String(form.loops));
     if (mode.duration) data.append("all_duration", String(form.duration));
+    if (form.scenario.startsWith("Finance")) data.append("market", form.market);
     for (const file of files) data.append("files", file, file.name);
     if (mode.input === "paper" && !files.length) data.append("files", form.link.trim()); // the server reads a link from the files field
     try {
@@ -216,6 +221,7 @@ export function ResearchPage() {
             <MetricGrid columns={2} items={[
               { label: "研究模型", value: env?.chat_model?.replace("deepseek/", "") || "未配置" },
               { label: "Qlib 数据", value: env ? `${env.start || "—"} → ${env.end || "—"}` : "后端未连接" },
+              ...(form.scenario.startsWith("Finance") ? [{ label: "股票池", value: `${universeLabel(form.market)} · 基准 ${chosenUniverse?.benchmark || "SH000300"}` }] : []),
               ...(mode.loops ? [{ label: "轮数", value: String(form.loops) }] : []),
               ...(mode.duration ? [{ label: "时限", value: `${form.duration} 小时` }] : []),
             ]} />
@@ -247,6 +253,11 @@ export function ResearchPage() {
             <Field label="场景">
               <SelectInput value={form.scenario} onChange={(v) => { setForm((f) => ({ ...f, scenario: v })); setFiles([]); }} options={MODES.map((m) => ({ value: m.value, label: m.name }))} />
             </Field>
+            {form.scenario.startsWith("Finance") && universes.length > 0 && (
+              <Field label="股票池" hint="因子在这个池子里计算、排序和回测">
+                <SelectInput value={form.market} onChange={(v) => setForm((f) => ({ ...f, market: v }))} options={universes.map((u) => ({ value: u.market, label: `${universeLabel(u.market)}${u.ready ? "" : "（首次需准备数据）"}` }))} />
+              </Field>
+            )}
             {mode.loops && <Field label="轮数" hint="1–30"><NumberInput value={form.loops} onChange={(v) => setForm((f) => ({ ...f, loops: v }))} min={1} max={30} /></Field>}
             {mode.duration && <Field label="时限（小时）" hint="0.1–24"><NumberInput value={form.duration} onChange={(v) => setForm((f) => ({ ...f, duration: v }))} min={0.1} max={24} step={0.1} /></Field>}
             {mode.input && (
@@ -262,6 +273,7 @@ export function ResearchPage() {
               </Field>
             )}
           </FieldGrid>
+          {chosenUniverse && !chosenUniverse.ready && <div style={{ marginTop: 12 }}><Note tone="info">第一次在{universeLabel(form.market)}上研究要先从 Qlib 导出这个池子的日线数据给因子代码用，中证1000 约半分钟，全市场约一两分钟；点开始后请等待，之后不用再等。</Note></div>}
           <div className="mm-row" style={{ marginTop: 16 }}>
             <Btn kind="primary" disabled={trace.busy} onClick={start}>{trace.busy ? "启动中…" : "开始研究"}</Btn>
             <span className="mm-dim" style={{ fontSize: 12 }}>{mode.desc}{files.length ? ` · 已选 ${files.map((f) => f.name).join("，")}` : ""}</span>

@@ -62,6 +62,8 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
         mbps = ModelBasePropSetting()
         env_to_use = {
             "PYTHONPATH": "./",
+            "market": mbps.market,
+            "benchmark": mbps.benchmark,
             "train_start": mbps.train_start,
             "train_end": mbps.train_end,
             "valid_start": mbps.valid_start,

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
-import type { BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor } from "../api/studio";
+import type { BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor, Universe } from "../api/studio";
+import { universeLabel } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
@@ -16,7 +17,7 @@ import type { SearchObjective } from "../api/studio";
 import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { Hint } from "../components/widgets";
 
-type Market = "csi300" | "csi500" | "all";
+type Market = string;
 interface Params { start: string; end: string; market: Market; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number }
 interface Lgbm { train: [string, string]; valid: [string, string]; params: Record<string, number> }
 
@@ -39,6 +40,8 @@ export function BacktestPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState(searchParams.get("tab") === "search" ? "search" : "params");
+  const [universes, setUniverses] = useState<Universe[]>([]);
+  useEffect(() => { studio.universes().then(setUniverses).catch(() => {}); }, []);
   useEffect(() => { if (searchParams.get("tab")) setSearchParams({}, { replace: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Portfolio search: the basket's factor signals are the candidates, the backtest parameters the setting.
   const searches = useSearches();
@@ -320,7 +323,7 @@ export function BacktestPage() {
             <FieldGrid min={140}>
               <Field label="开始"><TextInput type="date" value={params.start} onChange={(v) => setDate("start", v)} /></Field>
               <Field label="结束"><TextInput type="date" value={params.end} onChange={(v) => setDate("end", v)} /></Field>
-              <Field label="股票池"><SelectInput value={params.market} onChange={(v) => set("market", v)} options={[{ value: "csi300", label: "沪深300" }, { value: "csi500", label: "中证500" }, { value: "all", label: "全市场" }]} /></Field>
+              <Field label="股票池"><SelectInput value={params.market} onChange={(v) => { set("market", v); const b = universes.find((u) => u.market === v)?.benchmark; if (b) set("benchmark", b); }} options={(universes.length ? universes.map((u) => u.market) : ["csi300", "csi500", "all"]).map((m) => ({ value: m as Market, label: universeLabel(m) }))} /></Field>
               <Field label="基准"><TextInput value={params.benchmark} onChange={(v) => set("benchmark", v)} /></Field>
               <Field label="持股数" hint="每天按评分持有前 topk 只"><NumberInput value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} /></Field>
               <Field label="每日换出" hint="每天最多换出 n_drop 只"><NumberInput value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} /></Field>

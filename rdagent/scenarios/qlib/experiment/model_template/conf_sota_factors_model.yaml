@@ -2,8 +2,8 @@ qlib_init:
     provider_uri: "~/.qlib/qlib_data/cn_data"
     region: cn
 
-market: &market csi300
-benchmark: &benchmark SH000300
+market: &market {{ market | default("csi300", true) }}
+benchmark: &benchmark {{ benchmark | default("SH000300", true) }}
 
 data_handler_config: &data_handler_config
     start_time: {{ train_start | default("2008-01-01", true) }}

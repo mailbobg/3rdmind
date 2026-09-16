@@ -451,6 +451,7 @@ def test_strategy_signal_exports_holdings_and_scores(studio_client, tmp_path: Pa
 def test_research_from_strategy_seeds_base_features(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "ws" / "f0" / "factor.py").write_text("print('STR_5')")
     monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
+    monkeypatch.setattr(server, "universe_env", lambda market: {"QLIB_FACTOR_MARKET": market})
     started = []
     monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
     body = {"name": "回流测试", "factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}],
@@ -463,9 +464,50 @@ def test_research_from_strategy_seeds_base_features(studio_client, tmp_path: Pat
     assert "STR_5" in payload["instruction"] and "回流测试" in payload["instruction"]
     task = started[0]
     assert task.target_name == "fin_factor" and task.kwargs["loop_n"] == 2 and task.kwargs["all_duration"] == "1.0h"
+    assert task.env == {"QLIB_FACTOR_MARKET": "csi300"}
     base = Path(task.kwargs["base_features_path"])
     assert (base / "STR_5.py").read_text() == "print('STR_5')"
     assert studio_client.post("/research/from-strategy", json={"strategy_id": "nope"}).status_code == 404
+
+
+@pytest.mark.offline
+def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = tmp_path / "qlib"
+    (provider / "instruments").mkdir(parents=True)
+    for name in ("csi300", "csi1000", "all"):
+        (provider / "instruments" / f"{name}.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setattr(server.UI_SETTING, "trace_folder", str(tmp_path / "traces"))
+    assert server.available_universes() == ["csi300", "csi1000", "all"]
+    env = server.universe_env("csi300")
+    assert env["QLIB_FACTOR_MARKET"] == "csi300" and env["QLIB_MODEL_BENCHMARK"] == "SH000300" and "FACTOR_COSTEER_DATA_FOLDER" not in env
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        out = Path(cmd[-1]); (out / "full").mkdir(parents=True); (out / "full" / "daily_pv.h5").write_bytes(b"")
+        return type("P", (), {"stdout": '{"status": "completed"}', "stderr": ""})()
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    env = server.universe_env("csi1000")
+    assert env["QLIB_FACTOR_MARKET"] == "csi1000" and env["QLIB_FACTOR_BENCHMARK"] == "SH000852"
+    assert env["FACTOR_COSTEER_DATA_FOLDER"].endswith("universe/csi1000/full") and calls and calls[0][3] == "csi1000"
+    server.universe_env("csi1000")  # already built: no second subprocess
+    assert len(calls) == 1
+    with pytest.raises(ValueError):
+        server.universe_env("nasdaq")
+
+
+@pytest.mark.offline
+def test_upload_passes_the_universe_to_the_run(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
+    monkeypatch.setattr(server, "universe_env", lambda market: {"QLIB_FACTOR_MARKET": market, "FACTOR_COSTEER_DATA_FOLDER": "/data/" + market})
+    started = []
+    monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
+    response = studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "2", "all_duration": "1", "market": "csi1000"})
+    assert response.status_code == 200, response.get_json()
+    assert started[0].env == {"QLIB_FACTOR_MARKET": "csi1000", "FACTOR_COSTEER_DATA_FOLDER": "/data/csi1000"}
+    assert started[0].kwargs["loop_n"] == 2
 
 
 @pytest.mark.offline
