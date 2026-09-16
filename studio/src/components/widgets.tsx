@@ -150,6 +150,35 @@ export function CorrelationMatrix({ data }: { data: Corr }) {
   );
 }
 
+/**
+ * Several equity curves on one axis (ECharts). Series flagged `hidden` start deselected in the legend, so the
+ * chart opens with the lines that matter and the rest is one click away.
+ */
+export function CurveOverlay({ series, height = 300 }: { series: { name: string; points: [string, number][]; dashed?: boolean; bold?: boolean; hidden?: boolean }[]; height?: number }) {
+  const host = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!host.current) return;
+    const chart = echarts.init(host.current);
+    const observer = new ResizeObserver(() => chart.resize());
+    observer.observe(host.current);
+    const palette = ["#14765a", "#c26052", "#2f57c4", "#a8730b", "#7d4f9c", "#2f7d6e", "#989da5", "#b5652e"];
+    chart.setOption({
+      color: palette,
+      tooltip: { trigger: "axis", valueFormatter: (v: number) => (typeof v === "number" ? v.toFixed(4) : "—") },
+      legend: { top: 4, type: "scroll", selected: Object.fromEntries(series.map((s) => [s.name, !s.hidden])) },
+      grid: { left: 54, right: 18, top: 44, bottom: 28 },
+      xAxis: { type: "time" },
+      yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "#edf0ec" } } },
+      series: series.map((s) => ({
+        name: s.name, type: "line", symbol: "none", data: s.points,
+        lineStyle: { width: s.bold ? 2.5 : 1.25, type: s.dashed ? "dashed" : "solid" }, emphasis: { focus: "series" },
+      })),
+    }, true);
+    return () => { observer.disconnect(); chart.dispose(); };
+  }, [series]);
+  return <div ref={host} role="img" aria-label="多条净值曲线对比" style={{ height }} className="w-full" />;
+}
+
 /** LaTeX rendered with KaTeX; falls back to the raw text when it does not parse. */
 export function Formula({ source }: { source: string }) {
   const html = useMemo(() => {

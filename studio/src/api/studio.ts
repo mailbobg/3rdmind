@@ -63,6 +63,8 @@ export interface SignalDiagnosis { name: string; kind: SignalKind; weight: numbe
 export interface VariantMetrics {
   total_return?: number; annualized_return?: number; sharpe?: number | null; max_drawdown?: number; benchmark_return?: number; days?: number;
   signal_ic?: number | null; signal_rank_ic?: number | null; error?: string;
+  /** [date, equity] pairs of this variant's net-of-cost curve. */
+  equity?: [string, number][];
 }
 /** The take-apart diagnosis: each signal alone and the portfolio without it, on the same window. */
 export interface Breakdown {

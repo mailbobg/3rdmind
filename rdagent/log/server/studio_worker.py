@@ -500,8 +500,9 @@ def diagnose(config, progress=lambda *_: None):
     def variant(columns):
         score, _ = combine(prepared, columns, [weights[c] for c in columns], model, log=lambda *_: None)
         ic, rank_ic = information_coefficient(score, prepared["label"])
-        metrics, _ = summarize_report(backtest_score(score, config)[0])
-        return {**metrics, "signal_ic": ic, "signal_rank_ic": rank_ic}
+        metrics, rows = summarize_report(backtest_score(score, config)[0])
+        # Equity only, so the UI can overlay every variant's curve on the portfolio's without bloating the file.
+        return {**metrics, "signal_ic": ic, "signal_rank_ic": rank_ic, "equity": [[r["date"], round(r["equity"], 6)] for r in rows]}
 
     total, done = 2 * len(names) + 1, 0
     base = variant(names); done += 1; progress(done, total)

@@ -4,7 +4,7 @@ import type { BacktestResult, Breakdown, InstrumentSummary, SignalDiagnosis, Tra
 import { Btn } from "./minimal";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { Section } from "./Section";
-import { CodeView, CorrelationMatrix, DataTable, EquityChart, Hint, MetricGrid, Mono, Signed, StatusChip, money, percent } from "./widgets";
+import { CodeView, CorrelationMatrix, CurveOverlay, DataTable, EquityChart, Hint, MetricGrid, Mono, Signed, StatusChip, money, percent } from "./widgets";
 
 /** `onDiagnose` starts the take-apart diagnosis (the owner refetches and polls); absent, the button is hidden. */
 export function BacktestResultView({ result, onDiagnose }: { result: BacktestResult; onDiagnose?: () => void }) {
@@ -233,6 +233,17 @@ function PortfolioDiagnosis({ result, onDiagnose }: { result: BacktestResult; on
     return { key: sig.name, cells };
   });
 
+  const curves = useMemo(() => {
+    if (!done) return [];
+    const out: { name: string; points: [string, number][]; dashed?: boolean; bold?: boolean; hidden?: boolean }[] = [];
+    if (b!.base?.equity) out.push({ name: "组合", points: b!.base.equity, bold: true });
+    for (const name of b!.names || []) {
+      const alone = b!.alone![name]; const without = b!.without![name];
+      if (alone?.equity) out.push({ name: `${name} 单独`, points: alone.equity });
+      if (without?.equity) out.push({ name: `去掉 ${name}`, points: without.equity, dashed: true, hidden: true });
+    }
+    return out;
+  }, [b, done]);
   const running = b?.status === "queued" || b?.status === "running";
   return (
     <Section title="组合诊断" note={`${d.signals.length} 个信号 · 回测区间 ${d.correlation.days} 个交易日`}>
@@ -244,6 +255,12 @@ function PortfolioDiagnosis({ result, onDiagnose }: { result: BacktestResult; on
         ))}
       </div>
       <DataTable label="组合诊断" head={columns} rows={rows} />
+      {done && curves.length > 1 && (
+        <>
+          <CurveOverlay series={curves} />
+          <Hint>粗线是组合；实线是每个信号单独跑出来的净值，虚线是去掉该信号后的组合（默认隐藏，点图例显示）。同一区间、同一参数。</Hint>
+        </>
+      )}
       <Hint>IC / Rank IC 按回测区间内每日截面计算；“与组合评分相关”是该信号排名与最终评分的相关，越低说明它在组合里的话语权越小。{done ? "“贡献”= 组合收益 − 去掉它后的组合收益，正数表示它在帮忙。" : ""}</Hint>
       {d.correlation.names.length > 1 && <CorrelationMatrix data={d.correlation} />}
       <div className="flex flex-wrap items-center gap-2">
