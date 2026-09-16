@@ -61,7 +61,7 @@ export function PageFrame(p: PageFrameProps) {
   // a plain lower half again.
   const floating = layout.resultsOpen && !stacked;
   return (
-    <div ref={frame} className="grid min-h-0 min-w-0 overflow-hidden rounded-2xl border border-border bg-surface" style={{ gridTemplateColumns: columns, gridTemplateRows: rows }}>
+    <div ref={frame} className="grid min-h-0 min-w-0 overflow-hidden rounded-2xl border border-border" style={{ gridTemplateColumns: columns, gridTemplateRows: rows, background: "var(--mm-ground)" }}>
       {!expanded && <main className="mm flex min-h-0 min-w-0 flex-col">
         <div className="mm-head">
           <div>{p.tabs}</div>

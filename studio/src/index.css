@@ -31,11 +31,11 @@ body { margin: 0; background: var(--background); color: var(--foreground); font-
    boxes, 11px muted keys over mono values, plain outlined buttons. Scoped so the rail and the
    results column keep their HeroUI look. */
 :root {
-  --mm-paper: #ffffff; --mm-ink: #1b1b19; --mm-muted: #6f6e69; --mm-rule: #e5e2dc; --mm-rule-soft: #efece7;
+  --mm-paper: #ffffff; --mm-ground: #f6f5f2; --mm-ink: #1b1b19; --mm-muted: #6f6e69; --mm-rule: #e5e2dc; --mm-rule-soft: #efece7;
   --mm-accent: #2f57c4; --mm-ok: #1f7a4d; --mm-warn: #a8730b; --mm-bad: #b23c2c;
   --mm-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
-.mm { background: var(--mm-paper); color: var(--mm-ink); font-size: 13px; line-height: 1.6; }
+.mm { background: var(--mm-ground); color: var(--mm-ink); font-size: 13px; line-height: 1.6; }
 .mm-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 10px 20px; border-bottom: 1px solid var(--mm-rule); }
 .mm-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .mm-body { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 24px; }
@@ -136,7 +136,7 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .mm-p { margin: 0; color: var(--mm-muted); font-size: 12px; line-height: 1.6; }
 .mm-p + .mm-p { margin-top: 6px; }
 .mm-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.mm-sticky { position: sticky; bottom: -24px; margin-top: 20px; padding: 12px 0 8px; background: var(--mm-paper); border-top: 1px solid var(--mm-rule); }
+.mm-sticky { position: sticky; bottom: -24px; margin-top: 20px; padding: 12px 0 8px; background: var(--mm-ground); border-top: 1px solid var(--mm-rule); }
 .mm-details summary { cursor: pointer; color: var(--mm-accent); font-size: 12px; list-style: none; }
 .mm-details summary::-webkit-details-marker { display: none; }
 .mm-details[open] summary { margin-bottom: 6px; }
