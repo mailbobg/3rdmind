@@ -4,10 +4,11 @@ import * as studio from "../api/studio";
 import type { BacktestResult, SignalExport, Strategy, StrategyRun } from "../api/studio";
 import { shortTime } from "../hooks/experiments";
 import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
+import { persistStudioState } from "../hooks/studioStorage";
 import { PageFrame } from "../components/PageFrame";
 import { Section } from "../components/Section";
 import { BacktestResultView } from "../components/BacktestResultView";
-import { Block, Btn, Empty, Note, Num, P, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
+import { Block, Btn, Empty, Note, Num, NumberInput, P, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { CurveOverlay, DataTable, Hint, MetricGrid, Mono, Signed, money, percent } from "../components/widgets";
 
 const RUN_STATUS: Record<string, string> = { queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", missing: "记录丢失" };
@@ -18,7 +19,7 @@ const RUN_STATUS: Record<string, string> = { queued: "排队中", running: "运�
  * with the latest run's full backtest report underneath.
  */
 export function StrategiesPage() {
-  const { basket, layout, env, backtests } = useStudio();
+  const { basket, layout, env, backtests, trace } = useStudio();
   const navigate = useNavigate();
   const [items, setItems] = useState<Strategy[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -29,6 +30,20 @@ export function StrategiesPage() {
   const [busy, setBusy] = useState("");
   const [filter, setFilter] = useState("all");
   const [editing, setEditing] = useState(false);
+  // 回流研究: a new factor-research run with this strategy's members as base features.
+  const [researching, setResearching] = useState(false);
+  const [researchLoops, setResearchLoops] = useState(3);
+  const [researchHours, setResearchHours] = useState(2);
+  const research = async (s: Strategy) => {
+    setResearching(true);
+    try {
+      const r = await studio.researchFromStrategy(s.id, researchLoops, researchHours);
+      // The first confirmation asks for the research direction; pre-fill it with the strategy context.
+      persistStudioState({ objective: r.instruction });
+      trace.registerLaunched(r.id);
+      navigate(`/research?trace=${encodeURIComponent(r.id)}`);
+    } catch (e) { setError(errorText(e)); } finally { setResearching(false); }
+  };
   const [draft, setDraft] = useState({ name: "", note: "" });
 
   const load = useCallback(async () => {
@@ -136,6 +151,15 @@ export function StrategiesPage() {
             </div>
             {detail.note && <p className="m-0 text-xs">{detail.note}</p>}
             <Hint>保存于 {shortTime(detail.created)}{detail.evidence?.start ? ` · 证据区间 ${detail.evidence.start} → ${detail.evidence.end}` : ""}{detail.evidence?.search_id ? ` · 来自组合搜索 ${detail.evidence.search_id.slice(0, 8)}` : ""}</Hint>
+          </Section>
+          <Section title="围着这个策略继续研究" note="策略成员作为基础特征">
+            <p className="m-0 text-xs">启动一次新的因子研发：每一轮训练都带上这 {detail.factors.filter((f) => (f.kind || "factor") === "factor").length} 个成员因子，Agent 被要求只找与它们低相关、有增量的新因子，不重做已有的。产出进因子库，可以直接拿来和策略成员一起回测、诊断。</p>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-muted">轮数</span><NumberInput value={researchLoops} onChange={setResearchLoops} min={1} max={30} className="mm-weight" />
+              <span className="text-muted">时限（小时）</span><NumberInput value={researchHours} onChange={setResearchHours} min={0.1} max={24} step={0.5} className="mm-weight" />
+              <Btn kind="primary" disabled={researching || !env?.chat_model} onClick={() => research(detail)}>{researching ? "启动中…" : "开始研究"}</Btn>
+            </div>
+            <Hint>开始后会跳到 AI 研究页；Agent 第一次停下来确认方向时，研究方向已按这个策略预填好，可以改。</Hint>
           </Section>
           <Section title="跟踪记录" note={`${detail.run_details?.length ?? 0} 次回测`}>
             {detail.run_details?.length ? runsTable(detail.run_details) : <Hint>还没有回测记录。点“更新到最新”跑第一次。</Hint>}

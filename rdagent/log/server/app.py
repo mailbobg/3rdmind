@@ -662,6 +662,72 @@ def resume_research():
     return jsonify({"id": trace_id, "loops": loops, "loop_n": total}), 200
 
 
+@app.route("/research/from-strategy", methods=["POST"])
+def research_from_strategy():
+    """回流研究: start a factor-research run that treats a saved strategy's members as its base features.
+
+    The members' factor.py files (server-side, trusted) are written into the run's upload folder, which
+    the factor loop reads as `base_features_path`: every round then trains on strategy members + new
+    factors, and the agent is told not to duplicate them. The research direction is prefixed with the
+    strategy context so the hypotheses aim at incremental signals.
+    """
+    from rdagent.log.server.studio import load_strategy, resolve_factor_paths
+
+    global rdagent_processes
+    data = request.get_json() or {}
+    try:
+        strategy = load_strategy(str(data.get("strategy_id") or ""))
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    try:
+        loop_n = int(data.get("loops") or 3)
+        all_duration = float(data.get("all_duration") or 2)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid loops or duration"}), 400
+    if not 1 <= loop_n <= 30 or not 0.1 <= all_duration <= 24:
+        return jsonify({"error": "loops must be 1–30 and duration 0.1–24 hours"}), 400
+    scenario = "Finance Data Building"
+    trace_name = f"{randomname.get_name()}-on-strategy"
+    try:
+        trace_files_path = resolve_within(upload_folder_path, scenario, trace_name)
+        log_trace_path = resolve_within(log_folder_path, scenario, trace_name)
+        stdout_path = resolve_within(log_folder_path, scenario, f"{trace_name}.log")
+    except ValueError:
+        return jsonify({"error": "Invalid destination path"}), 400
+    trace_files_path.mkdir(parents=True, exist_ok=True)
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    members = []
+    for factor in strategy["factors"]:
+        if factor.get("kind", "factor") != "factor":
+            continue
+        try:
+            workspace = Path(resolve_factor_paths(factor["trace"], factor["loop_id"], [{"name": factor["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
+        except ValueError as error:
+            return jsonify({"error": f"{factor['name']}: {error}"}), 400
+        code = workspace / "factor.py"
+        if not code.is_file():
+            return jsonify({"error": f"{factor['name']} 没有保存 factor.py，无法作为基础特征"}), 400
+        (trace_files_path / f"{factor['name']}.py").write_text(code.read_text())
+        members.append(factor["name"])
+    if not members:
+        return jsonify({"error": "策略里没有可作为基础特征的因子"}), 400
+    kwargs = {"loop_n": loop_n, "all_duration": f"{all_duration}h", "base_features_path": str(trace_files_path)}
+    task = RDAgentTask(target_name="fin_factor", kwargs=kwargs, stdout_path=str(stdout_path), log_trace_path=str(log_trace_path),
+                       scenario=scenario, trace_name=trace_name, ui_server_port=app.config["UI_SERVER_PORT"])
+    task.start()
+    rdagent_processes[str(log_trace_path)] = task
+    app.logger.warning(f"Started research on strategy {strategy['id']} ({', '.join(members)}) at {log_trace_path}.")
+    return jsonify({"id": f"{scenario}/{trace_name}", "members": members,
+                    "instruction": data.get("instruction") or default_strategy_instruction(strategy, members)}), 200
+
+
+def default_strategy_instruction(strategy, members):
+    """The research direction the UI pre-fills into the agent's first confirmation."""
+    return (f"当前策略「{strategy['name']}」由这些因子组成并作为基础特征参与训练：{', '.join(members)}。"
+            "请寻找与它们低相关、能提供增量信息的新因子，不要重新实现或微调这些已有因子；"
+            "评估时以加入后组合的年化超额收益和回撤改善为准。")
+
+
 @app.route("/control", methods=["POST"])
 def control_process():
     global rdagent_processes

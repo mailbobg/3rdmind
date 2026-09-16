@@ -447,6 +447,27 @@ def test_strategy_signal_exports_holdings_and_scores(studio_client, tmp_path: Pa
 
 
 @pytest.mark.offline
+def test_research_from_strategy_seeds_base_features(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print('STR_5')")
+    monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
+    started = []
+    monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
+    body = {"name": "回流测试", "factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "model": {"method": "rank"}, "params": {"market": "csi300", "benchmark": "SH000300", "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}}
+    strategy = studio_client.post("/studio/strategies", json=body).get_json()
+    response = studio_client.post("/research/from-strategy", json={"strategy_id": strategy["id"], "loops": 2, "all_duration": 1})
+    assert response.status_code == 200, response.get_json()
+    payload = response.get_json()
+    assert payload["members"] == ["STR_5"] and payload["id"].startswith("Finance Data Building/") and payload["id"].endswith("-on-strategy")
+    assert "STR_5" in payload["instruction"] and "回流测试" in payload["instruction"]
+    task = started[0]
+    assert task.target_name == "fin_factor" and task.kwargs["loop_n"] == 2 and task.kwargs["all_duration"] == "1.0h"
+    base = Path(task.kwargs["base_features_path"])
+    assert (base / "STR_5.py").read_text() == "print('STR_5')"
+    assert studio_client.post("/research/from-strategy", json={"strategy_id": "nope"}).status_code == 404
+
+
+@pytest.mark.offline
 def test_rounds_lists_factor_rounds(studio_client) -> None:
     response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
     assert response.status_code == 200

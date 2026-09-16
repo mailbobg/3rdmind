@@ -193,6 +193,9 @@ export interface SignalRow { date: string; type: "holding" | "score"; instrument
 export interface SignalExport { strategy: string; strategy_id: string; backtest_id: string; as_of: string; market: string; topk: number; n_drop: number; cash: number | null; total: number | null; rows: SignalRow[] }
 export const strategySignal = (id: string) => api<SignalExport>(`/studio/strategies/${id}/signal`);
 export const strategySignalCsvUrl = (id: string) => `/studio/strategies/${id}/signal?format=csv`;
+/** Start a factor-research run whose base features are the strategy's members. */
+export const researchFromStrategy = (strategy_id: string, loops: number, all_duration: number) =>
+  api<{ id: string; members: string[]; instruction: string }>("/research/from-strategy", { strategy_id, loops, all_duration });
 export const updateStrategy = (id: string, body: { start?: string; end?: string; refresh?: boolean } = {}) =>
   api<{ backtest_id: string; refreshed: string[]; failures: string[]; start: string; end: string }>(`/studio/strategies/${id}/update`, body);
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});

@@ -48,7 +48,7 @@ export function ResearchPage() {
   const { env, trace, basket, layout } = useStudio();
   const [search, setSearch] = useSearchParams();
   const navigate = useNavigate();
-  const [tab, setTab] = useState(search.get("new") || !trace.traceId ? "new" : "rounds");
+  const [tab, setTab] = useState(search.get("trace") ? "rounds" : search.get("new") || !trace.traceId ? "new" : "rounds");
   const [form, setForm] = useState(() => ({ scenario: MODES[0].value, loops: 3, duration: 2, objective: restoreStudioState().objective || "", link: "" }));
   const [files, setFiles] = useState<File[]>([]);
   const [roundId, setRoundId] = useState("");
