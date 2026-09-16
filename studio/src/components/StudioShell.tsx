@@ -36,7 +36,7 @@ export function StudioShell() {
   return (
     <StudioContext.Provider value={value}>
       <div className="grid h-full grid-cols-[230px_minmax(0,1fr)] gap-2 bg-background p-2">
-        <aside className="flex min-h-0 flex-col overflow-y-auto rounded-r-2xl rounded-l-none bg-surface px-3.5 py-5">
+        <aside className="flex min-h-0 flex-col overflow-y-auto rounded-r-2xl rounded-l-none border border-border bg-surface px-3.5 py-5">
           <a href="#/research" className="mx-auto flex flex-col items-center gap-0.5 no-underline" aria-label="AI 研究">
             <img src={`${import.meta.env.BASE_URL}rd-agent-mark.png`} alt="" className="size-20" />
             <small className="text-[11px] text-muted">RD-Agent × Qlib</small>
@@ -51,11 +51,6 @@ export function StudioShell() {
               </NavLink>
             ))}
           </nav>
-          <div className="mt-6 border-t border-border px-2 pt-5 text-[11px] text-muted">
-            <strong className="font-medium text-foreground/70">标准工作流</strong>
-            <p className="my-2 leading-relaxed">研究产生候选 → 因子库挑选 → 组合回测验证 → 保存为策略并跟踪。</p>
-            <p className="my-2 leading-relaxed">所有成功与失败都保留在运行记录中。</p>
-          </div>
           <div className="mt-auto px-2 pt-8 text-xs">
             <LlmSettings onSaved={reloadEnv} />
             <DataSync onSynced={reloadEnv} />
