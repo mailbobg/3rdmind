@@ -51,6 +51,7 @@ export function StudioShell() {
               </NavLink>
             ))}
           </nav>
+          <div className="mt-6 border-t border-border" />
           <div className="mt-auto px-2 pt-8 text-xs">
             <LlmSettings onSaved={reloadEnv} />
             <DataSync onSynced={reloadEnv} />
