@@ -163,7 +163,7 @@ def test_experiments_summarise_loaded_traces(studio_client) -> None:
     ]
     rows = {r["id"]: r for r in studio_client.get("/studio/experiments").get_json()}
     assert rows["Finance Data Building/second"] == {
-        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1,
+        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1, "market": "csi300",
         "status": "completed", "updated": "2026-09-02T11:00:00", "hypothesis": "second", "messages": 5,
     }
     # The demo trace has events but no END and no live process: it ended without reporting.
@@ -206,7 +206,7 @@ def test_refresh_replaces_the_signal_source(studio_client, tmp_path: Path, monke
 
     (tmp_path / "ws" / "f0" / "factor.py").write_text("print('factor')")
 
-    def fake_refresh(code_path: Path, name: str, out_dir: Path):
+    def fake_refresh(code_path: Path, name: str, out_dir: Path, market: str = "csi300"):
         assert Path(code_path).read_text() == "print('factor')"
         index = pd.MultiIndex.from_product([pd.to_datetime(["2022-10-10", "2026-09-11"]), ["SH600000"]], names=["datetime", "instrument"])
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -486,17 +486,31 @@ def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, mo
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        out = Path(cmd[-1]); (out / "full").mkdir(parents=True); (out / "full" / "daily_pv.h5").write_bytes(b"")
+        out = Path(cmd[6]); (out / "full").mkdir(parents=True, exist_ok=True); (out / "full" / "daily_pv.h5").write_bytes(b"")
         return type("P", (), {"stdout": '{"status": "completed"}', "stderr": ""})()
 
     monkeypatch.setattr(server.subprocess, "run", fake_run)
     env = server.universe_env("csi1000")
     assert env["QLIB_FACTOR_MARKET"] == "csi1000" and env["QLIB_FACTOR_BENCHMARK"] == "SH000852"
-    assert env["FACTOR_COSTEER_DATA_FOLDER"].endswith("universe/csi1000/full") and calls and calls[0][3] == "csi1000"
+    assert env["QLIB_FACTOR_REGION"] == "cn" and env["QLIB_FACTOR_LIMIT_THRESHOLD"] == "0.095" and "QLIB_PROVIDER_URI" not in env
+    assert env["FACTOR_COSTEER_DATA_FOLDER"].endswith("universe/csi1000/full") and calls and calls[0][3] == "csi1000" and calls[0][-1] == "cn"
     server.universe_env("csi1000")  # already built: no second subprocess
     assert len(calls) == 1
     with pytest.raises(ValueError):
         server.universe_env("nasdaq")
+    # A sibling data directory declaring its universes (US data) joins the list with its own region and rules.
+    us = tmp_path / "us_ndx"
+    (us / "instruments").mkdir(parents=True)
+    (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "label": "美股", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100", "sp500": "S&P 500"}}))
+    assert server.available_universes() == ["csi300", "csi1000", "all", "nasdaq100"]  # sp500 has no instruments file
+    env = server.universe_env("nasdaq100")
+    assert env["QLIB_FACTOR_REGION"] == "us" and env["QLIB_FACTOR_BENCHMARK"] == "^ndx" and env["QLIB_FACTOR_LIMIT_THRESHOLD"] == "null"
+    assert env["QLIB_PROVIDER_URI"] == env["QLIB_FACTOR_PROVIDER_URI"] == str(us)
+    assert calls[-1][2] == str(us) and calls[-1][3] == "nasdaq100" and calls[-1][-1] == "us"
+    from rdagent.log.server import studio_markets
+    record = studio_markets.universe("nasdaq100")
+    assert record["limit_threshold"] is None and record["min_cost"] == 1 and record["label"] == "纳斯达克 100"
 
 
 @pytest.mark.offline
@@ -588,6 +602,7 @@ def test_backtest_resolves_factor_paths(studio_client, tmp_path: Path) -> None:
     assert config["factors"] == [{"name": "STR_5", "kind": "factor", "weight": 1.0, "path": str(tmp_path / "ws" / "f0"),
                                   "trace": "Finance Data Building/demo", "loop_id": 0}]
     assert config["trace"] == "Finance Data Building/demo"
+    assert config["region"] == "cn" and config["limit_threshold"] == 0.095 and config["min_cost"] == 5 and config["benchmark"] == "SH000300"
 
     bad = dict(body, factors=[{"name": "UNKNOWN", "weight": 1}])
     assert studio_client.post("/studio/backtests", json=bad).status_code == 400
@@ -816,7 +831,7 @@ def test_factor_library_lists_factors_with_code(studio_client, tmp_path: Path) -
     response = studio_client.get("/studio/factors")
     assert response.status_code == 200
     assert response.get_json() == [{
-        "trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5",
+        "trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5", "market": "csi300",
         "description": "Short-term reversal", "formulation": "-r_5", "variables": {"$close": "close"},
         "hypothesis": "h", "decision": True, "reason": "improves return",
         "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)", "analysis": None, "refreshed": None, "coverage": None,
@@ -1210,3 +1225,26 @@ def test_sync_remote_check_falls_back_when_the_api_is_rate_limited(monkeypatch: 
     monkeypatch.setattr(studio_sync, "_get_json", lambda url, timeout=20: (_ for _ in ()).throw(urllib.error.HTTPError(url, 500, "boom", {}, None)))
     with pytest.raises(urllib.error.HTTPError):
         studio_sync.check_remote(max_age=0)
+
+
+@pytest.mark.offline
+def test_backtest_on_a_us_universe_takes_its_data_region_and_rules(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cn = tmp_path / "qlib_data" / "cn_data"
+    (cn / "instruments").mkdir(parents=True)
+    (cn / "instruments" / "csi300.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    us = tmp_path / "qlib_data" / "us_ndx"
+    (us / "instruments").mkdir(parents=True)
+    (us / "calendars").mkdir()
+    (us / "calendars" / "day.txt").write_text("2025-01-02\n")
+    (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "label": "美股", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100"}}))
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(cn))
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0, "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "nasdaq100",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / response.get_json()["id"] / "config.json").read_text())
+    assert config["provider_uri"] == str(us) and config["region"] == "us"
+    assert config["benchmark"] == "^ndx" and config["limit_threshold"] is None and config["min_cost"] == 1
+    assert studio_client.post("/studio/backtests", json=dict(body, market="sp500")).status_code == 400

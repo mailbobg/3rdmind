@@ -225,6 +225,17 @@ export function BacktestPage() {
       setAutoNote(`回测区间已按信号覆盖自动调整为 ${start} → ${end}（信号数据到 ${coverage.end}）；需要更长就先把因子重算到最新。`);
     }
   }, [coverage, params.start, params.end, datesTouched]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The basket's factors carry the universe they were researched on; when they all agree and the form still
+  // points elsewhere, follow them (benchmark included), since a CSI300 backtest of NASDAQ factors finds no data.
+  useEffect(() => {
+    const markets = new Set(basket.items.map((f) => library[key(f)]?.market).filter((m): m is string => !!m));
+    if (markets.size !== 1) return;
+    const [market] = [...markets];
+    if (market === params.market) return;
+    const u = universes.find((x) => x.market === market);
+    setParams((p) => ({ ...p, market, benchmark: u?.benchmark || p.benchmark }));
+    setPageError("");
+  }, [basket.items, library, universes]); // eslint-disable-line react-hooks/exhaustive-deps
   // Rank mode gets the whole coverage; LightGBM needs history first, so the backtest takes the last third and
   // training / validation split the first two thirds 2:1 (the worker insists on train < valid < backtest).
   const fitToCoverage = () => {

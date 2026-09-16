@@ -14,6 +14,20 @@ class ModelBasePropSetting(BasePropSetting):
 
     benchmark: str = "SH000300"
     """Benchmark index for the backtest report"""
+
+    region: str = "cn"
+    """Qlib region of the data (cn / us): trading calendar and default exchange rules"""
+
+    provider_uri: str = "~/.qlib/qlib_data/cn_data"
+    """Qlib data directory the experiments read"""
+
+    limit_threshold: str = "0.095"
+    """Price-limit rule for the backtest exchange (rendered into the Qlib yaml; "null" for markets without one)"""
+
+    lgb_lambda_l1: str = "205.6999"
+    lgb_lambda_l2: str = "580.9768"
+    """LightGBM leaf penalties of the factor-evaluation model. Tuned for CSI300; a smaller universe has fewer
+    rows per leaf, so a penalty this size leaves no split and the model predicts a constant."""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.model_experiment.QlibModelScenario"
     """Scenario class for Qlib Model"""
@@ -64,6 +78,20 @@ class FactorBasePropSetting(BasePropSetting):
 
     benchmark: str = "SH000300"
     """Benchmark index for the backtest report"""
+
+    region: str = "cn"
+    """Qlib region of the data (cn / us): trading calendar and default exchange rules"""
+
+    provider_uri: str = "~/.qlib/qlib_data/cn_data"
+    """Qlib data directory the experiments read"""
+
+    limit_threshold: str = "0.095"
+    """Price-limit rule for the backtest exchange (rendered into the Qlib yaml; "null" for markets without one)"""
+
+    lgb_lambda_l1: str = "205.6999"
+    lgb_lambda_l2: str = "580.9768"
+    """LightGBM leaf penalties of the factor-evaluation model. Tuned for CSI300; a smaller universe has fewer
+    rows per leaf, so a penalty this size leaves no split and the model predicts a constant."""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.factor_experiment.QlibFactorScenario"
     """Scenario class for Qlib Factor"""
@@ -130,6 +158,20 @@ class QuantBasePropSetting(BasePropSetting):
 
     benchmark: str = "SH000300"
     """Benchmark index for the backtest report"""
+
+    region: str = "cn"
+    """Qlib region of the data (cn / us): trading calendar and default exchange rules"""
+
+    provider_uri: str = "~/.qlib/qlib_data/cn_data"
+    """Qlib data directory the experiments read"""
+
+    limit_threshold: str = "0.095"
+    """Price-limit rule for the backtest exchange (rendered into the Qlib yaml; "null" for markets without one)"""
+
+    lgb_lambda_l1: str = "205.6999"
+    lgb_lambda_l2: str = "580.9768"
+    """LightGBM leaf penalties of the factor-evaluation model. Tuned for CSI300; a smaller universe has fewer
+    rows per leaf, so a penalty this size leaves no split and the model predicts a constant."""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.quant_experiment.QlibQuantScenario"
     """Scenario class for Qlib Model"""

@@ -189,3 +189,4 @@ AGENTS.md
 
 scripts/*
 !scripts/start-studio.sh
+!scripts/build-us-data.py

@@ -2,7 +2,7 @@
 
 Runs as a subprocess (like studio_worker.py) so the Flask server never imports Qlib:
 
-    python studio_analysis.py <factor workspace> <provider_uri> <market> <output json>
+    python studio_analysis.py <factor workspace> <provider_uri> <market> <output json> [region]
 
 Writes coverage and the daily information coefficient of the factor against the next-day
 close-to-close return, the label Qlib's templates use with close execution.
@@ -63,7 +63,7 @@ def summarize(ic, rank_ic, coverage_start, coverage_end, universe_rows):
     }
 
 
-def run(workspace, provider_uri, market):
+def run(workspace, provider_uri, market, region="cn"):
     checkout = Path(__file__).resolve().parents[4] / "qlib"
     if checkout.is_dir():
         sys.path.insert(0, str(checkout))
@@ -73,7 +73,7 @@ def run(workspace, provider_uri, market):
     factor = factor_series(workspace)
     dates = factor.index.get_level_values("datetime")
     start, end = dates.min(), dates.max()
-    qlib.init(provider_uri=str(Path(provider_uri).expanduser()), region="cn")
+    qlib.init(provider_uri=str(Path(provider_uri).expanduser()), region=region)
     instruments = D.instruments(market)
     universe = set(D.list_instruments(instruments, start_time=start, end_time=end, as_list=True))
     factor = factor[factor.index.get_level_values("instrument").isin(universe)]
@@ -88,9 +88,10 @@ def run(workspace, provider_uri, market):
 
 
 def main(argv):
-    workspace, provider_uri, market, output = argv
+    workspace, provider_uri, market, output = argv[:4]
+    region = argv[4] if len(argv) > 4 else "cn"
     try:
-        result = {"status": "completed", **run(workspace, provider_uri, market)}
+        result = {"status": "completed", **run(workspace, provider_uri, market, region)}
     except Exception as error:  # the caller shows the message; a traceback on stderr helps debugging
         import traceback
         traceback.print_exc()

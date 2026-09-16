@@ -41,7 +41,7 @@ from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.ui.storage import WebStorage
 
 app = Flask(__name__, static_folder=str(Path(UI_SETTING.static_path).resolve()))
-from rdagent.log.server import studio_llm
+from rdagent.log.server import studio_llm, studio_markets
 from rdagent.log.server.studio import studio
 
 app.register_blueprint(studio)
@@ -452,33 +452,53 @@ def list_traces():
     return jsonify(trace_ids), 200
 
 
-UNIVERSE_BENCHMARKS = {"csi300": "SH000300", "csi500": "SH000905", "csi1000": "SH000852", "all": "SH000300"}
+def record_run_market(log_trace_path, market: str) -> None:
+    """Remember which universe a run was started on (studio-run.json beside the trace) for the Studio's summaries."""
+    try:
+        folder = Path(log_trace_path)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "studio-run.json").write_text(json.dumps({"market": market}))
+    except OSError as error:
+        app.logger.warning(f"Could not record the universe of {log_trace_path}: {error}")
 
 
 def available_universes() -> list[str]:
-    """Instrument lists the Qlib data ships with, ordered small to large."""
-    provider = Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser()
-    names = {p.stem for p in (provider / "instruments").glob("*.txt")}
-    order = ["csi300", "csi500", "csi1000", "all"]
-    return [n for n in order if n in names] + sorted(n for n in names if n not in order)
+    """Every universe the registry knows (A-share lists first, then declared providers such as US data)."""
+    return studio_markets.markets()
 
 
 def universe_env(market: str) -> dict[str, str]:
-    """Environment for a run on ``market``: the universe/benchmark settings and a factor data folder built for it.
+    """Environment for a run on ``market``: universe, benchmark, region and data directory for RD-Agent's Qlib
+    settings, plus a factor data folder built for it.
 
     CSI300 keeps the folders configured in .env (the data every existing experiment used); any other universe
     gets ``traces/studio_data/universe/<market>/{full,debug}/daily_pv.h5``, built on first use by
     studio_universe.py over the configured research window (train start to test end).
     """
-    market = market.strip().lower()
-    if market not in available_universes():
-        raise ValueError(f"Unknown universe {market!r}; available: {', '.join(available_universes())}")
-    env = {f"QLIB_{kind}_MARKET": market for kind in ("FACTOR", "MODEL", "QUANT")}
-    env.update({f"QLIB_{kind}_BENCHMARK": UNIVERSE_BENCHMARKS.get(market, "SH000300") for kind in ("FACTOR", "MODEL", "QUANT")})
+    record = studio_markets.universe(market)  # raises ValueError for an unknown market
+    market = record["market"]
+    env = {}
+    for kind in ("FACTOR", "MODEL", "QUANT"):
+        env[f"QLIB_{kind}_MARKET"] = market
+        env[f"QLIB_{kind}_BENCHMARK"] = record["benchmark"]
+        env[f"QLIB_{kind}_REGION"] = record["region"]
+        env[f"QLIB_{kind}_PROVIDER_URI"] = record["provider_uri"]
+        env[f"QLIB_{kind}_LIMIT_THRESHOLD"] = "null" if record["limit_threshold"] is None else str(record["limit_threshold"])
     if market == "csi300":
         return env
+    # RD-Agent's LightGBM penalties (L1 205.7, L2 581) were tuned for CSI300; the leaf gradient sums they are
+    # compared with grow with the number of rows, so a smaller universe gets them scaled by its size, else the
+    # evaluation model never splits and every factor looks useless.
+    members = record.get("members") or 300
+    if members < 300:
+        scale = members / 300
+        for kind in ("FACTOR", "MODEL", "QUANT"):
+            env[f"QLIB_{kind}_LGB_LAMBDA_L1"] = f"{205.6999 * scale:.4f}"
+            env[f"QLIB_{kind}_LGB_LAMBDA_L2"] = f"{580.9768 * scale:.4f}"
+    if record["region"] != "cn":
+        env["QLIB_PROVIDER_URI"] = record["provider_uri"]
     out = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe" / market
-    calendar_file = Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser() / "calendars" / "day.txt"
+    calendar_file = Path(record["provider_uri"]) / "calendars" / "day.txt"
     calendar_end = calendar_file.read_text().strip().splitlines()[-1] if calendar_file.is_file() else ""
     built_end = ""
     if (out / "meta.json").is_file():
@@ -488,7 +508,6 @@ def universe_env(market: str) -> dict[str, str]:
             built_end = ""
     # (Re)build when missing, or when the Qlib data has moved past what was exported (after a data sync).
     if not (out / "full" / "daily_pv.h5").is_file() or (calendar_end and built_end and built_end < calendar_end):
-        provider = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
         start = os.environ.get("QLIB_FACTOR_TRAIN_START", "2023-01-01")
         end = os.environ.get("QLIB_FACTOR_TEST_END", "2030-12-31")
         # Factor code needs history before the training window for rolling features; give it a quarter.
@@ -497,7 +516,7 @@ def universe_env(market: str) -> dict[str, str]:
         start = (date.fromisoformat(start) - timedelta(days=90)).isoformat()
         completed = subprocess.run(
             [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_universe.py")),
-             provider, market, start, end, str(out)],
+             record["provider_uri"], market, start, end, str(out), record["region"]],
             capture_output=True, text=True, timeout=1800,
         )
         line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
@@ -515,8 +534,9 @@ def universe_env(market: str) -> dict[str, str]:
 @app.route("/universes", methods=["GET"])
 def list_universes():
     prepared = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe"
-    return jsonify([{"market": m, "benchmark": UNIVERSE_BENCHMARKS.get(m, "SH000300"),
-                     "ready": m == "csi300" or (prepared / m / "full" / "daily_pv.h5").is_file()} for m in available_universes()])
+    return jsonify([{"market": u["market"], "label": u["label"], "group": u["group"], "region": u["region"], "benchmark": u["benchmark"],
+                     "ready": u["market"] == "csi300" or (prepared / u["market"] / "full" / "daily_pv.h5").is_file()}
+                    for u in studio_markets.universes()])
 
 
 @app.route("/upload", methods=["POST"])
@@ -618,6 +638,7 @@ def upload_file():
         env=run_env,
     )
     task.start()
+    record_run_market(log_trace_path, market)
     app.logger.warning(f"Task {log_trace_path} started (universe {market}).")
     rdagent_processes[str(log_trace_path)] = task
     return (
@@ -808,6 +829,7 @@ def research_from_strategy():
     task = RDAgentTask(target_name="fin_factor", kwargs=kwargs, stdout_path=str(stdout_path), log_trace_path=str(log_trace_path),
                        scenario=scenario, trace_name=trace_name, ui_server_port=app.config["UI_SERVER_PORT"], env=run_env)
     task.start()
+    record_run_market(log_trace_path, run_env.get("QLIB_FACTOR_MARKET", "csi300"))
     rdagent_processes[str(log_trace_path)] = task
     app.logger.warning(f"Started research on strategy {strategy['id']} ({', '.join(members)}) at {log_trace_path}.")
     return jsonify({"id": f"{scenario}/{trace_name}", "members": members,

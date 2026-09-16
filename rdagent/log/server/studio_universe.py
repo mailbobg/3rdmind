@@ -2,7 +2,7 @@
 
 Runs as a subprocess (like studio_worker.py) so the Flask server never imports Qlib:
 
-    python studio_universe.py <provider_uri> <market> <start> <end> <out dir>
+    python studio_universe.py <provider_uri> <market> <start> <end> <out dir> [region]
 
 Writes ``<out>/full/daily_pv.h5`` (every member of the universe over [start, end]) and
 ``<out>/debug/daily_pv.h5`` (the first half year, up to 100 instruments: what RD-Agent uses to smoke-test
@@ -16,12 +16,12 @@ from pathlib import Path
 FIELDS = ["$open", "$close", "$high", "$low", "$volume", "$factor"]
 
 
-def main(provider, market, start, end, out_dir):
+def main(provider, market, start, end, out_dir, region="cn"):
     import pandas as pd
     import qlib
     from qlib.data import D
 
-    qlib.init(provider_uri=str(Path(provider).expanduser()), region="cn")
+    qlib.init(provider_uri=str(Path(provider).expanduser()), region=region)
     last = pd.Timestamp(D.calendar(freq="day")[-1])
     end_ts = min(pd.Timestamp(end), last)
     frame = D.features(D.instruments(market), FIELDS, start_time=start, end_time=str(end_ts.date()), freq="day")
@@ -54,7 +54,7 @@ def main(provider, market, start, end, out_dir):
 
 if __name__ == "__main__":
     try:
-        print(json.dumps({"status": "completed", **main(*sys.argv[1:6])}))
+        print(json.dumps({"status": "completed", **main(*sys.argv[1:7])}))
     except Exception as error:  # noqa: BLE001 - relayed by the server
         print(json.dumps({"status": "failed", "error": str(error)}))
         sys.exit(1)

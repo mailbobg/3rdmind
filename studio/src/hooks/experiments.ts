@@ -8,6 +8,7 @@ export const EXPERIMENT_STATUS_LABELS: Record<ExperimentStatus | "unloaded", str
 export interface ExperimentRow {
   id: string;
   scenario: string;
+  market?: string;
   status: ExperimentStatus | "unloaded";
   rounds: number | null;
   accepted: number | null;
@@ -26,7 +27,7 @@ export function mergeExperiments(ids: string[], summaries: ExperimentSummary[]):
   const rows = ids.map<ExperimentRow>((id) => {
     const s = byId.get(id);
     return s
-      ? { id, scenario: s.scenario, status: s.status, rounds: s.rounds, accepted: s.accepted, updated: s.updated, hypothesis: s.hypothesis }
+      ? { id, scenario: s.scenario, market: s.market, status: s.status, rounds: s.rounds, accepted: s.accepted, updated: s.updated, hypothesis: s.hypothesis }
       : { id, scenario: id.split("/")[0], status: "unloaded", rounds: null, accepted: null, updated: null, hypothesis: null };
   });
   return rows.sort((a, b) => RANK[a.status] - RANK[b.status] || (b.updated || "").localeCompare(a.updated || "") || a.id.localeCompare(b.id));

@@ -3,7 +3,7 @@ import { mergeExperiments, shortTime } from "../experiments";
 import type { ExperimentSummary } from "../../api/studio";
 
 const summary = (over: Partial<ExperimentSummary>): ExperimentSummary =>
-  ({ id: "S/x", scenario: "S", rounds: 1, accepted: 0, status: "completed", updated: "2026-09-01T00:00:00", hypothesis: null, messages: 1, ...over });
+  ({ id: "S/x", scenario: "S", market: "csi300", rounds: 1, accepted: 0, status: "completed", updated: "2026-09-01T00:00:00", hypothesis: null, messages: 1, ...over });
 
 describe("mergeExperiments", () => {
   it("puts live runs first, then by last update, and unloaded traces last", () => {

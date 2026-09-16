@@ -2,7 +2,7 @@
 
 Runs as a subprocess (like studio_worker.py) so the Flask server never imports Qlib:
 
-    python studio_refresh.py <provider_uri> <data.h5> <start> <factor.py> <name> <out dir>
+    python studio_refresh.py <provider_uri> <data.h5> <start> <factor.py> <name> <out dir> [market] [region]
 
 1. Make sure ``data.h5`` holds CSI300 daily OHLCV (the same six columns RD-Agent gives factor code)
    from ``start`` to the last day in the Qlib calendar, rebuilding it when it is missing or stale.
@@ -23,20 +23,20 @@ FIELDS = ["$open", "$close", "$high", "$low", "$volume", "$factor"]
 FACTOR_TIMEOUT = 900
 
 
-def ensure_data(provider, data_path, start):
-    """Build or extend the shared daily_pv.h5; return (first day, last day, rows)."""
+def ensure_data(provider, data_path, start, market="csi300", region="cn"):
+    """Build or extend the shared daily_pv.h5 for ``market``; return (first day, last day, rows)."""
     import pandas as pd
     import qlib
     from qlib.data import D
 
-    qlib.init(provider_uri=str(Path(provider).expanduser()), region="cn")
+    qlib.init(provider_uri=str(Path(provider).expanduser()), region=region)
     last = pd.Timestamp(D.calendar(freq="day")[-1])
     if data_path.is_file():
         existing = pd.read_hdf(data_path)
         dates = existing.index.get_level_values("datetime")
         if pd.Timestamp(dates.max()) >= last and pd.Timestamp(dates.min()) <= pd.Timestamp(start):
             return str(dates.min().date()), str(dates.max().date()), int(len(existing))
-    frame = D.features(D.instruments("csi300"), FIELDS, start_time=start, end_time=str(last.date()), freq="day")
+    frame = D.features(D.instruments(market), FIELDS, start_time=start, end_time=str(last.date()), freq="day")
     if frame.index.names[0] == "instrument":
         frame = frame.swaplevel()
     frame = frame.sort_index().astype("float32")
@@ -71,9 +71,9 @@ def run_factor(code_path, data_path, name):
     return frame.sort_index()
 
 
-def main(provider, data_h5, start, code_path, name, out_dir):
+def main(provider, data_h5, start, code_path, name, out_dir, market="csi300", region="cn"):
     data_path, out = Path(data_h5), Path(out_dir)
-    data_start, data_end, data_rows = ensure_data(provider, data_path, start)
+    data_start, data_end, data_rows = ensure_data(provider, data_path, start, market, region)
     frame = run_factor(Path(code_path), data_path, name)
     values = frame.iloc[:, 0].dropna()
     if values.empty:
@@ -93,7 +93,7 @@ def main(provider, data_h5, start, code_path, name, out_dir):
 
 if __name__ == "__main__":
     try:
-        print(json.dumps({"status": "completed", **main(*sys.argv[1:7])}, ensure_ascii=False))
+        print(json.dumps({"status": "completed", **main(*sys.argv[1:9])}, ensure_ascii=False))
     except Exception as error:  # noqa: BLE001 - the server relays the message
         print(json.dumps({"status": "failed", "error": str(error)}, ensure_ascii=False))
         sys.exit(1)

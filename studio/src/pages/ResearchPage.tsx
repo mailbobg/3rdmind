@@ -184,7 +184,7 @@ export function ResearchPage() {
       cells: [
         <span key="c" className="mm-caret" data-open={open || undefined} aria-hidden />,
         <span key="n" className="block truncate" title={e.hypothesis || undefined}>{shortName(e.id)}</span>,
-        <span key="sc" className="mm-dim">{scenarioName(e.id)}</span>,
+        <span key="sc" className="mm-dim">{scenarioName(e.id)}{e.market && e.market !== "csi300" ? ` · ${universeLabel(e.market)}` : ""}</span>,
         e.rounds == null ? <span key="r" className="mm-dim">—</span> : String(e.rounds),
         e.accepted == null ? <span key="a" className="mm-dim">—</span> : String(e.accepted),
         <StatusTag key="st" status={open && trace.events.length ? status : EXPERIMENT_STATUS_LABELS[e.status]} />,

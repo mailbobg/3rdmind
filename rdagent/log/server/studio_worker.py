@@ -345,7 +345,7 @@ def prepare(config):
     provider = Path(config["provider_uri"]).expanduser().resolve()
     if not (provider / "calendars" / "day.txt").is_file():
         raise ValueError(f"Qlib daily data is missing: {provider}")
-    qlib.init(provider_uri=str(provider), region="cn")
+    qlib.init(provider_uri=str(provider), region=config.get("region") or "cn")
     calendar = D.calendar(freq="day")
     if pd.Timestamp(config["end"]) > calendar[-1] or pd.Timestamp(config["start"]) < calendar[0]:
         raise ValueError(f"Requested dates outside data coverage: {calendar[0]} to {calendar[-1]}")
@@ -410,8 +410,9 @@ def backtest_score(score, config):
         executor={"class": "SimulatorExecutor", "module_path": "qlib.backtest.executor",
                   "kwargs": {"time_per_step": "day", "generate_portfolio_metrics": True}},
         account=config["account"], benchmark=config.get("benchmark", "SH000300"),
-        exchange_kwargs={"freq": "day", "limit_threshold": 0.095, "deal_price": "close",
-                         "open_cost": config["open_cost"], "close_cost": config["close_cost"], "min_cost": 5},
+        # Exchange rules come from the universe's market (A-shares: 9.5% limit, min 5; US: no limit, min 1).
+        exchange_kwargs={"freq": "day", "limit_threshold": config.get("limit_threshold", 0.095), "deal_price": "close",
+                         "open_cost": config["open_cost"], "close_cost": config["close_cost"], "min_cost": config.get("min_cost", 5)},
     )
     report, positions = portfolios["1day"]
     _, indicator = indicators["1day"]

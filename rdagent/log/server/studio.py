@@ -12,7 +12,7 @@ from pathlib import Path
 from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
-from rdagent.log.server import studio_llm, studio_sync
+from rdagent.log.server import studio_llm, studio_markets, studio_sync
 from rdagent.log.server.studio_worker import validate_config, write_json
 
 studio = Blueprint("studio", __name__, url_prefix="/studio")
@@ -156,6 +156,19 @@ def task_fallback(registry, name):
     return {}
 
 
+def run_market(trace) -> str:
+    """The universe a trace was researched on (studio-run.json written at start), csi300 for older runs."""
+    path = TRACE_ROOT / trace / "studio-run.json"
+    if path.is_file():
+        try:
+            market = json.loads(path.read_text()).get("market")
+            if isinstance(market, str) and market:
+                return market
+        except ValueError:
+            pass
+    return "csi300"
+
+
 def analysis_cache_path(workspace, market):
     return Path(workspace) / f"studio_analysis.{market}.json"
 
@@ -195,13 +208,19 @@ def signal_workspace(trace, loop_id, name, workspace):
     return refresh_dir(trace, loop_id, name) if refreshed_meta(trace, loop_id, name) else Path(workspace)
 
 
-def run_refresh(code_path, name, out_dir):
-    """Recompute one factor on the latest data in a subprocess; returns its meta on success."""
-    provider = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
+def latest_data_path(market):
+    """The shared latest-data file for a universe (the CSI300 one keeps its original name)."""
+    return LATEST_DATA if market == "csi300" else LATEST_DATA.with_name(f"daily_pv_latest.{market}.h5")
+
+
+def run_refresh(code_path, name, out_dir, market="csi300"):
+    """Recompute one factor on the latest data of its universe in a subprocess; returns its meta on success."""
+    record = studio_markets.universe(market)
     start = os.environ.get("STUDIO_REFRESH_START", "2022-10-10")
     completed = subprocess.run(
         [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_refresh.py")),
-         provider, str(LATEST_DATA), start, str(code_path), name, str(out_dir)],
+         record["provider_uri"], str(latest_data_path(record["market"])), start, str(code_path), name, str(out_dir),
+         record["market"], record["region"]],
         capture_output=True, text=True, timeout=1500,
     )
     line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
@@ -224,6 +243,7 @@ def factor_library(registry, log_folder):
         except ValueError:
             continue
         context = round_context(task.messages)
+        market = run_market(trace)
         for round_ in metric_rounds(task.messages):
             round_ctx = context.get(round_["loop_id"], {"hypothesis": None, "decision": None, "reason": None, "tasks": {}})
             for name in round_["factors"]:
@@ -235,9 +255,9 @@ def factor_library(registry, log_folder):
                 detail = round_ctx["tasks"].get(name) or task_fallback(registry, name)
                 refreshed = refreshed_meta(trace, round_["loop_id"], name)
                 effective = refresh_dir(trace, round_["loop_id"], name) if refreshed else workspace
-                analysis = cached_analysis(effective, "csi300") if refreshed or WORKSPACE_ROOT in workspace.parents else None
+                analysis = cached_analysis(effective, market) if refreshed or WORKSPACE_ROOT in workspace.parents else None
                 entries.append({
-                    "trace": trace, "loop_id": round_["loop_id"], "name": name,
+                    "trace": trace, "loop_id": round_["loop_id"], "name": name, "market": market,
                     "description": detail.get("description"), "formulation": detail.get("formulation"),
                     "variables": detail.get("variables"),
                     "hypothesis": round_ctx["hypothesis"] or detail.get("hypothesis"),
@@ -262,11 +282,11 @@ def analyze_factor(workspace, market):
     cached = cached_analysis(workspace, market)
     if cached is not None:
         return cached
-    provider = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
+    record = studio_markets.universe(market)
     output = analysis_cache_path(workspace, market)
     completed = subprocess.run(
         [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_analysis.py")),
-         str(workspace), provider, market, str(output)],
+         str(workspace), record["provider_uri"], market, str(output), record["region"]],
         capture_output=True, text=True, timeout=300,
     )
     if not output.is_file():
@@ -421,7 +441,7 @@ def summarize_task(trace_id, task):
     else:
         status = "ended"
     return {
-        "id": trace_id, "scenario": trace_id.split("/")[0], "rounds": len(loops), "accepted": accepted,
+        "id": trace_id, "scenario": trace_id.split("/")[0], "rounds": len(loops), "accepted": accepted, "market": run_market(trace_id),
         "status": status, "updated": updated or ended_at or None, "hypothesis": hypothesis, "messages": len(task.messages),
     }
 
@@ -463,7 +483,7 @@ def factors():
 
 @studio.get("/factors/analysis")
 def factor_analysis():
-    market = request.args.get("market", "csi300")
+    market = request.args.get("market") or run_market(request.args.get("trace", ""))
     if not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", market or ""):
         return jsonify({"error": "Unsupported instrument universe"}), 400
     try:
@@ -526,7 +546,7 @@ def factors_refresh():
         out = refresh_dir(trace, loop_id, name)
         for stale in out.glob("studio_analysis.*.json"):
             stale.unlink()
-        return jsonify(run_refresh(code_path, name, out))
+        return jsonify(run_refresh(code_path, name, out, str(body.get("market") or run_market(trace))))
     except (ValueError, TypeError, KeyError) as error:
         return jsonify({"error": str(error)}), 400
     except (RuntimeError, subprocess.TimeoutExpired) as error:
@@ -596,9 +616,16 @@ def prepare_backtest_config(body):
     if default_loop is not None:
         body["loop_id"] = normalize_loop_id(default_loop)
     body["factors"] = resolve_factor_paths(default_trace, body.get("loop_id"), body.get("factors") or [])
+    # The universe decides the data directory, region and exchange rules; a caller-given benchmark wins,
+    # otherwise the universe's own index is used.
+    record = studio_markets.universe(str(body.get("market") or "csi300"))
+    if not body.get("benchmark"):
+        body["benchmark"] = record["benchmark"]
     config = validate_config(body)
-    config["provider_uri"] = str(Path(config.get("provider_uri") or os.environ.get(
-        "QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
+    config["provider_uri"] = str(Path(config.get("provider_uri") or record["provider_uri"]).expanduser())
+    config["region"] = record["region"]
+    config["limit_threshold"] = record["limit_threshold"]
+    config["min_cost"] = record["min_cost"]
     if not (Path(config["provider_uri"]) / "calendars" / "day.txt").is_file():
         raise ValueError("Qlib data not found. Configure a local Qlib daily data directory first.")
     return config
@@ -910,7 +937,7 @@ def strategy_update(strategy_id):
                 out = refresh_dir(f["trace"], f["loop_id"], f["name"])
                 for stale in out.glob("studio_analysis.*.json"):
                     stale.unlink()
-                run_refresh(code_path, f["name"], out)
+                run_refresh(code_path, f["name"], out, str((strategy.get("params") or {}).get("market") or run_market(f["trace"])))
                 refreshed.append(f["name"])
             except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                 failures.append(f"{f['name']}: {error}")

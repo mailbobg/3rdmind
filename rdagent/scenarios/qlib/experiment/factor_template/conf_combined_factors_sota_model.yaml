@@ -1,6 +1,6 @@
 qlib_init:
-    provider_uri: "~/.qlib/qlib_data/cn_data"
-    region: cn
+    provider_uri: "{{ provider_uri | default('~/.qlib/qlib_data/cn_data', true) }}"
+    region: {{ region | default("cn", true) }}
 
 market: &market {{ market | default("csi300", true) }}
 benchmark: &benchmark {{ benchmark | default("SH000300", true) }}
@@ -56,7 +56,7 @@ port_analysis_config: &port_analysis_config
         account: 100000000
         benchmark: *benchmark
         exchange_kwargs:
-            limit_threshold: 0.095
+            limit_threshold: {{ limit_threshold | default("0.095", true) }}
             deal_price: close
             open_cost: 0.0005
             close_cost: 0.0015

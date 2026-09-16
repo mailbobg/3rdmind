@@ -88,6 +88,32 @@ server directly, since the React dev server has nothing at its root.
 For an authenticated backend, establish the backend's normal authentication session through the same origin.
 Do not place provider credentials in the frontend.
 
+## Other markets (US example)
+
+Universes come from `studio_markets.py`: the default Qlib directory (`QLIB_PROVIDER_URI`, the A-share
+snapshot) contributes every `instruments/*.txt` it holds, and any sibling directory that carries a
+`studio-universe.json` contributes its own markets with their region and benchmark:
+
+```json
+{"region": "us", "label": "美股", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100"}}
+```
+
+Research runs on such a universe get `QLIB_*_REGION`, `QLIB_*_PROVIDER_URI` and `QLIB_*_LIMIT_THRESHOLD`
+beside market and benchmark (the Qlib yaml templates render all five), and their factor input data is
+exported from that directory. Backtests, analyses and "重算到最新" read the same registry, so a US backtest
+runs with `region=us`, no price limit and a 1-dollar minimum commission. Each run records its universe in
+`studio-run.json` beside its trace; the factor library and experiment list show it, and the backtest form
+follows the basket's universe. RD-Agent's factor-evaluation LightGBM carries L1/L2 leaf penalties tuned for
+CSI300 (205.7 / 581); on a universe with fewer than 300 names they are scaled by size (`QLIB_*_LGB_LAMBDA_L1/L2`),
+because at the original size the model never splits on 100 stocks and predicts a constant.
+
+The NASDAQ-100 data in `~/.qlib/qlib_data/us_ndx` was built once from Yahoo Finance with qlib's collector:
+monthly membership snapshots from indexes.nasdaqomx.com (2008 onward) give `instruments/nasdaq100.txt`;
+`yahooquery` downloads every ever-member plus `^NDX`; `scripts/data_collector/yahoo/collector.py
+normalize_data --region US` and `scripts/dump_bin.py dump_all` produce the binary files. Tickers that were
+delisted or acquired are no longer on Yahoo (74 of 274 names), so the history carries survivorship bias
+before roughly 2020; the current 101 members are complete. There is no automatic update for this data yet.
+
 ## Qlib environment
 
 The default daily data directory is `~/.qlib/qlib_data/cn_data`. `QLIB_PROVIDER_URI` must be set before starting the

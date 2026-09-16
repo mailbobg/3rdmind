@@ -21,6 +21,8 @@ export interface FactorAnalysis {
 }
 export interface LibraryFactor extends Record<string, unknown> {
   trace: string; loop_id: number; name: string;
+  /** Universe the factor was researched on (csi300 for runs older than the 股票池 option). */
+  market: string;
   description: string | null; formulation: string | null; variables: Record<string, string> | null;
   hypothesis: string | null; decision: boolean | null; reason: string | null;
   metrics: Record<string, number>; code: string | null; analysis: FactorAnalysis | null;
@@ -121,15 +123,17 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
 
 export type ExperimentStatus = "starting" | "running" | "completed" | "stopped" | "failed" | "ended";
 export interface ExperimentSummary {
+  market: string;
   id: string; scenario: string; rounds: number; accepted: number; status: ExperimentStatus;
   updated: string | null; hypothesis: string | null; messages: number;
 }
 
 export const traces = () => api<string[]>("/traces");
 /** Instrument universes the Qlib data ships with; `ready` = factor input data already built for research. */
-export interface Universe { market: string; benchmark: string; ready: boolean }
-export const universes = () => api<Universe[]>("/universes");
-export const UNIVERSE_LABELS: Record<string, string> = { csi300: "沪深300", csi500: "中证500", csi800: "中证800", csi1000: "中证1000", csiall: "中证全指", all: "全市场" };
+export interface Universe { market: string; label: string; group: string; region: string; benchmark: string; ready: boolean }
+export const UNIVERSE_LABELS: Record<string, string> = { csi300: "沪深300", csi500: "中证500", csi800: "中证800", csi1000: "中证1000", csiall: "中证全指", all: "全部 A 股", nasdaq100: "纳斯达克 100" };
+/** Universe list from the server; its labels also feed universeLabel() for every later call. */
+export const universes = () => api<Universe[]>("/universes").then((list) => { for (const u of list) if (u.label) UNIVERSE_LABELS[u.market] = u.label; return list; });
 export const universeLabel = (m: string) => UNIVERSE_LABELS[m] || m.toUpperCase();
 export const experiments = () => api<ExperimentSummary[]>("/studio/experiments");
 export const traceSnapshot = (id: string) => api<TraceEvent[]>("/trace", { id, snapshot: true });
@@ -143,8 +147,9 @@ export const stdoutUrl = (id: string) => `/stdout?${new URLSearchParams({ id })}
 export const environment = () => api<Environment>("/studio/environment");
 export const strategySource = () => api<{ name: string; code: string }>("/studio/strategy");
 export const factorLibrary = () => api<LibraryFactor[]>("/studio/factors");
-export const factorAnalysis = (ref: FactorRef, market = "csi300") =>
-  api<FactorAnalysis>(`/studio/factors/analysis?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name, market })}`);
+/** Single-factor analysis inside a universe; without `market` the server uses the factor's own research universe. */
+export const factorAnalysis = (ref: FactorRef, market?: string) =>
+  api<FactorAnalysis>(`/studio/factors/analysis?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name, ...(market ? { market } : {}) })}`);
 export const factorCorrelation = (factors: FactorRef[]) => api<CorrelationMatrix>("/studio/factors/correlation", { factors });
 export const traceStatusInfo = (trace: string) =>
   api<{ loaded: boolean; alive: boolean; messages: number }>(`/studio/trace-status?${new URLSearchParams({ trace })}`);
