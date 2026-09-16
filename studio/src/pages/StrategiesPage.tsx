@@ -9,7 +9,7 @@ import { PageFrame } from "../components/PageFrame";
 import { Section } from "../components/Section";
 import { BacktestResultView } from "../components/BacktestResultView";
 import { Block, Btn, Empty, Note, Num, NumberInput, P, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
-import { CurveOverlay, DataTable, Hint, MetricGrid, Mono, Signed, money, percent } from "../components/widgets";
+import { CurveOverlay, DataTable, Hint, Instrument, MetricGrid, Mono, Signed, money, percent } from "../components/widgets";
 
 const RUN_STATUS: Record<string, string> = { queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", missing: "记录丢失" };
 
@@ -177,7 +177,7 @@ export function StrategiesPage() {
                 rows={signal.rows.filter((r) => r.type === "holding").map((r) => {
                   const rank = signal.rows.find((x) => x.type === "score" && x.instrument === r.instrument)?.rank;
                   return { key: r.instrument, cells: [
-                    <Mono key="i">{r.instrument}</Mono>,
+                    <Instrument key="i" code={r.instrument} />,
                     <span key="w" className="tabular-nums">{typeof r.weight === "number" ? percent(r.weight, 1) : "—"}</span>,
                     <span key="a" className="tabular-nums">{typeof r.amount === "number" ? Math.round(r.amount).toLocaleString() : "—"}</span>,
                     <span key="p" className="tabular-nums">{typeof r.price === "number" ? r.price.toFixed(3) : "—"}</span>,
@@ -188,7 +188,7 @@ export function StrategiesPage() {
               <DataTable label="最新评分" head={[["排名", "end"], ["标的"], ["评分", "end"], ["当前"]]}
                 rows={signal.rows.filter((r) => r.type === "score").slice(0, signal.topk * 2).map((r) => ({ key: `s-${r.instrument}`, cells: [
                   <span key="r" className="tabular-nums">{r.rank}</span>,
-                  <Mono key="i">{r.instrument}</Mono>,
+                  <Instrument key="i" code={r.instrument} />,
                   <span key="s" className="tabular-nums">{typeof r.score === "number" ? r.score.toFixed(4) : "—"}</span>,
                   <span key="h" className={`text-[11px] ${r.held ? "text-success" : "text-muted"}`}>{r.held ? "持有中" : (r.rank ?? 0) <= signal.topk ? "待买入" : ""}</span>,
                 ] }))} />

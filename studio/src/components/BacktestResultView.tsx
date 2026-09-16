@@ -4,7 +4,7 @@ import type { BacktestResult, Breakdown, InstrumentSummary, SignalDiagnosis, Tra
 import { Btn } from "./minimal";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { Section } from "./Section";
-import { CodeView, CorrelationMatrix, CurveOverlay, DataTable, EquityChart, Hint, MetricGrid, Mono, Signed, StatusChip, money, percent } from "./widgets";
+import { CodeView, CorrelationMatrix, CurveOverlay, DataTable, EquityChart, Hint, Instrument, MetricGrid, Mono, Signed, StatusChip, money, percent } from "./widgets";
 
 /** `onDiagnose` starts the take-apart diagnosis (the owner refetches and polls); absent, the button is hidden. */
 export function BacktestResultView({ result, onDiagnose }: { result: BacktestResult; onDiagnose?: () => void }) {
@@ -121,7 +121,7 @@ function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instr
             rows={filteredInstruments.slice(0, 50).map((r) => ({
               key: r.instrument,
               cells: [
-                <span key="i" className="flex items-center gap-1"><Mono>{r.instrument}</Mono>{r.held && <Chip size="sm" color="success" variant="soft">持有</Chip>}</span>,
+                <span key="i" className="flex items-center gap-1"><Instrument code={r.instrument} />{r.held && <Chip size="sm" color="success" variant="soft">持有</Chip>}</span>,
                 <span key="t" className="tabular-nums">{r.trades}</span>,
                 <span key="h" className="tabular-nums">{r.holding_value ? money(r.holding_value) : "—"}</span>,
                 <span key="c" className="tabular-nums">{money(r.cost)}</span>,
@@ -139,7 +139,7 @@ function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instr
               key: `${t.date}-${t.instrument}-${i}`,
               cells: [
                 <span key="d" className="tabular-nums">{t.date}</span>,
-                <Mono key="i">{t.instrument}</Mono>,
+                <Instrument key="i" code={t.instrument} />,
                 <Chip key="dir" size="sm" variant="soft" color={t.direction === "buy" ? "success" : "danger"}>{t.direction === "buy" ? "买入" : "卖出"}</Chip>,
                 <span key="p" className="tabular-nums">{t.price.toFixed(3)}</span>,
                 <span key="a" className="tabular-nums">{Math.round(t.amount).toLocaleString()}</span>,

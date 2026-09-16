@@ -198,4 +198,5 @@ export const researchFromStrategy = (strategy_id: string, loops: number, all_dur
   api<{ id: string; members: string[]; instruction: string }>("/research/from-strategy", { strategy_id, loops, all_duration });
 export const updateStrategy = (id: string, body: { start?: string; end?: string; refresh?: boolean } = {}) =>
   api<{ backtest_id: string; refreshed: string[]; failures: string[]; start: string; end: string }>(`/studio/strategies/${id}/update`, body);
+export const instrumentNames = () => api<{ source: string | null; names: Record<string, { name: string; industry?: string }> }>("/studio/instruments/names");
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});

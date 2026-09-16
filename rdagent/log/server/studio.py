@@ -23,6 +23,8 @@ STRATEGY_ROOT = TRACE_ROOT / "studio_strategies"
 # beside the shared daily_pv the recomputation reads.
 REFRESH_ROOT = TRACE_ROOT / "studio_refresh"
 LATEST_DATA = TRACE_ROOT / "studio_data" / "daily_pv_latest.h5"
+# Instrument code → {name, industry}; a JSON file the user refreshes from their own listing source.
+INSTRUMENT_NAMES = TRACE_ROOT / "studio_data" / "instrument_names.json"
 WORKSPACE_ROOT = Path(RD_AGENT_SETTINGS.workspace_path).resolve()
 
 
@@ -979,10 +981,12 @@ def strategy_signal(strategy_id):
     import io
 
     buffer = io.StringIO()
-    fields = ["date", "type", "instrument", "weight", "amount", "price", "value", "score", "rank", "held"]
+    names = instrument_names()["names"]
+    fields = ["date", "type", "instrument", "name", "weight", "amount", "price", "value", "score", "rank", "held"]
     writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
     for row in payload["rows"]:
+        row = {**row, "name": (names.get(row["instrument"]) or {}).get("name", "")}
         writer.writerow({k: ("" if row.get(k) is None else row.get(k)) for k in fields})
     from urllib.parse import quote
 
@@ -990,3 +994,19 @@ def strategy_signal(strategy_id):
     filename = f"signal-{payload['as_of']}-{strategy['name']}.csv".replace("/", "_")
     disposition = f"attachment; filename=\"signal-{payload['as_of']}.csv\"; filename*=UTF-8''{quote(filename)}"
     return Response(buffer.getvalue(), mimetype="text/csv", headers={"Content-Disposition": disposition})
+
+
+def instrument_names():
+    """The code → {name, industry} map from studio_data/instrument_names.json, or an empty map."""
+    if not INSTRUMENT_NAMES.is_file():
+        return {"source": None, "names": {}}
+    try:
+        data = json.loads(INSTRUMENT_NAMES.read_text())
+    except ValueError:
+        return {"source": None, "names": {}}
+    return {"source": data.get("source"), "names": data.get("names") or {}}
+
+
+@studio.get("/instruments/names")
+def instruments_names():
+    return jsonify(instrument_names())

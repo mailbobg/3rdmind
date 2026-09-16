@@ -140,6 +140,7 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(studio_module, "ROOT", trace_folder / "studio_backtests")
     monkeypatch.setattr(studio_module, "REFRESH_ROOT", trace_folder / "studio_refresh")
     monkeypatch.setattr(studio_module, "STRATEGY_ROOT", trace_folder / "studio_strategies")
+    monkeypatch.setattr(studio_module, "INSTRUMENT_NAMES", trace_folder / "studio_data" / "instrument_names.json")
     monkeypatch.setattr(studio_module, "LATEST_DATA", trace_folder / "studio_data" / "daily_pv_latest.h5")
     monkeypatch.setattr(studio_module, "WORKSPACE_ROOT", workspace_root)
     monkeypatch.setattr(studio_module.subprocess, "Popen", lambda *a, **k: type("P", (), {"poll": lambda self: None})())
@@ -440,7 +441,7 @@ def test_strategy_signal_exports_holdings_and_scores(studio_client, tmp_path: Pa
     assert csv_response.status_code == 200 and csv_response.mimetype == "text/csv"
     assert csv_response.headers["Content-Disposition"].encode("latin-1")  # non-ASCII names must be percent-encoded
     lines = csv_response.get_data(as_text=True).strip().splitlines()
-    assert lines[0] == "date,type,instrument,weight,amount,price,value,score,rank,held" and len(lines) == 4
+    assert lines[0] == "date,type,instrument,name,weight,amount,price,value,score,rank,held" and len(lines) == 4
     # A strategy whose runs are not completed has nothing to export yet.
     studio_module.write_json(job / "result.json", {"status": "running"})
     assert studio_client.get(f"/studio/strategies/{strategy['id']}/signal").status_code == 409

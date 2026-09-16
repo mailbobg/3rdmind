@@ -3,6 +3,7 @@ import * as echarts from "echarts";
 import katex from "katex";
 import { Chip, Table, Tooltip } from "@heroui/react";
 import type { BacktestRow, CorrelationMatrix as Corr } from "../api/studio";
+import { useInstrumentNames } from "../hooks/useInstrumentNames";
 
 export const percent = (v?: number | null, digits = 2) => (typeof v === "number" && Number.isFinite(v) ? (v * 100).toFixed(digits) + "%" : "—");
 export const fixed = (v?: number | null, digits = 4) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—");
@@ -17,6 +18,18 @@ export function Signed({ value, format = fixed }: { value?: number | null; forma
 
 export function Mono({ children }: { children: ReactNode }) {
   return <code className="rounded bg-surface-secondary px-1 py-px font-mono text-[11.5px]">{children}</code>;
+}
+
+/** A stock: its code in mono plus the listing name when the name map knows it. */
+export function Instrument({ code }: { code: string }) {
+  const names = useInstrumentNames();
+  const entry = names[code];
+  return (
+    <span className="inline-flex items-baseline gap-1.5 whitespace-nowrap">
+      <Mono>{code}</Mono>
+      {entry && <span className="text-xs" title={entry.industry || undefined}>{entry.name}</span>}
+    </span>
+  );
 }
 
 /** Key/value spec sheet; the hint shows as a tooltip on the label. */
