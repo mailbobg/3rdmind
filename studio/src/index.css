@@ -31,7 +31,7 @@ body { margin: 0; background: var(--background); color: var(--foreground); font-
    boxes, 11px muted keys over mono values, plain outlined buttons. Scoped so the rail and the
    results column keep their HeroUI look. */
 :root {
-  --mm-paper: #ffffff; --mm-ground: #f6f5f2; --mm-ink: #1b1b19; --mm-muted: #6f6e69; --mm-rule: #e5e2dc; --mm-rule-soft: #efece7;
+  --mm-paper: #ffffff; --mm-ground: var(--background); --mm-ink: #1b1b19; --mm-muted: #6f6e69; --mm-rule: #e5e2dc; --mm-rule-soft: #efece7;
   --mm-accent: #2f57c4; --mm-ok: #1f7a4d; --mm-warn: #a8730b; --mm-bad: #b23c2c;
   --mm-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
