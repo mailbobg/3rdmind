@@ -10,24 +10,35 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 PROVIDERS: list[dict] = [
+    # ``models`` are the suggestions shown before the provider's own list is fetched (from the docs, 2026-09-16);
+    # ``list_url`` is the provider's model-listing endpoint, used by list_models().
     {"id": "deepseek", "label": "DeepSeek", "prefix": "deepseek/", "key_env": "DEEPSEEK_API_KEY", "base_env": "DEEPSEEK_API_BASE",
-     "models": ["deepseek-chat", "deepseek-reasoner"], "site": "https://platform.deepseek.com"},
+     "models": ["deepseek-v4-pro", "deepseek-flash"], "site": "https://platform.deepseek.com",
+     "list_url": "https://api.deepseek.com/models"},
     {"id": "openai", "label": "OpenAI", "prefix": "openai/", "key_env": "OPENAI_API_KEY", "base_env": "OPENAI_API_BASE",
-     "models": ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o"], "site": "https://platform.openai.com"},
+     "models": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"], "site": "https://platform.openai.com",
+     "list_url": "https://api.openai.com/v1/models"},
     {"id": "anthropic", "label": "Anthropic", "prefix": "anthropic/", "key_env": "ANTHROPIC_API_KEY", "base_env": "ANTHROPIC_API_BASE",
-     "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"], "site": "https://console.anthropic.com"},
+     "models": ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"], "site": "https://console.anthropic.com",
+     "list_url": "https://api.anthropic.com/v1/models"},
     {"id": "gemini", "label": "Google Gemini", "prefix": "gemini/", "key_env": "GEMINI_API_KEY", "base_env": "GEMINI_API_BASE",
-     "models": ["gemini-2.5-pro", "gemini-2.5-flash"], "site": "https://aistudio.google.com"},
+     "models": ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro"], "site": "https://aistudio.google.com",
+     "list_url": "https://generativelanguage.googleapis.com/v1beta/models"},
     {"id": "dashscope", "label": "阿里云百炼 (Qwen)", "prefix": "dashscope/", "key_env": "DASHSCOPE_API_KEY", "base_env": "DASHSCOPE_API_BASE",
-     "models": ["qwen3-max", "qwen-plus", "qwen3-coder-plus"], "site": "https://bailian.console.aliyun.com"},
+     "models": ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-plus"], "site": "https://bailian.console.aliyun.com",
+     "list_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/models"},
     {"id": "moonshot", "label": "Moonshot (Kimi)", "prefix": "moonshot/", "key_env": "MOONSHOT_API_KEY", "base_env": "MOONSHOT_API_BASE",
-     "models": ["kimi-k2-0905-preview", "kimi-k2-turbo-preview"], "site": "https://platform.moonshot.cn"},
+     "models": ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6"], "site": "https://platform.kimi.com",
+     "list_url": "https://api.moonshot.cn/v1/models"},
     {"id": "openai_compatible", "label": "OpenAI 兼容接口", "prefix": "openai/", "key_env": "OPENAI_API_KEY", "base_env": "OPENAI_API_BASE",
-     "models": [], "needs_base": True, "site": ""},
+     "models": [], "needs_base": True, "site": "", "list_url": None},
 ]
 PROVIDER_BY_ID = {p["id"]: p for p in PROVIDERS}
 
@@ -191,3 +202,51 @@ def test_connection(values: dict) -> dict:
         return {"ok": True, "reply": reply, "seconds": round(time.monotonic() - started, 2), "model": r["model"]}
     except Exception as error:  # noqa: BLE001
         return {"ok": False, "error": str(error).splitlines()[0][:300], "seconds": round(time.monotonic() - started, 2), "model": r["model"]}
+
+
+# Model ids that are not chat models, whatever the provider (embeddings, speech, images, moderation, ...).
+_NOT_CHAT = re.compile(r"embed|tts|whisper|transcribe|audio|realtime|live|image|dall-e|vision-exp|moderation|rerank|omni|search|sora|video|asr|ocr|wan|imagen|veo|aqa|bison|gecko", re.I)
+
+
+def list_models(values: dict) -> dict:
+    """The provider's own model list, fetched with the given (or stored) key: {ok, models|error, source}."""
+    r = resolve({**values, "model": values.get("model") or "x"})
+    if r is None:
+        return {"ok": False, "error": "请先选择提供商"}
+    spec = PROVIDER_BY_ID[r["provider"]]
+    if not r["api_key"]:
+        return {"ok": False, "error": "没有 API Key，无法拉取列表"}
+    if spec["id"] == "openai_compatible":
+        url = r["base_url"].rstrip("/") + "/models"
+    else:
+        url = (r["base_url"].rstrip("/") + ("/v1/models" if spec["id"] in ("openai", "anthropic", "moonshot", "dashscope") else "/models")) if r["base_url"] else spec["list_url"]
+    headers = {"User-Agent": "rd-agent-studio"}
+    if spec["id"] == "anthropic":
+        headers.update({"x-api-key": r["api_key"], "anthropic-version": "2023-06-01"})
+    elif spec["id"] == "gemini":
+        url += ("&" if "?" in url else "?") + "key=" + r["api_key"] + "&pageSize=200"
+    else:
+        headers["Authorization"] = "Bearer " + r["api_key"]
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", "replace")[:200]
+        return {"ok": False, "error": f"HTTP {error.code}: {body}"}
+    except Exception as error:  # noqa: BLE001
+        return {"ok": False, "error": str(error)[:200]}
+    items = payload.get("data") or payload.get("models") or []
+    names = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if spec["id"] == "gemini":
+            methods = item.get("supportedGenerationMethods") or []
+            if methods and "generateContent" not in methods:
+                continue
+        name = str(item.get("id") or item.get("name") or "")
+        name = name.split("/", 1)[1] if name.startswith("models/") else name
+        if name and not _NOT_CHAT.search(name):
+            names.append(name)
+    names = sorted(dict.fromkeys(names), reverse=True)
+    return {"ok": True, "models": names, "source": url.split("?")[0]}

@@ -233,3 +233,6 @@ export const saveLlmSettings = (values: LlmForm) =>
 export const testLlmSettings = (values: LlmForm) =>
   fetch("/studio/llm/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
     .then(async (r) => (await r.json()) as { ok: boolean; reply?: string; error?: string; seconds?: number; model?: string });
+export const listLlmModels = (values: Pick<LlmForm, "provider" | "api_key" | "base_url">) =>
+  fetch("/studio/llm/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
+    .then(async (r) => (await r.json()) as { ok: boolean; models?: string[]; error?: string; source?: string });

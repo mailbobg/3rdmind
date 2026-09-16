@@ -18,7 +18,9 @@ export function LlmSettings({ onSaved }: { onSaved: () => void }) {
   const [form, setForm] = useState<LlmForm>({ provider: "", model: "" });
   const [customModel, setCustomModel] = useState(false);
   const [showKey, setShowKey] = useState(false);
-  const [busy, setBusy] = useState<"" | "test" | "save">("");
+  const [busy, setBusy] = useState<"" | "test" | "save" | "list">("");
+  // Model lists fetched from each provider's own /models endpoint this session, keyed by provider id.
+  const [remote, setRemote] = useState<Record<string, string[]>>({});
   const [message, setMessage] = useState<{ tone: "ok" | "bad" | "info"; text: string } | null>(null);
 
   const load = useCallback(async () => {
@@ -35,27 +37,47 @@ export function LlmSettings({ onSaved }: { onSaved: () => void }) {
   const current = status?.current;
   const providers = status?.providers ?? [];
   const spec = providers.find((p) => p.id === form.provider);
+  // The provider's live list when fetched, else the documented suggestions.
+  const models = (form.provider && remote[form.provider]) || spec?.models || [];
+  const live = !!(form.provider && remote[form.provider]);
 
   const openSheet = () => {
     if (current) {
       const provider = current.provider || providers[0]?.id || "";
-      const models = providers.find((p) => p.id === provider)?.models ?? [];
+      const known = remote[provider] || providers.find((p) => p.id === provider)?.models || [];
       setForm({ provider, model: current.model, api_key: "", base_url: current.base_url, max_retry: current.max_retry });
-      setCustomModel(!!current.model && !models.includes(current.model));
+      setCustomModel(!!current.model && !known.includes(current.model));
     }
     setMessage(null); setShowKey(false); setOpen(true);
   };
   const pickProvider = (id: string) => {
     const p = providers.find((x) => x.id === id);
-    const keepModel = p?.models.includes(form.model);
-    setForm({ ...form, provider: id, model: keepModel ? form.model : p?.models[0] ?? "", api_key: "", base_url: id === current?.provider ? current.base_url : "" });
-    setCustomModel(!!p && p.models.length === 0);
+    const known = remote[id] || p?.models || [];
+    const keepModel = known.includes(form.model);
+    setForm({ ...form, provider: id, model: keepModel ? form.model : known[0] ?? "", api_key: "", base_url: id === current?.provider ? current.base_url : "" });
+    setCustomModel(known.length === 0);
     setMessage(null);
   };
   const pickModel = (v: string) => {
     if (v === CUSTOM) { setCustomModel(true); setForm({ ...form, model: "" }); } else { setCustomModel(false); setForm({ ...form, model: v }); }
   };
   const storedHint = form.provider ? (form.provider === current?.provider ? current.key_hint : current?.saved_keys[form.provider] || "") : "";
+  const fetchModels = useCallback(async (provider: string, api_key: string | undefined, base_url: string | undefined, quiet: boolean) => {
+    setBusy("list");
+    try {
+      const r = await studio.listLlmModels({ provider, api_key, base_url });
+      if (r.ok && r.models) {
+        setRemote((m) => ({ ...m, [provider]: r.models! }));
+        if (!quiet) setMessage({ tone: "info", text: `已从 ${r.source} 拉到 ${r.models.length} 个模型` });
+      } else if (!quiet) setMessage({ tone: "bad", text: `拉取模型列表失败：${r.error}` });
+    } catch (e) { if (!quiet) setMessage({ tone: "bad", text: errorText(e) }); } finally { setBusy(""); }
+  }, []);
+  // Whenever the sheet shows a provider that has a usable key and no live list yet, fetch its list quietly.
+  useEffect(() => {
+    if (!open || !form.provider || remote[form.provider] || spec?.needs_base && !form.base_url?.trim()) return;
+    if (!storedHint && !form.api_key?.trim()) return;
+    fetchModels(form.provider, form.api_key, form.base_url, true);
+  }, [open, form.provider, storedHint]); // eslint-disable-line react-hooks/exhaustive-deps
   const keyPlaceholder = storedHint ? `${form.provider === current?.provider && current.key_from_env ? "沿用 .env 里的" : "已保存"} ${storedHint}，留空则沿用` : "粘贴 API Key";
   const canSubmit = !!form.provider && !!form.model.trim() && (!spec?.needs_base || !!form.base_url?.trim()) && (!!form.api_key?.trim() || !!storedHint);
 
@@ -75,6 +97,7 @@ export function LlmSettings({ onSaved }: { onSaved: () => void }) {
     } catch (e) { setMessage({ tone: "bad", text: errorText(e) }); } finally { setBusy(""); }
   };
 
+  useEffect(() => { if (live && models.includes(form.model)) setCustomModel(false); }, [live, models, form.model]);
   const headline = !current ? "" : !current.provider ? "未配置" : !current.has_key ? "缺 API Key" : current.model;
   const warn = !!current && (!current.provider || !current.has_key);
 
@@ -105,12 +128,12 @@ export function LlmSettings({ onSaved }: { onSaved: () => void }) {
                 <Field label="提供商">
                   <SelectInput value={form.provider} onChange={pickProvider} options={providers.map((p) => ({ value: p.id, label: p.label }))} placeholder="选择提供商" ariaLabel="提供商" />
                 </Field>
-                <Field label="模型" wide={customModel && !!spec && spec.models.length > 0}>
-                  {spec && spec.models.length > 0 && !customModel
-                    ? <SelectInput value={form.model} onChange={pickModel} options={[...spec.models.map((m) => ({ value: m, label: m })), { value: CUSTOM, label: "其他模型…" }]} placeholder="选择模型" ariaLabel="模型" />
+                <Field label={<>模型{live ? <span className="text-success"> · 实时列表</span> : models.length ? <span> · 文档默认</span> : null}</>} wide={customModel && models.length > 0}>
+                  {models.length > 0 && !customModel
+                    ? <SelectInput value={models.includes(form.model) ? form.model : ""} onChange={pickModel} options={[...models.map((m) => ({ value: m, label: m })), { value: CUSTOM, label: "其他模型…" }]} placeholder={form.model || "选择模型"} ariaLabel="模型" />
                     : <div className="flex items-center gap-2">
                         <TextInput className="flex-1" value={form.model} onChange={(v) => setForm({ ...form, model: v })} placeholder={spec?.id === "openai_compatible" ? "接口上的模型名，如 qwen-plus" : "模型名"} ariaLabel="模型名" />
-                        {spec && spec.models.length > 0 && <Btn kind="text" onClick={() => pickModel(spec.models[0])}>列表</Btn>}
+                        {models.length > 0 && <Btn kind="text" onClick={() => pickModel(models[0])}>列表</Btn>}
                       </div>}
                 </Field>
                 <Field label="API Key" wide hint={spec ? `保存为环境变量 ${spec.key_env}` : undefined}>
@@ -131,6 +154,7 @@ export function LlmSettings({ onSaved }: { onSaved: () => void }) {
               <div className="flex flex-wrap items-center gap-2">
                 <Btn kind="primary" disabled={!canSubmit || !!busy} onClick={save}>{busy === "save" ? "保存中…" : "保存"}</Btn>
                 <Btn disabled={!canSubmit || !!busy} onClick={test}>{busy === "test" ? "测试中…" : "测试连接"}</Btn>
+                <Btn kind="text" disabled={!form.provider || !!busy || (!storedHint && !form.api_key?.trim()) || (!!spec?.needs_base && !form.base_url?.trim())} onClick={() => fetchModels(form.provider, form.api_key, form.base_url, false)}>{busy === "list" ? "拉取中…" : live ? "重新拉取模型列表" : "拉取模型列表"}</Btn>
                 {spec?.site && <a className="mm-link ml-auto" href={spec.site} target="_blank" rel="noreferrer">去 {spec.label} 拿 Key ↗</a>}
               </div>
               <p className="m-0 border-t border-border pt-3 text-[11px] leading-relaxed text-muted">

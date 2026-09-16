@@ -1087,3 +1087,9 @@ def llm_save():
 def llm_test():
     result = studio_llm.test_connection(request.get_json() or {})
     return jsonify(result), (200 if result.get("ok") else 502)
+
+
+@studio.post("/llm/models")
+def llm_models():
+    result = studio_llm.list_models(request.get_json() or {})
+    return jsonify(result), (200 if result.get("ok") else 502)

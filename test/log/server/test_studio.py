@@ -1150,3 +1150,36 @@ def test_llm_settings_save_env_and_test(studio_client, tmp_path: Path, monkeypat
     assert result["ok"] and result["reply"] == "OK" and result["model"] == "openai/qwen-plus"
     assert calls[0]["api_key"] == "k1" and calls[0]["api_base"] == "https://x/v1"
     assert studio_client.post("/studio/llm/test", json={"provider": "openai", "model": "gpt-5"}).status_code == 502
+
+
+@pytest.mark.offline
+def test_llm_model_listing_filters_chat_models(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    from rdagent.log.server import studio_llm
+
+    monkeypatch.setattr(studio_llm, "_settings_path", tmp_path / "llm.json")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    seen = {}
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=20):
+        seen["url"] = req.full_url; seen["headers"] = dict(req.header_items())
+        if "googleapis" in req.full_url:
+            body = {"models": [{"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                               {"name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"]}]}
+        else:
+            body = {"data": [{"id": "gpt-5.6-sol"}, {"id": "text-embedding-3-small"}, {"id": "whisper-1"}, {"id": "gpt-6-astra"}]}
+        return FakeResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr(studio_llm.urllib.request, "urlopen", fake_urlopen)
+    assert "API Key" in studio_client.post("/studio/llm/models", json={"provider": "openai"}).get_json()["error"]
+    result = studio_client.post("/studio/llm/models", json={"provider": "openai", "api_key": "k"}).get_json()
+    assert result["ok"] and result["models"] == ["gpt-6-astra", "gpt-5.6-sol"]
+    assert seen["headers"]["Authorization"] == "Bearer k" and seen["url"] == "https://api.openai.com/v1/models"
+    result = studio_client.post("/studio/llm/models", json={"provider": "gemini", "api_key": "g"}).get_json()
+    assert result["models"] == ["gemini-3.8-flash"] and "key=g" in seen["url"] and "key" not in result["source"]
+    result = studio_client.post("/studio/llm/models", json={"provider": "openai_compatible", "api_key": "k", "base_url": "https://relay/v1/"}).get_json()
+    assert result["ok"] and seen["url"] == "https://relay/v1/models"
