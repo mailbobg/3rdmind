@@ -1,0 +1,4 @@
+node_modules
+
+# Static assets of the React Studio (the repo root ignores "public" for other reasons)
+!public
