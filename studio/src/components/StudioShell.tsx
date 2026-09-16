@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type React from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import * as studio from "../api/studio";
@@ -38,6 +39,30 @@ const MENU = [
 // server has nothing at its root, so in DEV the link goes straight to the log server.
 const PLAYGROUND_URL = import.meta.env.DEV ? "http://127.0.0.1:19899/#/Playground" : "/#/Playground";
 
+const SWITCH_CODES: Record<string, string> = { cn: "CN", us: "US" };
+
+/** The workspace switch at the top of the rail: a dark track with a sliding thumb, like a mode toggle. */
+function MarketSwitch({ region, onChange }: { region: string; onChange: (r: string) => void }) {
+  const index = Math.max(0, WORKSPACES.findIndex((w) => w.region === region));
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const next = (index + (e.key === "ArrowRight" ? 1 : WORKSPACES.length - 1)) % WORKSPACES.length;
+    onChange(WORKSPACES[next].region);
+  };
+  return (
+    <div role="tablist" aria-label="市场" className="mkt-switch mx-auto mb-4" style={{ "--mkt-n": WORKSPACES.length, "--mkt-i": index } as React.CSSProperties} onKeyDown={onKey}>
+      <span className="mkt-switch__thumb" aria-hidden />
+      {WORKSPACES.map((w) => (
+        <button key={w.region} type="button" role="tab" aria-selected={w.region === region} tabIndex={w.region === region ? 0 : -1} onClick={() => onChange(w.region)} className="mkt-switch__item">
+          <span className="mkt-switch__code">{SWITCH_CODES[w.region] || w.region.toUpperCase()}</span>
+          <span className="mkt-switch__label">{w.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /**
  * Root frame for one market workspace: the left rail plus the page outlet. Owns every cross-page store and hands
  * it down through context. The router mounts one shell per workspace (keyed by region), so switching markets
@@ -73,14 +98,7 @@ export function StudioShell({ region }: { region: string }) {
     <StudioContext.Provider value={value}>
       <div className="grid h-full grid-cols-[230px_minmax(0,1fr)] gap-2 bg-background p-2">
         <aside className="flex min-h-0 flex-col overflow-y-auto rounded-r-2xl rounded-l-none border border-border bg-surface px-3.5 py-5">
-          <div role="tablist" aria-label="市场" className="mx-auto mb-4 inline-flex rounded-full border border-border bg-background p-0.5">
-            {WORKSPACES.map((w) => (
-              <button key={w.region} type="button" role="tab" aria-selected={w.region === region} onClick={() => switchTo(w.region)}
-                className={`rounded-full px-3 py-1 text-[12px] leading-none transition-colors ${w.region === region ? "bg-neutral-900 text-white" : "text-muted hover:text-foreground"}`}>
-                {w.label}
-              </button>
-            ))}
-          </div>
+          <MarketSwitch region={region} onChange={switchTo} />
           <a href={workspace.href("/research")} className="mx-auto flex flex-col items-center gap-0.5 no-underline" aria-label="AI 研究">
             <img src={`${import.meta.env.BASE_URL}rd-agent-mark.png`} alt="" className="size-20" />
             <small className="text-[11px] text-muted">RD-Agent × Qlib</small>

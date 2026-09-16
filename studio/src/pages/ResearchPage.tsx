@@ -73,7 +73,7 @@ export function ResearchPage() {
     const t = setInterval(loadSummaries, 15000);
     return () => clearInterval(t);
   }, [anyLive, loadSummaries]);
-  const experiments = useMemo(() => mergeExperiments(workspace.region === "cn" ? trace.traceIds : summaries.map((s) => s.id), summaries), [trace.traceIds, summaries]);
+  const experiments = useMemo(() => mergeExperiments(trace.traceIds, summaries), [trace.traceIds, summaries]);
 
   useEffect(() => { if (search.get("new")) setTab("new"); }, [search]);
   // The form's explanation lives in the results column, so switching to the form brings that column up.

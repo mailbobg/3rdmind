@@ -134,7 +134,7 @@ export interface ExperimentSummary {
   updated: string | null; hypothesis: string | null; messages: number;
 }
 
-export const traces = () => api<string[]>("/traces");
+export const traces = () => api<string[]>(scoped("/traces"));
 /** Instrument universes the Qlib data ships with; `ready` = factor input data already built for research. */
 export interface Universe { market: string; label: string; group: string; region: string; benchmark: string; open_cost: number; close_cost: number; min_cost: number; limit_threshold: number | null; ready: boolean }
 export const UNIVERSE_LABELS: Record<string, string> = { csi300: "沪深300", csi500: "中证500", csi800: "中证800", csi1000: "中证1000", csiall: "中证全指", all: "全部 A 股", nasdaq100: "纳斯达克 100" };

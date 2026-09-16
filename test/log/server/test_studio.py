@@ -1305,3 +1305,28 @@ def test_lists_are_scoped_by_region(studio_client, tmp_path: Path, monkeypatch: 
     (us / "studio-universe.json").unlink()
     regions = {r["region"]: r for r in studio_client.get("/studio/regions").get_json()}
     assert regions["us"]["ready"] is False and regions["us"]["markets"] == []
+
+
+@pytest.mark.offline
+def test_trace_ids_are_scoped_by_region(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cn = tmp_path / "qlib_data" / "cn_data"
+    (cn / "instruments").mkdir(parents=True)
+    (cn / "instruments" / "csi300.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    us = tmp_path / "qlib_data" / "us_ndx"
+    (us / "instruments").mkdir(parents=True)
+    (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100"}}))
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(cn))
+    root = server.app.config["LOG_FOLDER_PATH"]
+    for name, market in (("us-run", "nasdaq100"), ("cn-run", "csi300"), ("old-run", None)):
+        folder = root / "Finance Data Building" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "debug_tpl").mkdir(exist_ok=True)
+        (folder / "debug_tpl" / "x.pkl").write_bytes(b"")  # what marks a folder as a trace
+        if market:
+            (folder / "studio-run.json").write_text(json.dumps({"market": market}))
+    every = set(studio_client.get("/traces").get_json())
+    assert {"Finance Data Building/us-run", "Finance Data Building/cn-run", "Finance Data Building/old-run"} <= every
+    assert studio_client.get("/traces?region=us").get_json() == ["Finance Data Building/us-run"]
+    cn_ids = set(studio_client.get("/traces?region=cn").get_json())
+    assert "Finance Data Building/us-run" not in cn_ids and {"Finance Data Building/cn-run", "Finance Data Building/old-run"} <= cn_ids

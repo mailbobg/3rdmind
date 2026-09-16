@@ -25,7 +25,7 @@ export function RunsPage() {
   useEffect(() => { loadSummaries(); }, [loadSummaries, trace.traceIds, trace.status]);
 
   const rows = useMemo<Row[]>(() => {
-    const research: Row[] = filter !== "backtest" ? mergeExperiments(workspace.region === "cn" ? trace.traceIds : summaries.map((s) => s.id), summaries).map((e) => ({
+    const research: Row[] = filter !== "backtest" ? mergeExperiments(trace.traceIds, summaries).map((e) => ({
       key: `r:${e.id}`, kind: "research", id: e.id, name: shortName(e.id), detail: e.hypothesis || e.scenario,
       result: e.rounds == null ? <span className="mm-dim">—</span> : `${e.rounds} 轮 · ${e.accepted} 接受`,
       status: e.id === trace.traceId && trace.events.length ? trace.status : EXPERIMENT_STATUS_LABELS[e.status], time: e.updated,

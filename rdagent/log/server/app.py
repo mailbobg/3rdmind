@@ -449,6 +449,18 @@ def list_traces():
     """Return trace ids that are available for history browsing."""
 
     trace_ids = _collect_existing_trace_ids(log_folder_path)
+    region = (request.args.get("region") or "").strip().lower()
+    if region:
+        # Scope to a market workspace by the studio-run.json each Studio run leaves beside its trace; runs
+        # without one (older or Playground-started) count as A-shares.
+        def trace_region(trace_id: str) -> str:
+            path = log_folder_path / trace_id / "studio-run.json"
+            try:
+                return studio_markets.region_of(json.loads(path.read_text()).get("market")) if path.is_file() else "cn"
+            except (OSError, ValueError):
+                return "cn"
+
+        trace_ids = [t for t in trace_ids if trace_region(t) == region]
     return jsonify(trace_ids), 200
 
 
