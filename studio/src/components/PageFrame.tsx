@@ -55,8 +55,11 @@ export function PageFrame(p: PageFrameProps) {
   const resultsWidth = Math.max(RESULTS_MIN, Math.min(panel.width, available - WORK_MIN));
   const columns = !layout.resultsOpen || stacked || expanded ? "minmax(0,1fr)" : `minmax(${WORK_MIN}px,1fr) ${resultsWidth}px`;
   const rows = stacked ? "minmax(0,1fr) minmax(0,1fr)" : undefined;
-  // One surface for both columns, split by a hairline the user can drag: the results column carries the
-  // line as its left (or, stacked, top) border and the handle sits on top of it.
+  // The work column fills the card; the results column is a raised panel floating over the card's right side
+  // (own border, shadow and inset), like a desktop app's preview pane. The work column still yields the space,
+  // so nothing hides behind the panel; the drag handle rides the panel's left edge. Stacked, the panel becomes
+  // a plain lower half again.
+  const floating = layout.resultsOpen && !stacked;
   return (
     <div ref={frame} className="grid min-h-0 min-w-0 overflow-hidden rounded-2xl border border-border bg-surface" style={{ gridTemplateColumns: columns, gridTemplateRows: rows }}>
       {!expanded && <main className="mm flex min-h-0 min-w-0 flex-col">
@@ -70,7 +73,7 @@ export function PageFrame(p: PageFrameProps) {
         <div className="mm-body">{p.children}</div>
       </main>}
       {layout.resultsOpen && (
-        <aside className={`relative flex min-h-0 min-w-0 flex-col bg-surface ${expanded ? "" : stacked ? "border-t" : "border-l"} border-border`}>
+        <aside className={`relative flex min-h-0 min-w-0 flex-col bg-surface ${floating ? "float-panel" : "border-t border-border"}`}>
           {!stacked && !expanded && (
             <div role="separator" aria-orientation="vertical" aria-label="调整结果栏宽度" onPointerDown={panel.onPointerDown}
               className="absolute -left-1.5 top-0 bottom-0 z-10 w-3 cursor-col-resize touch-none hover:bg-accent/15 active:bg-accent/25" />
