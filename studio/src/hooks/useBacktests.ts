@@ -3,7 +3,9 @@ import * as studio from "../api/studio";
 import type { BacktestRequest, BacktestResult, BacktestSummary } from "../api/studio";
 import { validateRequest } from "./validateRequest";
 
-const isActive = (status?: string) => status === "queued" || status === "running";
+const live = (status?: string) => status === "queued" || status === "running";
+/** Poll while the run itself or its take-apart diagnosis is still going. */
+const isActive = (result: BacktestResult | null) => !!result && (live(result.status) || live(result.breakdown?.status));
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Backtest job list, the selected job's result, and 3s polling while it is queued/running. */
@@ -37,9 +39,9 @@ export function useBacktests() {
   // Polling stops on the first failure (a single job's poll is not worth blind retries) and never touches `busy`.
   const schedule = useCallback(() => {
     clearTimeout(timer.current);
-    if (disposed.current || !isActive(resultRef.current?.status)) return;
+    if (disposed.current || !isActive(resultRef.current)) return;
     timer.current = setTimeout(async () => {
-      try { await fetchSelected(); if (!isActive(resultRef.current?.status)) setJobs(await studio.backtests()); }
+      try { await fetchSelected(); if (!isActive(resultRef.current)) setJobs(await studio.backtests()); }
       catch (e) { setError(errorText(e)); return; }
       schedule();
     }, 3000);
@@ -71,6 +73,17 @@ export function useBacktests() {
     return accepted;
   }, [guarded, schedule]);
 
-  return { jobs, selectedId, result, error, setError, busy, load, select, run };
+  /** Start the take-apart diagnosis of the selected job and poll until it finishes. */
+  const diagnose = useCallback(async () => {
+    const id = selectedRef.current;
+    if (!id) return;
+    await guarded(async () => {
+      await studio.diagnoseBacktest(id);
+      await fetchSelected();
+      schedule();
+    });
+  }, [guarded, fetchSelected, schedule]);
+
+  return { jobs, selectedId, result, error, setError, busy, load, select, run, diagnose };
 }
 export type BacktestStore = ReturnType<typeof useBacktests>;

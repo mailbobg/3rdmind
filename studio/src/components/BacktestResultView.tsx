@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 import { Alert, Chip, Disclosure, Input, ProgressBar } from "@heroui/react";
-import type { BacktestResult, InstrumentSummary, Trade } from "../api/studio";
+import type { BacktestResult, Breakdown, InstrumentSummary, SignalDiagnosis, Trade } from "../api/studio";
+import { Btn } from "./minimal";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { Section } from "./Section";
-import { CodeView, DataTable, EquityChart, Hint, MetricGrid, Mono, Signed, StatusChip, money, percent } from "./widgets";
+import { CodeView, CorrelationMatrix, DataTable, EquityChart, Hint, MetricGrid, Mono, Signed, StatusChip, money, percent } from "./widgets";
 
-export function BacktestResultView({ result }: { result: BacktestResult }) {
+/** `onDiagnose` starts the take-apart diagnosis (the owner refetches and polls); absent, the button is hidden. */
+export function BacktestResultView({ result, onDiagnose }: { result: BacktestResult; onDiagnose?: () => void }) {
   const legacy = (result.config.loop_id === undefined || result.config.loop_id === null)
     && !result.config.factors.some((f) => f.loop_id !== undefined && f.loop_id !== null);
   const m = result.metrics;
@@ -63,6 +65,7 @@ export function BacktestResultView({ result }: { result: BacktestResult }) {
           </>
         )}
       </Section>
+      {m && result.diagnosis && <PortfolioDiagnosis result={result} onDiagnose={onDiagnose} />}
       {result.model && (
         <Section title="LightGBM 训练" note={`${result.model.train_rows.toLocaleString()} 训练样本 · ${result.model.valid_rows.toLocaleString()} 验证样本`}>
           <MetricGrid columns={2} items={[{ label: "最佳迭代", value: String(result.model.best_iteration) }, { label: "验证 L2", value: result.model.valid_l2.toFixed(4) }]} />
@@ -153,5 +156,88 @@ function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instr
         </Section>
       )}
     </>
+  );
+}
+
+const fmtPct = (v?: number | null) => (typeof v === "number" ? percent(v, 1) : "—");
+const fmtIc = (v?: number | null) => (typeof v === "number" ? (v > 0 ? "+" : "") + v.toFixed(4) : "—");
+
+/**
+ * Is this combination sound? Read on every multi-signal run from the per-signal IC and the correlation on the
+ * window; optionally deepened by the take-apart backtests (each signal alone, portfolio without each signal).
+ */
+function PortfolioDiagnosis({ result, onDiagnose }: { result: BacktestResult; onDiagnose?: () => void }) {
+  const d = result.diagnosis!;
+  const b: Breakdown | null | undefined = result.breakdown;
+  const done = b?.status === "completed" && b.base && b.alone && b.without;
+  const base = result.metrics!.total_return;
+
+  const verdict = useMemo(() => {
+    const lines: { tone: "bad" | "warn" | "ok"; text: string }[] = [];
+    for (const sig of d.signals) {
+      const ric = sig.rank_ic;
+      if (typeof ric !== "number") continue;
+      if (Math.abs(ric) < 0.005) lines.push({ tone: "warn", text: `${sig.name} 在这段区间几乎没有预测力（Rank IC ${fmtIc(ric)}），留在组合里只是稀释别的信号。` });
+      else if (Math.sign(ric) !== Math.sign(sig.weight)) lines.push({ tone: "bad", text: `${sig.name} 的 Rank IC ${fmtIc(ric)} 与权重 ${sig.weight} 方向相反，正在拖累组合：把权重改成 ${-sig.weight} 或移出。` });
+    }
+    const { names, matrix } = d.correlation;
+    matrix.forEach((row, i) => row.forEach((v, j) => { if (i < j && Math.abs(v) >= 0.7) lines.push({ tone: "warn", text: `${names[i]} 与 ${names[j]} 在这段区间相关 ${v.toFixed(2)}，基本是同一个信号，同时入选只是重复计权。` }); }));
+    if (done) {
+      const alone = Object.entries(b!.alone!).filter(([, v]) => typeof v.total_return === "number").sort((x, y) => y[1].total_return! - x[1].total_return!);
+      if (alone.length) {
+        const [bestName, best] = alone[0];
+        lines.push(base >= best.total_return!
+          ? { tone: "ok", text: `组合 ${fmtPct(base)} 优于最好的单信号 ${bestName}（${fmtPct(best.total_return)}），组合本身有价值。` }
+          : { tone: "bad", text: `最好的单信号 ${bestName} 单独就有 ${fmtPct(best.total_return)}，组合只有 ${fmtPct(base)}：其他信号在拖累它。` });
+      }
+      const drops = Object.entries(b!.without!).filter(([, v]) => typeof v.total_return === "number").map(([name, v]) => ({ name, gain: v.total_return! - base })).sort((x, y) => y.gain - x.gain);
+      if (drops.length && drops[0].gain > 0.005) lines.push({ tone: "bad", text: `去掉 ${drops[0].name} 后组合收益从 ${fmtPct(base)} 变为 ${fmtPct(base + drops[0].gain)}，它是首先应该移出的信号。` });
+      else if (drops.length) lines.push({ tone: "ok", text: `去掉任何一个信号都不会让组合更好，每个信号都在贡献。` });
+    }
+    if (!lines.length) lines.push({ tone: "ok", text: "每个信号的方向都和权重一致，两两相关都在 0.7 以下；要判断谁在贡献，点“逐个拆开回测”。" });
+    return lines;
+  }, [d, b, done, base]);
+
+  const columns: [string, ("start" | "end")?][] = [["信号"], ["权重", "end"], ["IC", "end"], ["Rank IC", "end"], ["与组合评分相关", "end"]];
+  if (done) columns.push(["单独回测", "end"], ["去掉它后", "end"], ["贡献", "end"]);
+  const rows = d.signals.map((sig: SignalDiagnosis) => {
+    const alone = done ? b!.alone![sig.name] : undefined;
+    const without = done ? b!.without![sig.name] : undefined;
+    const contribution = without && typeof without.total_return === "number" ? base - without.total_return : null;
+    const cells = [
+      <span key="n" className="flex items-center gap-1"><Mono>{sig.name}</Mono>{sig.kind === "prediction" && <Chip size="sm" variant="soft">模型</Chip>}</span>,
+      <span key="w" className="tabular-nums">{sig.weight}</span>,
+      <Signed key="ic" value={sig.ic} />,
+      <Signed key="ric" value={sig.rank_ic} />,
+      <span key="c" className="tabular-nums">{typeof sig.corr_with_score === "number" ? sig.corr_with_score.toFixed(2) : "—"}</span>,
+    ];
+    if (done) cells.push(
+      alone?.error ? <span key="a" className="text-[11px] text-muted" title={alone.error}>无法单独回测</span> : <Signed key="a" value={alone?.total_return} format={(v) => percent(v, 1)} />,
+      without?.error ? <span key="wo" className="text-[11px] text-muted" title={without.error}>—</span> : <Signed key="wo" value={without?.total_return} format={(v) => percent(v, 1)} />,
+      <Signed key="g" value={contribution} format={(v) => percent(v, 1)} />,
+    );
+    return { key: sig.name, cells };
+  });
+
+  const running = b?.status === "queued" || b?.status === "running";
+  return (
+    <Section title="组合诊断" note={`${d.signals.length} 个信号 · 回测区间 ${d.correlation.days} 个交易日`}>
+      <div className="flex flex-col gap-1">
+        {verdict.map((line) => (
+          <Alert key={line.text} status={line.tone === "bad" ? "danger" : line.tone === "warn" ? "warning" : "success"} className="py-1.5">
+            <Alert.Indicator /><Alert.Content><Alert.Title className="text-xs font-normal">{line.text}</Alert.Title></Alert.Content>
+          </Alert>
+        ))}
+      </div>
+      <DataTable label="组合诊断" head={columns} rows={rows} />
+      <Hint>IC / Rank IC 按回测区间内每日截面计算；“与组合评分相关”是该信号排名与最终评分的相关，越低说明它在组合里的话语权越小。{done ? "“贡献”= 组合收益 − 去掉它后的组合收益，正数表示它在帮忙。" : ""}</Hint>
+      {d.correlation.names.length > 1 && <CorrelationMatrix data={d.correlation} />}
+      <div className="flex flex-wrap items-center gap-2">
+        {!done && onDiagnose && <Btn disabled={running} onClick={onDiagnose}>{running ? `拆开回测中${b?.done != null && b?.total ? ` ${b.done}/${b.total}` : ""}…` : "逐个拆开回测"}</Btn>}
+        {b?.status === "failed" && <span className="text-[11px] text-danger">拆开回测失败：{b.error}</span>}
+        {!done && !running && <Hint>每个信号单独跑一遍，再每次去掉一个跑一遍，同样的区间和参数；{2 * d.signals.length + 1} 次回测，约 {Math.ceil((2 * d.signals.length + 1) * 0.5)} 分钟。</Hint>}
+        <a href="#/factors" className="text-[11px] text-accent underline">回因子库换信号 →</a>
+      </div>
+    </Section>
   );
 }

@@ -319,16 +319,18 @@ def instrument_summary(trades, holdings):
     return result
 
 
-def run(config):
+def prepare(config):
+    """Everything up to the score: Qlib init, calendar, ranked features, label, universe.
+
+    Returns a dict shared by the backtest and the diagnosis so both look at exactly the same data.
+    """
     # Use the user's adjacent Qlib checkout, not an unrelated installed checkout.
     checkout = Path(__file__).resolve().parents[4] / "qlib"
     if checkout.is_dir():
         sys.path.insert(0, str(checkout))
-    import numpy as np
     import pandas as pd
     import qlib
     from qlib.data import D
-    from qlib.backtest import backtest
 
     provider = Path(config["provider_uri"]).expanduser().resolve()
     if not (provider / "calendars" / "day.txt").is_file():
@@ -361,21 +363,36 @@ def run(config):
                            start_time=feature_start, end_time=config["end"], freq="day").iloc[:, 0]
     if label_raw.index.names[0] == "instrument":  # Qlib returns (instrument, datetime); signals are (datetime, instrument)
         label_raw = label_raw.swaplevel(0, 1)
-    label_raw = label_raw.sort_index()
-    label = cross_sectional_zscore(label_raw)
-    model_report = None
+    label = cross_sectional_zscore(label_raw.sort_index())
+    return {"calendar": calendar, "prior_day": prior[-1], "end_day": trading_day_on_or_before(calendar, config["end"]),
+            "factors": factors, "model": model, "ranks": ranks, "label": label}
+
+
+def combine(prepared, columns, weights, model, log=print):
+    """Score a subset of the ranked signals: weighted rank blend, or a LightGBM fit on just those columns.
+
+    Returns ``(score restricted to the backtest window, model report or None)``.
+    """
+    import numpy as np
+
+    ranks = prepared["ranks"][list(columns)]
     if model["method"] == "lgbm":
-        score, model_report = train_lgbm_signal(ranks, label, model)
-        score = score[score.index.get_level_values("datetime") >= prior[-1]]
+        score, report = train_lgbm_signal(ranks, prepared["label"], model, log=log)
+        score = score[score.index.get_level_values("datetime") >= prepared["prior_day"]]
     else:
-        weights = np.array([float(f["weight"]) for f in factors])
-        score = ranks.mul(weights, axis=1).sum(axis=1) / abs(weights).sum()
+        w = np.array([float(x) for x in weights])
+        score, report = ranks.mul(w, axis=1).sum(axis=1) / abs(w).sum(), None
     score = score.dropna().sort_index()
     if score.empty:
         raise ValueError("Selected factors have no complete observations")
-    test_ic, test_rank_ic = information_coefficient(score, label)
-    end_day = trading_day_on_or_before(calendar, config["end"])
-    require_signal_coverage(score.index.get_level_values("datetime"), prior[-1], end_day)
+    require_signal_coverage(score.index.get_level_values("datetime"), prepared["prior_day"], prepared["end_day"])
+    return score, report
+
+
+def backtest_score(score, config):
+    """Run Qlib's TopkDropout backtest on ``score``; returns the daily report and Qlib's positions/indicators."""
+    from qlib.backtest import backtest
+
     strategy = {"class": "TopkDropoutStrategy", "module_path": "qlib.contrib.strategy",
                 "kwargs": {"signal": score, "topk": config["topk"], "n_drop": config["n_drop"]}}
     portfolios, indicators = backtest(
@@ -388,52 +405,135 @@ def run(config):
     )
     report, positions = portfolios["1day"]
     _, indicator = indicators["1day"]
-    trades = trades_from_indicator(getattr(indicator, "order_indicator_his", {}))
-    last_day = max(positions) if positions else None
-    holdings = holdings_from_position(positions[last_day]) if last_day is not None else {"positions": [], "cash": None, "total": None}
-    instruments = instrument_summary(trades, holdings)
     if report.empty:
         raise ValueError("Backtest returned no daily report")
+    return report, positions, indicator
+
+
+def summarize_report(report):
+    """Net-of-cost metrics and the daily rows the UI charts, from Qlib's daily report."""
+    import numpy as np
+
     net = report["return"] - report["cost"]
     equity = (1 + net).cumprod()
     benchmark = (1 + report["bench"]).cumprod()
     peak = equity.cummax().clip(lower=1)
     drawdown = equity / peak - 1
     vol = net.std(ddof=1)
-    sharpe = float(net.mean() / vol * np.sqrt(252)) if vol > 0 else None
-    rows = []
-    for day, row in report.iterrows():
-        rows.append({"date": str(day.date()), "equity": float(equity.loc[day]),
-                     "benchmark": float(benchmark.loc[day]), "drawdown": float(drawdown.loc[day]),
-                     "return": float(net.loc[day]), "cost": float(row["cost"]),
-                     "turnover": float(row["turnover"]), "account": float(row["account"])})
-    def clean(value):
-        if isinstance(value, dict):
-            return {k: clean(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [clean(v) for v in value]
-        if isinstance(value, float) and not math.isfinite(value):
-            return None
-        return value
-    return clean({"metrics": {"total_return": float(equity.iloc[-1] - 1),
-                    "annualized_return": float(equity.iloc[-1] ** (252 / len(net)) - 1),
-                    "sharpe": sharpe, "max_drawdown": float(drawdown.min()),
-                    "benchmark_return": float(benchmark.iloc[-1] - 1), "days": len(net),
-                    "signal_ic": test_ic, "signal_rank_ic": test_rank_ic},
+    metrics = {"total_return": float(equity.iloc[-1] - 1),
+               "annualized_return": float(equity.iloc[-1] ** (252 / len(net)) - 1),
+               "sharpe": float(net.mean() / vol * np.sqrt(252)) if vol > 0 else None,
+               "max_drawdown": float(drawdown.min()),
+               "benchmark_return": float(benchmark.iloc[-1] - 1), "days": len(net)}
+    rows = [{"date": str(day.date()), "equity": float(equity.loc[day]), "benchmark": float(benchmark.loc[day]),
+             "drawdown": float(drawdown.loc[day]), "return": float(net.loc[day]), "cost": float(row["cost"]),
+             "turnover": float(row["turnover"]), "account": float(row["account"])} for day, row in report.iterrows()]
+    return metrics, rows
+
+
+def clean(value):
+    """JSON-safe copy: NaN/inf become null."""
+    if isinstance(value, dict):
+        return {k: clean(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [clean(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def signal_diagnosis(prepared, score):
+    """The cheap part of the portfolio diagnosis, computed on every run.
+
+    Per signal: its own IC / Rank IC over the backtest window and its correlation with the final score;
+    plus the pairwise correlation of the ranked signals over the window. Together they say which signals
+    pull their weight, which point the wrong way, and which pairs are near duplicates.
+    """
+    window = prepared["ranks"][prepared["ranks"].index.get_level_values("datetime") >= prepared["prior_day"]]
+    label = prepared["label"]
+    signals = []
+    for factor in prepared["factors"]:
+        column = window[factor["name"]]
+        ic, rank_ic = information_coefficient(column, label)
+        joined = column.rename("s").to_frame().join(score.rename("score"), how="inner").dropna()
+        corr = float(joined["s"].corr(joined["score"])) if len(joined) > 2 else None
+        signals.append({"name": factor["name"], "kind": factor.get("kind", "factor"), "weight": float(factor["weight"]),
+                        "ic": ic, "rank_ic": rank_ic, "corr_with_score": corr})
+    names = [f["name"] for f in prepared["factors"]]
+    matrix = window[names].corr().values.tolist() if len(names) > 1 else [[1.0]]
+    return {"signals": signals, "correlation": {"names": names, "matrix": matrix, "days": int(window.index.get_level_values("datetime").nunique())}}
+
+
+def run(config):
+    prepared = prepare(config)
+    factors, model = prepared["factors"], prepared["model"]
+    score, model_report = combine(prepared, [f["name"] for f in factors], [f["weight"] for f in factors], model)
+    test_ic, test_rank_ic = information_coefficient(score, prepared["label"])
+    report, positions, indicator = backtest_score(score, config)
+    trades = trades_from_indicator(getattr(indicator, "order_indicator_his", {}))
+    last_day = max(positions) if positions else None
+    holdings = holdings_from_position(positions[last_day]) if last_day is not None else {"positions": [], "cash": None, "total": None}
+    instruments = instrument_summary(trades, holdings)
+    metrics, rows = summarize_report(report)
+    return clean({"metrics": {**metrics, "signal_ic": test_ic, "signal_rank_ic": test_rank_ic},
                   "model": model_report,
                   "rows": rows, "config": config,
                   "trades": trades, "holdings": holdings, "instruments": instruments,
+                  "diagnosis": signal_diagnosis(prepared, score) if len(factors) > 1 else None,
                   "method": "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})
+
+
+def diagnose(config, progress=lambda *_: None):
+    """Take the portfolio apart: every signal alone, and the portfolio without each signal, on the same window.
+
+    Each variant is scored the same way the portfolio was (rank blend with the configured weights, or a
+    LightGBM refit on the remaining columns) and put through the same backtest. ``progress`` is called
+    with (done, total) after each variant.
+    """
+    prepared = prepare(config)
+    factors, model = prepared["factors"], prepared["model"]
+    if len(factors) < 2:
+        raise ValueError("Diagnosis needs at least two signals")
+    names = [f["name"] for f in factors]
+    weights = {f["name"]: f["weight"] for f in factors}
+
+    def variant(columns):
+        score, _ = combine(prepared, columns, [weights[c] for c in columns], model, log=lambda *_: None)
+        ic, rank_ic = information_coefficient(score, prepared["label"])
+        metrics, _ = summarize_report(backtest_score(score, config)[0])
+        return {**metrics, "signal_ic": ic, "signal_rank_ic": rank_ic}
+
+    total, done = 2 * len(names) + 1, 0
+    base = variant(names); done += 1; progress(done, total)
+    alone, without = {}, {}
+    for name in names:
+        try:
+            alone[name] = variant([name])
+        except ValueError as error:
+            alone[name] = {"error": str(error)}
+        done += 1; progress(done, total)
+    for name in names:
+        try:
+            without[name] = variant([n for n in names if n != name])
+        except ValueError as error:
+            without[name] = {"error": str(error)}
+        done += 1; progress(done, total)
+    return clean({"base": base, "alone": alone, "without": without, "names": names, "method": model["method"]})
 
 
 if __name__ == "__main__":
     folder = Path(sys.argv[1])
+    diagnosing = "--diagnose" in sys.argv[2:]
+    target = folder / ("diagnosis.json" if diagnosing else "result.json")
     try:
         config = validate_config(json.loads((folder / "config.json").read_text()))
-        write_json(folder / "result.json", {"status": "running"})
-        output = run(config)
-        write_json(folder / "result.json", {"status": "completed", **output})
+        write_json(target, {"status": "running"})
+        if diagnosing:
+            output = diagnose(config, progress=lambda done, total: write_json(target, {"status": "running", "done": done, "total": total}))
+        else:
+            output = run(config)
+        write_json(target, {"status": "completed", **output})
     except Exception as error:
         traceback.print_exc()
-        write_json(folder / "result.json", {"status": "failed", "error": str(error)})
+        write_json(target, {"status": "failed", "error": str(error)})
         sys.exit(1)

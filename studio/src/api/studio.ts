@@ -24,7 +24,12 @@ export interface LibraryFactor extends Record<string, unknown> {
   description: string | null; formulation: string | null; variables: Record<string, string> | null;
   hypothesis: string | null; decision: boolean | null; reason: string | null;
   metrics: Record<string, number>; code: string | null; analysis: FactorAnalysis | null;
+  /** Set once the factor was recomputed on the latest data; the Studio then reads that copy instead of the workspace. */
+  refreshed: RefreshMeta | null;
+  /** Date span of the signal the Studio reads: the recomputed copy's, else the cached analysis's. */
+  coverage: { start: string; end: string } | null;
 }
+export interface RefreshMeta { name: string; start: string; end: string; rows: number; computed_at: string; data: { start: string; end: string; rows: number } }
 export interface FactorRef { trace: string; loop_id: number; name: string }
 export interface CorrelationMatrix { names: string[]; matrix: number[][]; days: number }
 export interface LgbmParams {
@@ -53,8 +58,21 @@ export interface Holding extends Record<string, unknown> { instrument: string; a
 export interface InstrumentSummary extends Record<string, unknown> {
   instrument: string; trades: number; buy_value: number; sell_value: number; cost: number; holding_value: number; pnl: number; held: boolean;
 }
+/** Per-signal read-out computed on every multi-signal run: IC on the window and agreement with the final score. */
+export interface SignalDiagnosis { name: string; kind: SignalKind; weight: number; ic: number | null; rank_ic: number | null; corr_with_score: number | null }
+export interface VariantMetrics {
+  total_return?: number; annualized_return?: number; sharpe?: number | null; max_drawdown?: number; benchmark_return?: number; days?: number;
+  signal_ic?: number | null; signal_rank_ic?: number | null; error?: string;
+}
+/** The take-apart diagnosis: each signal alone and the portfolio without it, on the same window. */
+export interface Breakdown {
+  status: "queued" | "running" | "completed" | "failed"; done?: number; total?: number; error?: string;
+  names?: string[]; method?: string; base?: VariantMetrics; alone?: Record<string, VariantMetrics>; without?: Record<string, VariantMetrics>;
+}
 export interface BacktestResult extends BacktestSummary {
   error?: string; log?: string; method?: string; rows?: BacktestRow[];
+  diagnosis?: { signals: SignalDiagnosis[]; correlation: CorrelationMatrix } | null;
+  breakdown?: Breakdown | null;
   trades?: Trade[]; holdings?: { positions: Holding[]; cash: number | null; total: number | null }; instruments?: InstrumentSummary[];
   metrics?: {
     total_return: number; annualized_return: number; sharpe: number | null;
@@ -110,6 +128,8 @@ export const experiments = () => api<ExperimentSummary[]>("/studio/experiments")
 export const traceSnapshot = (id: string) => api<TraceEvent[]>("/trace", { id, snapshot: true });
 export const startResearch = (form: FormData) => api<{ id: string }>("/upload", form);
 export const stopResearch = (id: string) => api<{ status: string }>("/control", { id, action: "stop" });
+/** Continue a finished loop experiment for `loops` more rounds, appending to the same trace. */
+export const resumeResearch = (id: string, loops: number) => api<{ id: string; loops: number; loop_n: number }>("/resume", { id, loops });
 export const submitInteraction = (id: string, payload: unknown) =>
   api<{ status: string }>("/user_interaction/submit", { id, payload });
 export const stdoutUrl = (id: string) => `/stdout?${new URLSearchParams({ id })}`;
@@ -125,8 +145,10 @@ export const rounds = (trace: string) => api<Round[]>(`/studio/rounds?${new URLS
 export interface Coverage { start: string; end: string }
 export const predictionCoverage = (trace: string, loop_id: number) =>
   api<Coverage & { days: number; rows: number }>(`/studio/predictions/coverage?${new URLSearchParams({ trace, loop_id: String(loop_id) })}`);
+export const refreshFactor = (ref: FactorRef) => api<RefreshMeta>("/studio/factors/refresh", { trace: ref.trace, loop_id: ref.loop_id, name: ref.name });
 export const factorCoverage = (ref: FactorRef) =>
   api<Coverage & { days: number; rows: number }>(`/studio/factors/coverage?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name })}`);
 export const backtests = () => api<BacktestSummary[]>("/studio/backtests");
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);
 export const runBacktest = (config: BacktestRequest) => api<{ id: string }>("/studio/backtests", config);
+export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});

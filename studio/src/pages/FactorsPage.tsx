@@ -13,7 +13,7 @@ import { CodeView, CorrelationMatrix, DataTable, Formula, Hint, IcBars, MetricGr
 const GUIDE = "① 单独有没有用：看 IC / Rank IC 的符号和 ICIR（均值÷波动）；|IC|<0.01 且 ICIR≈0 基本是噪声，IC 为负的回测时权重设 −1 反向。② 放一起合不合适：篮内两两相关 |ρ|<0.5 才互补，高相关只是重复计权。③ 覆盖区间要包住回测期。";
 
 export function FactorsPage() {
-  const { basket, layout } = useStudio();
+  const { basket, layout, env } = useStudio();
   const navigate = useNavigate();
   const [all, setAll] = useState<LibraryFactor[]>([]);
   const [query, setQuery] = useState("");
@@ -52,6 +52,20 @@ export function FactorsPage() {
       setAll((list) => list.map((item) => (key(item) === key(f) ? { ...item, analysis } : item)));
     } catch (e) { setError(`${f.name}：${errorText(e)}`); } finally { setBusyKey(""); }
   }, []);
+  // Recompute a factor on the latest Qlib data ("重算到最新"): its coverage then reaches the data's last day and
+  // the cached analysis is dropped, so it is recomputed next. Sequential, one Qlib subprocess at a time.
+  const [refreshingKey, setRefreshingKey] = useState("");
+  const refresh = useCallback(async (f: LibraryFactor, reanalyze = true) => {
+    setRefreshingKey(key(f));
+    try {
+      const meta = await studio.refreshFactor(f);
+      setAll((list) => list.map((item) => (key(item) === key(f) ? { ...item, refreshed: meta, coverage: { start: meta.start, end: meta.end }, analysis: null } : item)));
+      if (reanalyze) await analyze(f);
+      return true;
+    } catch (e) { setError(`${f.name} 重算失败：${errorText(e)}`); return false; } finally { setRefreshingKey(""); }
+  }, [analyze]);
+  const refreshMany = useCallback(async (items: LibraryFactor[]) => { for (const f of items) { if (!(await refresh(f, false))) break; } }, [refresh]);
+  const coverageOf = (f: LibraryFactor) => f.coverage || f.analysis?.coverage || null;
   const analyzeAll = useCallback(async () => {
     // Sequential on purpose: each analysis is a Qlib subprocess; parallel runs would fight for CPU and memory.
     setAnalyzing(true); setAnalyzed(0);
@@ -79,7 +93,7 @@ export function FactorsPage() {
   }, [correlation]);
   const maxCorr = strongest ? Math.abs(strongest.value) : 0;
   const basketCoverage = useMemo(() => {
-    const spans = basket.items.map((f) => library.get(key(f))?.analysis?.coverage).filter((c): c is { start: string; end: string } => !!c);
+    const spans = basket.items.map((f) => { const item = library.get(key(f)); return item ? coverageOf(item) : null; }).filter((c): c is { start: string; end: string } => !!c);
     if (!spans.length) return null;
     return { start: spans.reduce((a, c) => (c.start > a ? c.start : a), spans[0].start), end: spans.reduce((a, c) => (c.end < a ? c.end : a), spans[0].end), missing: basket.items.length - spans.length };
   }, [basket.items, library]);
@@ -100,7 +114,11 @@ export function FactorsPage() {
       resultsTitle={<TextTabs label="右栏视图" value={view} onChange={(v) => setView(v as "factor" | "basket")} items={[{ key: "factor", label: selected ? selected.name : "因子详情" }, { key: "basket", label: `组合篮 ${basket.items.length}` }]} />}
       resultsActions={view === "factor"
         ? (selected ? <Btn kind={basket.has(selected) ? undefined : "primary"} onClick={() => check(selected)}>{basket.has(selected) ? "移出组合" : "加入组合"}</Btn> : undefined)
-        : (basket.items.length ? <><Btn kind="text" onClick={basket.clear}>清空</Btn><Btn kind="primary" onClick={() => navigate("/backtest")}>去组合回测 →</Btn></> : undefined)}
+        : (basket.items.length ? <>
+            <Btn kind="text" onClick={basket.clear}>清空</Btn>
+            <Btn disabled={!!refreshingKey} onClick={() => refreshMany(basket.items.map((f) => library.get(key(f))).filter((f): f is LibraryFactor => !!f))}>{refreshingKey ? "重算中…" : "重算到最新"}</Btn>
+            <Btn kind="primary" onClick={() => navigate("/backtest")}>去组合回测 →</Btn>
+          </> : undefined)}
       results={view === "factor" ? (
         selected ? (
           <div className="flex flex-col gap-3">
@@ -114,6 +132,14 @@ export function FactorsPage() {
             <Section title="为什么提出" note={selected.decision === true ? <Chip size="sm" variant="soft" color="success">Agent 接受本轮</Chip> : selected.decision === false ? <Chip size="sm" variant="soft" color="danger">Agent 拒绝本轮</Chip> : undefined}>
               {selected.hypothesis ? <p className="m-0 text-xs">{selected.hypothesis}</p> : <Hint>这一轮没有记录假设文本。</Hint>}
               {selected.reason && <Hint>Agent 评价：{selected.reason}</Hint>}
+            </Section>
+            <Section title="信号覆盖" note={selected.refreshed ? `已重算 · ${selected.refreshed.computed_at.slice(0, 16).replace("T", " ")} UTC` : "来自研究实验的原始数据"}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs tabular-nums">{coverageOf(selected) ? `${coverageOf(selected)!.start} → ${coverageOf(selected)!.end}` : "未知（先计算指标）"}</span>
+                {env?.end && coverageOf(selected) && coverageOf(selected)!.end < env.end && <span className="text-[11px] text-muted">行情数据到 {env.end}</span>}
+                <Btn disabled={refreshingKey === key(selected)} onClick={() => refresh(selected)}>{refreshingKey === key(selected) ? "重算中…" : "重算到最新"}</Btn>
+              </div>
+              <Hint>用这个因子的 factor.py 在最新的沪深300 行情上重新计算一遍，让信号覆盖到行情数据的最后一天。重算后组合回测和单因子分析都改用新结果；原实验的产物不动。</Hint>
             </Section>
             <Section title="单因子分析" note="沪深300 · 次日收益">
               {selected.analysis ? (
@@ -144,7 +170,9 @@ export function FactorsPage() {
             <Section title="篮内信号" note={basketCoverage ? `回测可用区间 ${basketCoverage.start} → ${basketCoverage.end}${basketCoverage.missing ? `（${basketCoverage.missing} 个未分析，未计入）` : ""}` : "覆盖区间未知：先在中间栏计算指标"}>
               <DataTable label="篮内信号" head={[["信号"], ["来源"], ["IC", "end"], ["Rank IC", "end"], ["覆盖"], [""]]}
                 rows={basket.items.map((f) => {
-                  const a = library.get(key(f))?.analysis;
+                  const item = library.get(key(f));
+                  const a = item?.analysis;
+                  const cov = item ? coverageOf(item) : null;
                   return {
                     key: key(f),
                     cells: [
@@ -152,7 +180,7 @@ export function FactorsPage() {
                       <span key="s" className="text-[11px] text-muted">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>,
                       <Signed key="ic" value={a?.ic.mean} />,
                       <Signed key="ric" value={a?.rank_ic.mean} />,
-                      <span key="c" className="whitespace-nowrap text-[11px] text-muted tabular-nums">{a ? `${a.coverage.start.slice(0, 7)} → ${a.coverage.end.slice(0, 7)}` : f.kind === "prediction" ? "模型测试期" : "未分析"}</span>,
+                      <span key="c" className="whitespace-nowrap text-[11px] text-muted tabular-nums">{cov ? `${cov.start.slice(0, 7)} → ${cov.end.slice(0, 7)}${item?.refreshed ? " ↻" : ""}` : f.kind === "prediction" ? "模型测试期" : "未分析"}</span>,
                       <Btn key="x" kind="text" onClick={() => basket.toggle(f)}>移出</Btn>,
                     ],
                   };
@@ -196,7 +224,7 @@ export function FactorsPage() {
                   <Num key="ric" value={f.analysis?.rank_ic.mean} />,
                   f.analysis?.ic.ir == null ? <span key="ir" className="mm-dim">—</span> : f.analysis.ic.ir.toFixed(2),
                   <span key="cov" className="mm-mono mm-dim">
-                    {f.analysis ? `${f.analysis.coverage.start.slice(0, 7)} → ${f.analysis.coverage.end.slice(0, 7)}` : busyKey === key(f) ? "分析中…" : <Link onClick={(e) => { e.stopPropagation(); analyze(f); }}>计算指标</Link>}
+                    {coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}${f.refreshed ? " ↻" : ""}` : busyKey === key(f) ? "分析中…" : <Link onClick={(e) => { e.stopPropagation(); analyze(f); }}>计算指标</Link>}
                   </span>,
                 ],
               })),

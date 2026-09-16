@@ -8,7 +8,8 @@ import { Section } from "./Section";
 import { CodeView, Hint, MetricTable, StatusChip } from "./widgets";
 
 /** A round's full detail in the results column. */
-export function RoundDetail({ round }: { round: RoundView }) {
+/** `onContinue` adds "继续研究" beside the agent's next hypothesis: the caller resumes the experiment. */
+export function RoundDetail({ round, onContinue }: { round: RoundView; onContinue?: () => void }) {
   const [file, setFile] = useState(0);
   useEffect(() => setFile(Math.max(0, round.files.length - 1)), [round.id, round.files.length]);
   const current = round.files[file];
@@ -29,7 +30,12 @@ export function RoundDetail({ round }: { round: RoundView }) {
           {round.feedback.observations && <p className="m-0 text-xs">{round.feedback.observations}</p>}
           {round.feedback.hypothesis_evaluation && <p className="m-0 text-xs">{round.feedback.hypothesis_evaluation}</p>}
           {round.feedback.reason && <p className="m-0 text-xs">{round.feedback.reason}</p>}
-          {round.feedback.new_hypothesis && <Hint>下一步：{round.feedback.new_hypothesis}</Hint>}
+          {round.feedback.new_hypothesis && (
+            <div className="flex flex-col gap-1.5">
+              <Hint>下一步：{round.feedback.new_hypothesis}</Hint>
+              {onContinue && <div><Btn onClick={onContinue}>继续研究，让 Agent 接着这个假设跑</Btn></div>}
+            </div>
+          )}
         </Section>
       )}
       {round.files.length > 0 && (

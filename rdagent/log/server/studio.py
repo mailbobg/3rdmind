@@ -1,4 +1,5 @@
 """Local, persisted backtest jobs on top of RD-Agent research output. Registered under the server's auth gate."""
+import hashlib
 import json
 import os
 import subprocess
@@ -16,6 +17,10 @@ studio = Blueprint("studio", __name__, url_prefix="/studio")
 PROCESSES = {}
 TRACE_ROOT = Path(UI_SETTING.trace_folder).resolve()
 ROOT = TRACE_ROOT / "studio_backtests"
+# Factors recomputed on the latest data ("重算到最新") live here, one folder per (trace, round, name),
+# beside the shared daily_pv the recomputation reads.
+REFRESH_ROOT = TRACE_ROOT / "studio_refresh"
+LATEST_DATA = TRACE_ROOT / "studio_data" / "daily_pv_latest.h5"
 WORKSPACE_ROOT = Path(RD_AGENT_SETTINGS.workspace_path).resolve()
 
 
@@ -164,6 +169,45 @@ def cached_analysis(workspace, market):
     return data
 
 
+def refresh_dir(trace, loop_id, name):
+    return REFRESH_ROOT / hashlib.sha1(f"{trace}#{loop_id}#{name}".encode()).hexdigest()[:16]
+
+
+def refreshed_meta(trace, loop_id, name):
+    """meta.json of a recomputed factor, or None when it has never been recomputed."""
+    folder = refresh_dir(trace, loop_id, name)
+    if not (folder / "result.h5").is_file() or not (folder / "meta.json").is_file():
+        return None
+    try:
+        return json.loads((folder / "meta.json").read_text())
+    except ValueError:
+        return None
+
+
+def signal_workspace(trace, loop_id, name, workspace):
+    """Where a factor's result.h5 is read from: the recomputed copy when there is one, else RD-Agent's workspace."""
+    return refresh_dir(trace, loop_id, name) if refreshed_meta(trace, loop_id, name) else Path(workspace)
+
+
+def run_refresh(code_path, name, out_dir):
+    """Recompute one factor on the latest data in a subprocess; returns its meta on success."""
+    provider = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
+    start = os.environ.get("STUDIO_REFRESH_START", "2022-10-10")
+    completed = subprocess.run(
+        [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_refresh.py")),
+         provider, str(LATEST_DATA), start, str(code_path), name, str(out_dir)],
+        capture_output=True, text=True, timeout=1500,
+    )
+    line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    try:
+        data = json.loads(line)
+    except ValueError:
+        raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "refresh produced no output")
+    if data.get("status") != "completed":
+        raise RuntimeError(data.get("error") or "refresh failed")
+    return data
+
+
 def factor_library(registry, log_folder):
     """Every factor with a workspace across all loaded traces, newest trace first."""
     root = Path(log_folder)
@@ -183,6 +227,9 @@ def factor_library(registry, log_folder):
                     # A resumed run replays no code events; fall back to the factor.py left in its workspace.
                     code = (workspace / "factor.py").read_text(errors="replace")
                 detail = round_ctx["tasks"].get(name) or task_fallback(registry, name)
+                refreshed = refreshed_meta(trace, round_["loop_id"], name)
+                effective = refresh_dir(trace, round_["loop_id"], name) if refreshed else workspace
+                analysis = cached_analysis(effective, "csi300") if refreshed or WORKSPACE_ROOT in workspace.parents else None
                 entries.append({
                     "trace": trace, "loop_id": round_["loop_id"], "name": name,
                     "description": detail.get("description"), "formulation": detail.get("formulation"),
@@ -190,7 +237,10 @@ def factor_library(registry, log_folder):
                     "hypothesis": round_ctx["hypothesis"] or detail.get("hypothesis"),
                     "decision": round_ctx["decision"], "reason": round_ctx["reason"],
                     "metrics": round_["metrics"], "code": code,
-                    "analysis": cached_analysis(workspace, "csi300") if WORKSPACE_ROOT in workspace.parents else None,
+                    "analysis": analysis,
+                    "refreshed": refreshed,
+                    "coverage": ({"start": refreshed["start"], "end": refreshed["end"]} if refreshed
+                                 else analysis.get("coverage") if analysis else None),
                 })
     return entries
 
@@ -247,7 +297,7 @@ def factor_correlation(workspaces):
     return {"names": names, "matrix": [[float(v) for v in row] for row in matrix.values], "days": int(len(days))}
 
 
-def resolve_factor_paths(default_trace, default_loop_id, factors):
+def resolve_factor_paths(default_trace, default_loop_id, factors, prefer_refreshed=True):
     """Attach workspace paths to the requested factors.
 
     Each factor may name its own ``trace``/``loop_id`` (a basket built from several rounds); otherwise the
@@ -280,6 +330,8 @@ def resolve_factor_paths(default_trace, default_loop_id, factors):
             path = Path(paths[name]).resolve()
             if WORKSPACE_ROOT not in path.parents:
                 raise ValueError(f"Factor {name} lives outside the RD-Agent workspace root")
+            if prefer_refreshed:
+                path = signal_workspace(trace, loop_id, name, path)
             if not (path / "result.h5").is_file():
                 raise ValueError(f"Factor {name} has no result.h5")
         else:
@@ -448,6 +500,32 @@ def predictions_coverage():
         return jsonify({"error": str(error)}), 400
 
 
+@studio.post("/factors/refresh")
+def factors_refresh():
+    """Recompute a factor's signal on the latest Qlib data; the copy then replaces the workspace result.h5 for Studio use."""
+    body = request.get_json() or {}
+    trace, name = str(body.get("trace") or ""), str(body.get("name") or "")
+    try:
+        loop_id = normalize_loop_id(body.get("loop_id"))
+        original = Path(resolve_factor_paths(trace, loop_id, [{"name": name, "weight": 1}], prefer_refreshed=False)[0]["path"])
+        code_path = original / "factor.py"
+        if not code_path.is_file():
+            code = factor_code(trace_messages(trace), loop_id, name)
+            if not code:
+                raise ValueError(f"No factor.py recorded for {name}")
+            code_path = REFRESH_ROOT / "code" / f"{refresh_dir(trace, loop_id, name).name}.py"
+            code_path.parent.mkdir(parents=True, exist_ok=True)
+            code_path.write_text(code)
+        out = refresh_dir(trace, loop_id, name)
+        for stale in out.glob("studio_analysis.*.json"):
+            stale.unlink()
+        return jsonify(run_refresh(code_path, name, out))
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        return jsonify({"error": str(error)}), 500
+
+
 @studio.get("/factors/coverage")
 def factors_coverage():
     try:
@@ -543,4 +621,51 @@ def backtest_result(job_id):
         with log.open("rb") as stream:
             stream.seek(max(0, log.stat().st_size - 16000))
             result["log"] = stream.read().decode("utf-8", errors="replace")
+    result["breakdown"] = diagnosis_state(job_id, folder)
     return jsonify({"id": job_id, "config": public_config(json.loads((folder / "config.json").read_text())), **result})
+
+
+def diagnosis_state(job_id, folder):
+    """The take-apart diagnosis of a backtest (diagnosis.json), with a dead worker turned into a failure."""
+    path = folder / "diagnosis.json"
+    if not path.exists():
+        return None
+    state = json.loads(path.read_text())
+    process = PROCESSES.get(f"{job_id}:diagnose")
+    if process is not None and process.poll() is not None:
+        if state.get("status") in ("running", "queued"):
+            state = {"status": "failed", "error": "Diagnosis worker exited without a result; inspect execution log."}
+            write_json(path, state)
+        PROCESSES.pop(f"{job_id}:diagnose", None)
+    return state
+
+
+@studio.post("/backtests/<job_id>/diagnose")
+def backtest_diagnose(job_id):
+    """Start the take-apart diagnosis: every signal alone and the portfolio without each one, same window."""
+    try:
+        folder = job_folder(job_id)
+    except ValueError:
+        return jsonify({"error": "Invalid job ID"}), 400
+    if not (folder / "result.json").exists():
+        return jsonify({"error": "Job not found"}), 404
+    result = json.loads((folder / "result.json").read_text())
+    if result.get("status") != "completed":
+        return jsonify({"error": "Diagnose a completed backtest"}), 409
+    if len(json.loads((folder / "config.json").read_text()).get("factors") or []) < 2:
+        return jsonify({"error": "Diagnosis needs at least two signals"}), 400
+    running = PROCESSES.get(f"{job_id}:diagnose")
+    if running is not None and running.poll() is None:
+        return jsonify({"status": "running"}), 202
+    write_json(folder / "diagnosis.json", {"status": "queued"})
+    try:
+        with (folder / "diagnosis.log").open("w") as log:
+            PROCESSES[f"{job_id}:diagnose"] = subprocess.Popen(
+                [os.environ.get("STUDIO_PYTHON", sys.executable),
+                 str(Path(__file__).with_name("studio_worker.py")), str(folder), "--diagnose"],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+    except OSError as error:
+        write_json(folder / "diagnosis.json", {"status": "failed", "error": str(error)})
+        return jsonify({"error": str(error)}), 500
+    return jsonify({"status": "queued"}), 202

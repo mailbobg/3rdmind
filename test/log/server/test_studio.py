@@ -138,6 +138,8 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(server.app.config, "LOG_FOLDER_PATH", trace_folder)
     monkeypatch.setattr(studio_module, "TRACE_ROOT", trace_folder)
     monkeypatch.setattr(studio_module, "ROOT", trace_folder / "studio_backtests")
+    monkeypatch.setattr(studio_module, "REFRESH_ROOT", trace_folder / "studio_refresh")
+    monkeypatch.setattr(studio_module, "LATEST_DATA", trace_folder / "studio_data" / "daily_pv_latest.h5")
     monkeypatch.setattr(studio_module, "WORKSPACE_ROOT", workspace_root)
     monkeypatch.setattr(studio_module.subprocess, "Popen", lambda *a, **k: type("P", (), {"poll": lambda self: None})())
     server.rdagent_processes.clear()
@@ -192,6 +194,133 @@ def test_factor_coverage_reads_result_h5(studio_client, tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.get_json() == {"start": "2022-10-10", "end": "2025-12-31", "days": 2, "rows": 2}
     assert studio_client.get("/studio/factors/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "0", "name": "nope"}).status_code == 400
+
+
+@pytest.mark.offline
+def test_refresh_replaces_the_signal_source(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recomputed factor is what the library, coverage and backtests read afterwards."""
+    import pandas as pd
+
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print('factor')")
+
+    def fake_refresh(code_path: Path, name: str, out_dir: Path):
+        assert Path(code_path).read_text() == "print('factor')"
+        index = pd.MultiIndex.from_product([pd.to_datetime(["2022-10-10", "2026-09-11"]), ["SH600000"]], names=["datetime", "instrument"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({name: [1.0, 2.0]}, index=index).to_hdf(out_dir / "result.h5", key="data", mode="w")
+        meta = {"name": name, "start": "2022-10-10", "end": "2026-09-11", "rows": 2, "computed_at": "now",
+                "data": {"start": "2022-10-10", "end": "2026-09-11", "rows": 2}}
+        (out_dir / "meta.json").write_text(json.dumps(meta))
+        return {"status": "completed", **meta}
+
+    monkeypatch.setattr(studio_module, "run_refresh", fake_refresh)
+    ref = {"trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5"}
+    response = studio_client.post("/studio/factors/refresh", json=ref)
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["end"] == "2026-09-11"
+
+    entry = next(f for f in studio_client.get("/studio/factors").get_json() if f["name"] == "STR_5")
+    assert entry["refreshed"]["end"] == "2026-09-11"
+    assert entry["coverage"] == {"start": "2022-10-10", "end": "2026-09-11"}
+    coverage = studio_client.get("/studio/factors/coverage", query_string={**ref, "loop_id": "0"}).get_json()
+    assert coverage["end"] == "2026-09-11"
+    with server.app.app_context():
+        resolved = studio_module.resolve_factor_paths(ref["trace"], 0, [{"name": "STR_5", "weight": 1}])
+        assert Path(resolved[0]["path"]) == studio_module.refresh_dir(ref["trace"], 0, "STR_5")
+        original = studio_module.resolve_factor_paths(ref["trace"], 0, [{"name": "STR_5", "weight": 1}], prefer_refreshed=False)
+        assert Path(original[0]["path"]) == tmp_path / "ws" / "f0"
+
+
+@pytest.mark.offline
+def test_recorded_loops_counts_started_and_finished_rounds() -> None:
+    msgs = [
+        {"tag": "research.hypothesis", "loop_id": "0"}, {"tag": "feedback.hypothesis_feedback", "loop_id": "0"},
+        {"tag": "research.hypothesis", "loop_id": "1"}, {"tag": "feedback.hypothesis_feedback", "loop_id": 1},
+        {"tag": "research.hypothesis", "loop_id": "2"},
+    ]
+    assert server.recorded_loops(msgs) == (3, False)
+    assert server.recorded_loops(msgs[:4]) == (2, True)
+    assert server.recorded_loops([]) == (0, True)
+
+
+@pytest.mark.offline
+def test_resume_appends_to_the_same_trace(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """/resume restores the loop in place: same registry key, history kept, END dropped, loop_n = done + asked."""
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    trace_dir = trace_folder / "Finance Data Building/demo"
+    (trace_dir / "__session__" / "0").mkdir(parents=True)
+    previous = server.rdagent_processes[str(trace_dir)]
+    previous.messages = [
+        {"tag": "research.hypothesis", "loop_id": "0", "content": {"hypothesis": "h"}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "0", "content": {"decision": True}},
+        {"tag": "END", "content": {"end_code": 0}},
+    ]
+    started = []
+    monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
+    response = studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 2})
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json() == {"id": "Finance Data Building/demo", "loops": 2, "loop_n": 3}
+    task = server.rdagent_processes[str(trace_dir)]
+    assert task is started[0] and task.target_name == "resume"
+    assert task.kwargs == {"scenario": "Finance Data Building", "path": str(trace_dir), "loop_n": 3, "all_duration": None}
+    assert [m["tag"] for m in task.messages] == ["research.hypothesis", "feedback.hypothesis_feedback"]
+    # Guards: unknown scenario, missing session, bad loop count.
+    assert studio_client.post("/resume", json={"id": "General Model Implementation/x", "loops": 1}).status_code == 400
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/nosession", "loops": 1}).status_code == 404
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 0}).status_code == 400
+
+
+@pytest.mark.offline
+def test_signal_diagnosis_scores_each_signal_on_the_window() -> None:
+    import pandas as pd
+    from rdagent.log.server import studio_worker as worker
+
+    days = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])
+    index = pd.MultiIndex.from_product([days, ["A", "B", "C", "D"]], names=["datetime", "instrument"])
+    good = pd.Series([0.1, 0.2, 0.3, 0.4] * 3, index=index)          # aligned with the label
+    bad = pd.Series([0.4, 0.3, 0.2, 0.1] * 3, index=index)           # points the other way
+    label = pd.Series([-1.0, -0.3, 0.3, 1.0] * 3, index=index)
+    ranks = pd.concat([good.rename("good"), bad.rename("bad")], axis=1)
+    prepared = {"ranks": ranks, "label": label, "prior_day": days[0],
+                "factors": [{"name": "good", "weight": 1}, {"name": "bad", "weight": 1}]}
+    score = (good - bad) / 2
+    out = worker.signal_diagnosis(prepared, score)
+    by_name = {s["name"]: s for s in out["signals"]}
+    assert by_name["good"]["rank_ic"] == pytest.approx(1.0) and by_name["bad"]["rank_ic"] == pytest.approx(-1.0)
+    assert by_name["good"]["corr_with_score"] == pytest.approx(1.0) and by_name["bad"]["corr_with_score"] == pytest.approx(-1.0)
+    assert out["correlation"]["names"] == ["good", "bad"]
+    assert out["correlation"]["matrix"][0][1] == pytest.approx(-1.0)
+    assert out["correlation"]["days"] == 3
+
+
+@pytest.mark.offline
+def test_summarize_report_compounds_net_returns() -> None:
+    import pandas as pd
+    from rdagent.log.server import studio_worker as worker
+
+    report = pd.DataFrame({"return": [0.01, -0.02, 0.03], "cost": [0.001, 0.001, 0.001], "bench": [0.0, 0.01, 0.0],
+                           "turnover": [0.5, 0.5, 0.5], "account": [1e6, 1e6, 1e6]}, index=pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"]))
+    metrics, rows = worker.summarize_report(report)
+    assert metrics["total_return"] == pytest.approx((1.009 * 0.979 * 1.029) - 1)
+    assert metrics["benchmark_return"] == pytest.approx(0.01)
+    assert metrics["days"] == 3 and len(rows) == 3 and rows[-1]["date"] == "2025-01-06"
+
+
+@pytest.mark.offline
+def test_diagnose_route_starts_a_worker_for_completed_multi_signal_jobs(studio_client, tmp_path: Path) -> None:
+    folder = studio_module.ROOT / "11111111-1111-1111-1111-111111111111"
+    folder.mkdir(parents=True)
+    write = studio_module.write_json
+    write(folder / "config.json", {"factors": [{"name": "a"}, {"name": "b"}]})
+    write(folder / "result.json", {"status": "running"})
+    assert studio_client.post("/studio/backtests/11111111-1111-1111-1111-111111111111/diagnose").status_code == 409
+    write(folder / "result.json", {"status": "completed"})
+    response = studio_client.post("/studio/backtests/11111111-1111-1111-1111-111111111111/diagnose")
+    assert response.status_code == 202
+    assert json.loads((folder / "diagnosis.json").read_text()) == {"status": "queued"}
+    assert studio_client.get("/studio/backtests/11111111-1111-1111-1111-111111111111").get_json()["breakdown"] == {"status": "queued"}
+    write(folder / "config.json", {"factors": [{"name": "a"}]})
+    assert studio_client.post("/studio/backtests/11111111-1111-1111-1111-111111111111/diagnose").status_code == 400
 
 
 @pytest.mark.offline
@@ -449,7 +578,7 @@ def test_factor_library_lists_factors_with_code(studio_client, tmp_path: Path) -
         "trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5",
         "description": "Short-term reversal", "formulation": "-r_5", "variables": {"$close": "close"},
         "hypothesis": "h", "decision": True, "reason": "improves return",
-        "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)", "analysis": None,
+        "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)", "analysis": None, "refreshed": None, "coverage": None,
     }]
 
 

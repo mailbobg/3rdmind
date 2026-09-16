@@ -57,7 +57,7 @@ export function RunsPage() {
             {trace.status === "未加载" && <Alert status="accent"><Alert.Indicator /><Alert.Content><Alert.Title>这个实验的事件未加载到服务端。</Alert.Title></Alert.Content></Alert>}
             {trace.rounds.map((round) => <RoundDetail key={round.id} round={round} />)}
           </div>
-        ) : selected?.kind === "backtest" && backtests.result ? <BacktestResultView result={backtests.result} /> : <Hint>点一行查看详情。</Hint>
+        ) : selected?.kind === "backtest" && backtests.result ? <BacktestResultView result={backtests.result} onDiagnose={backtests.diagnose} /> : <Hint>点一行查看详情。</Hint>
       }
     >
       <Block title="记录" count={rows.length}>

@@ -203,6 +203,10 @@ class RDAgentTask:
                         from rdagent.app.qlib_rd_loop.quant import main as fin_quant
 
                         fin_quant(**self.kwargs)
+                    elif self.target_name == "resume":
+                        from rdagent.log.server.resume import resume_loop
+
+                        resume_loop(**self.kwargs)
                     else:
                         raise ValueError(f"Unknown target: {self.target_name}")
                 except Exception:
@@ -581,6 +585,81 @@ def submit_user_interaction_response():
         return jsonify({"error": "Failed to enqueue user response"}), 500
 
     return jsonify({"status": "success"}), 200
+
+
+def recorded_loops(messages: list[dict]) -> tuple[int, bool]:
+    """(number of loops the trace has started, whether the last one finished with feedback)."""
+    loops: set[int] = set()
+    finished: set[int] = set()
+    for m in messages:
+        raw = m.get("loop_id")
+        try:
+            loop_id = int(raw) if raw is not None and str(raw).strip().lstrip("-").isdigit() else None
+        except (TypeError, ValueError):
+            loop_id = None
+        if loop_id is None:
+            continue
+        loops.add(loop_id)
+        if m.get("tag") == "feedback.hypothesis_feedback":
+            finished.add(loop_id)
+    if not loops:
+        return 0, True
+    last = max(loops)
+    return last + 1, last in finished
+
+
+@app.route("/resume", methods=["POST"])
+def resume_research():
+    """Continue a loop-based experiment for `loops` more rounds, appending to the same trace.
+
+    The restored loop counts every loop it walks past, so the target passed to it is the rounds already
+    recorded plus the rounds requested; an unfinished last round is completed as the first of them.
+    """
+    global rdagent_processes
+    data = request.get_json() or {}
+    trace_id = str(data.get("id") or "")
+    try:
+        loops = int(data.get("loops") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "loops must be an integer"}), 400
+    if not 1 <= loops <= 30:
+        return jsonify({"error": "loops must be between 1 and 30"}), 400
+    scenario, _, trace_name = trace_id.partition("/")
+    from rdagent.log.server.resume import LOOP_SCENARIOS
+
+    if scenario not in LOOP_SCENARIOS or not trace_name:
+        return jsonify({"error": "Only factor, model and joint experiments can be continued"}), 400
+    try:
+        log_trace_path = resolve_within(log_folder_path, scenario, trace_name)
+        stdout_path = resolve_within(log_folder_path, scenario, f"{trace_name}.resume.log")
+    except ValueError:
+        return jsonify({"error": "Invalid trace id"}), 400
+    if not (log_trace_path / "__session__").is_dir():
+        return jsonify({"error": "This experiment has no saved session to continue from"}), 404
+    previous = rdagent_processes.get(str(log_trace_path))
+    if previous is not None and previous.is_alive():
+        return jsonify({"error": "This experiment is still running"}), 409
+    history = [m for m in (previous.messages if previous else []) if str(m.get("tag", "")).lower() != "end"]
+    started, last_finished = recorded_loops(history)
+    total = started + loops if last_finished else started - 1 + loops
+    all_duration = data.get("all_duration")
+    task = RDAgentTask(
+        target_name="resume",
+        kwargs={"scenario": scenario, "path": str(log_trace_path), "loop_n": total,
+                "all_duration": f"{all_duration}h" if all_duration else None},
+        stdout_path=str(stdout_path),
+        log_trace_path=str(log_trace_path),
+        scenario=scenario,
+        trace_name=trace_name,
+        ui_server_port=app.config["UI_SERVER_PORT"],
+    )
+    task.messages = history
+    if previous is not None:
+        task.pointers = previous.pointers
+    task.start()
+    rdagent_processes[str(log_trace_path)] = task
+    app.logger.warning(f"Resumed {log_trace_path} for {loops} more loop(s) (loop_n={total}).")
+    return jsonify({"id": trace_id, "loops": loops, "loop_n": total}), 200
 
 
 @app.route("/control", methods=["POST"])

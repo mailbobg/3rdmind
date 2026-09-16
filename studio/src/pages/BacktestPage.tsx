@@ -39,7 +39,7 @@ export function BacktestPage() {
   // result.h5 (or a prediction's pred.pkl) through the coverage endpoints, so the date warnings always apply.
   const [fetched, setFetched] = useState<Record<string, Coverage | null>>({});
   const coverageOf = (f: FactorWeight): Coverage | undefined =>
-    (f.kind === "prediction" ? undefined : info(f)?.analysis?.coverage) || fetched[key(f)] || undefined;
+    (f.kind === "prediction" ? undefined : info(f)?.coverage || info(f)?.analysis?.coverage) || fetched[key(f)] || undefined;
   useEffect(() => {
     for (const f of basket.items) {
       if (coverageOf(f) || key(f) in fetched) continue;
@@ -60,7 +60,21 @@ export function BacktestPage() {
     const valid: [string, string] = [shiftYears(params.start, -1), dayBefore(params.start)];
     setLgbm((l) => ({ ...l, valid, train: [shiftYears(params.start, -2), dayBefore(valid[0])] }));
   }, [params.start, lgbm.train]);
-  useEffect(() => { studio.factorLibrary().then((list) => setLibrary(Object.fromEntries(list.map((f) => [key(f), f])))).catch(() => {}); }, []);
+  const loadLibrary = useCallback(() => studio.factorLibrary().then((list) => setLibrary(Object.fromEntries(list.map((f) => [key(f), f])))).catch(() => {}), []);
+  useEffect(() => { loadLibrary(); }, [loadLibrary]);
+  // "重算到最新" for every factor signal whose coverage ends before the requested end: sequential Qlib subprocesses.
+  const [refreshing, setRefreshing] = useState(false);
+  const staleFactors = useMemo(() => basket.items.filter((f) => (f.kind || "factor") === "factor" && coverageOf(f) && params.end && coverageOf(f)!.end < params.end), [basket.items, library, fetched, params.end]); // eslint-disable-line react-hooks/exhaustive-deps
+  const refreshStale = async () => {
+    setRefreshing(true);
+    try {
+      for (const f of staleFactors) {
+        await studio.refreshFactor(f);
+        setFetched((m) => { const next = { ...m }; delete next[key(f)]; return next; });
+      }
+      await loadLibrary();
+    } catch (e) { setPageError(`重算失败：${errorText(e)}`); } finally { setRefreshing(false); }
+  };
   useEffect(() => { if (backtests.jobs.length && !backtests.selectedId) backtests.select(backtests.jobs[0].id); }, [backtests.jobs]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (tab === "source" && !source) studio.strategySource().then((r) => setSource(r.code)).catch((e) => setPageError(errorText(e))); }, [tab, source]);
 
@@ -124,6 +138,8 @@ export function BacktestPage() {
     };
     return [check("训练", lgbm.train), check("验证", lgbm.valid)].filter((g): g is NonNullable<typeof g> => !!g);
   }, [method, lgbm.train, lgbm.valid, basket.items, library, fetched]); // eslint-disable-line react-hooks/exhaustive-deps
+  // These would all be rejected by the worker, so the run button waits until they are fixed.
+  const blocked = !!dateWarning || !!orderWarning || windowGaps.length > 0;
   const removeGapSignals = () => { for (const f of windowGaps.flatMap((g) => g.missing)) if (basket.has(f)) basket.toggle(f); };
   // Fit both windows between the shared coverage start and the day before the backtest: two thirds training, one third validation.
   const fitWindowsToCoverage = () => {
@@ -153,7 +169,7 @@ export function BacktestPage() {
   return (
     <PageFrame
       tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "params", label: "参数设置" }, { key: "source", label: "策略源码" }]} />}
-      actions={<Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length} onClick={submit}>{backtests.busy ? "运行中…" : "运行回测"}</Btn>}
+      actions={<Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length || blocked} title={blocked ? "先处理下面标红的日期问题" : undefined} onClick={submit}>{backtests.busy ? "运行中…" : blocked ? "日期有问题，无法运行" : "运行回测"}</Btn>}
       resultsTitle={result ? `回测 ${result.id.slice(0, 8)}` : "回测结果"}
       resultsActions={
         <>
@@ -162,7 +178,7 @@ export function BacktestPage() {
           {result?.metrics && <Btn kind="text" onClick={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>导出 JSON</Btn>}
         </>
       }
-      results={result ? <BacktestResultView result={result} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
+      results={result ? <BacktestResultView result={result} onDiagnose={backtests.diagnose} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
     >
       {(backtests.error || pageError) && <Note tone="bad" actions={<Btn kind="text" onClick={() => { backtests.setError(""); setPageError(""); }}>关闭</Btn>}>{backtests.error || pageError}</Note>}
       {!env && <Note>后端未连接，无法回测。运行 scripts/start-backend.sh 后刷新。</Note>}
@@ -185,11 +201,18 @@ export function BacktestPage() {
                 <SelectInput value={method} onChange={setMethod} options={[{ value: "rank", label: "排名加权" }, { value: "lgbm", label: "训练 LightGBM" }]} />
               </Field>
             </FieldGrid>
-            {dateWarning && <div style={{ marginTop: 12 }}><Note actions={coverage && <Btn onClick={fitToCoverage}>{method === "lgbm" ? "按覆盖区间重排三段" : "按覆盖区间填日期"}</Btn>}>{dateWarning}</Note></div>}
-            {orderWarning && <div style={{ marginTop: 12 }}><Note actions={coverage && <Btn onClick={fitToCoverage}>按覆盖区间重排三段</Btn>}>{orderWarning}</Note></div>}
+            {dateWarning && (
+              <div style={{ marginTop: 12 }}>
+                <Note tone="bad" actions={coverage && <>
+                  {staleFactors.length > 0 && <Btn disabled={refreshing} onClick={refreshStale}>{refreshing ? "重算中…" : `把 ${staleFactors.length} 个因子重算到最新`}</Btn>}
+                  <Btn onClick={fitToCoverage}>{method === "lgbm" ? "按覆盖区间重排三段" : "按覆盖区间填日期"}</Btn>
+                </>}>{dateWarning}</Note>
+              </div>
+            )}
+            {orderWarning && <div style={{ marginTop: 12 }}><Note tone="bad" actions={coverage && <Btn onClick={fitToCoverage}>按覆盖区间重排三段</Btn>}>{orderWarning}</Note></div>}
             {windowGaps.map((g) => (
               <div key={g.name} style={{ marginTop: 12 }}>
-                <Note actions={<><Btn onClick={removeGapSignals}>移出这些信号</Btn><Btn onClick={fitWindowsToCoverage}>把窗口挪进覆盖区间</Btn></>}>
+                <Note tone="bad" actions={<><Btn onClick={removeGapSignals}>移出这些信号</Btn><Btn onClick={fitWindowsToCoverage}>把窗口挪进覆盖区间</Btn></>}>
                   {g.name}窗口 {g.window[0]} → {g.window[1]} 里没有 {g.missing.map((f) => `${f.name}（${coverageOf(f)!.start} → ${coverageOf(f)!.end}）`).join("、")} 的数据，LightGBM 会直接报错。
                 </Note>
               </div>

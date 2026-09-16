@@ -119,6 +119,24 @@ export function ResearchPage() {
     } catch (e) { trace.setError(errorText(e)); } finally { trace.setBusy(false); }
   }, [mode, form, files, trace, search, setSearch]);
 
+  // "继续研究 N 轮": restore the experiment's loop from its saved session and run N more rounds into the same trace.
+  const [moreLoops, setMoreLoops] = useState(3);
+  const [resuming, setResuming] = useState(false);
+  const canContinue = !!trace.traceId && !trace.active && MODES.some((m) => m.loops && trace.traceId.startsWith(m.value + "/"));
+  const continueResearch = useCallback(async () => {
+    if (!canContinue) return;
+    if (!Number.isInteger(moreLoops) || moreLoops < 1 || moreLoops > 30) { trace.setError("继续的轮数应为 1–30。"); return; }
+    setResuming(true);
+    try {
+      const id = trace.traceId;
+      await studio.resumeResearch(id, moreLoops);
+      setRoundId("");
+      await trace.select(id, true);
+      loadSummaries();
+      layout.openResults();
+    } catch (e) { trace.setError(errorText(e)); } finally { setResuming(false); }
+  }, [canContinue, moreLoops, trace, loadSummaries, layout]);
+
   const sendToBacktest = (round: RoundView) => { basket.addRound(trace.traceId, Number(round.id), round.factors); navigate("/backtest"); };
   const sendPrediction = (round: RoundView) => { basket.addPrediction(trace.traceId, Number(round.id)); navigate("/backtest"); };
 
@@ -130,6 +148,7 @@ export function ResearchPage() {
     if (status === "已结束" && !trace.rounds.length) return <Note>这个实验的进程已结束，且没有留下任何事件；看日志里的报错。</Note>;
     if (status === "运行中" && !trace.rounds.length) return <Empty>研究已启动，等待第一轮假设…</Empty>;
     return (
+      <>
       <Table label="研究轮次" columns={[{ label: "轮", width: 40 }, { label: "假设" }, { label: "阶段", width: 220, optional: true }, { label: "因子", num: true, width: 56, optional: true }, { label: "状态", width: 90 }]}
         rows={trace.rounds.map((round) => ({
           key: round.id, selected: round.id === (activeRound?.id ?? ""), onClick: () => { setRoundId(round.id); layout.openResults(); },
@@ -141,6 +160,16 @@ export function ResearchPage() {
             <StatusTag key="st" status={round.status} />,
           ],
         }))} />
+      {canContinue && (
+        <div className="mm-row" style={{ marginTop: 10 }}>
+          <span className="mm-dim" style={{ fontSize: 12 }}>继续研究</span>
+          <NumberInput ariaLabel="继续的轮数" value={moreLoops} onChange={setMoreLoops} min={1} max={30} className="mm-weight" />
+          <span className="mm-dim" style={{ fontSize: 12 }}>轮</span>
+          <Btn kind="primary" disabled={resuming} onClick={continueResearch}>{resuming ? "启动中…" : `继续研究 ${moreLoops} 轮`}</Btn>
+          <span className="mm-dim" style={{ fontSize: 12 }}>从最后一个快照接着跑，Agent 记得前面每一轮的假设和反馈；新轮次追加到这个实验里。</span>
+        </div>
+      )}
+      </>
     );
   };
   const experimentRows: Row[] = experiments.flatMap((e) => {
@@ -207,7 +236,7 @@ export function ResearchPage() {
       ) : (
         <div className="flex flex-col gap-3">
           {trace.interaction && <InteractionPanel event={trace.interaction} busy={trace.busy} defaultInstruction={form.objective} onSubmit={trace.answer} />}
-          {activeRound ? <RoundDetail round={activeRound} /> : <Hint>在左侧展开一个实验，点一轮查看假设、评估与代码。</Hint>}
+          {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} /> : <Hint>在左侧展开一个实验，点一轮查看假设、评估与代码。</Hint>}
         </div>
       )}
     >
