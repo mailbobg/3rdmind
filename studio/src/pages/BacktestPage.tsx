@@ -65,14 +65,18 @@ export function BacktestPage() {
   // "重算到最新" for every factor signal whose coverage ends before the requested end: sequential Qlib subprocesses.
   const [refreshing, setRefreshing] = useState(false);
   const staleFactors = useMemo(() => basket.items.filter((f) => (f.kind || "factor") === "factor" && coverageOf(f) && params.end && coverageOf(f)!.end < params.end), [basket.items, library, fetched, params.end]); // eslint-disable-line react-hooks/exhaustive-deps
-  const refreshStale = async () => {
+  // Factors whose signal stops before the market data does: candidates for 重算到最新.
+  const behindMarket = useMemo(() => basket.items.filter((f) => (f.kind || "factor") === "factor" && coverageOf(f) && env?.end && coverageOf(f)!.end < env.end), [basket.items, library, fetched, env?.end]); // eslint-disable-line react-hooks/exhaustive-deps
+  const refreshStale = async (targets: FactorWeight[] = staleFactors) => {
     setRefreshing(true);
     try {
-      for (const f of staleFactors) {
+      for (const f of targets) {
         await studio.refreshFactor(f);
         setFetched((m) => { const next = { ...m }; delete next[key(f)]; return next; });
       }
       await loadLibrary();
+      // With longer signals the untouched window may grow back to the market's end; the clamp trims any excess.
+      if (!datesTouched && env?.end) { setParams((p) => ({ ...p, end: env.end! })); setAutoNote(""); }
     } catch (e) { setPageError(`重算失败：${errorText(e)}`); } finally { setRefreshing(false); }
   };
   useEffect(() => { if (backtests.jobs.length && !backtests.selectedId) backtests.select(backtests.jobs[0].id); }, [backtests.jobs]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -108,6 +112,23 @@ export function BacktestPage() {
   }, [coverage, params.start, params.end]);
   const iso = (d: Date) => d.toISOString().slice(0, 10);
   const addDays = (date: string, n: number) => { const d = new Date(date); d.setDate(d.getDate() + n); return iso(d); };
+  // Until the user touches the dates, the window follows the signals: the default (last year of market data)
+  // always runs past research factors, which stop at the experiment's own data end, so clamp instead of blocking.
+  const [datesTouched, setDatesTouched] = useState(false);
+  const [autoNote, setAutoNote] = useState("");
+  const setDate = (k: "start" | "end", v: string) => { setDatesTouched(true); setAutoNote(""); set(k, v); };
+  useEffect(() => {
+    if (datesTouched || !coverage || !params.start || !params.end) return;
+    const minStart = addDays(coverage.start, 1);
+    let start = params.start, end = params.end;
+    if (end > coverage.end) { end = coverage.end; start = shiftYears(end, -1); }  // keep the default one-year length
+    if (start < minStart) start = minStart;
+    if (start >= end) { start = minStart; end = coverage.end; }
+    if (start !== params.start || end !== params.end) {
+      setParams((p) => ({ ...p, start, end }));
+      setAutoNote(`回测区间已按信号覆盖自动调整为 ${start} → ${end}（信号数据到 ${coverage.end}）；需要更长就先把因子重算到最新。`);
+    }
+  }, [coverage, params.start, params.end, datesTouched]); // eslint-disable-line react-hooks/exhaustive-deps
   // Rank mode gets the whole coverage; LightGBM needs history first, so the backtest takes the last third and
   // training / validation split the first two thirds 2:1 (the worker insists on train < valid < backtest).
   const fitToCoverage = () => {
@@ -188,8 +209,8 @@ export function BacktestPage() {
         <>
           <Block title="回测参数" note={`${params.start || "?"} → ${params.end || "?"} · ${params.market}`}>
             <FieldGrid min={140}>
-              <Field label="开始"><TextInput type="date" value={params.start} onChange={(v) => set("start", v)} /></Field>
-              <Field label="结束"><TextInput type="date" value={params.end} onChange={(v) => set("end", v)} /></Field>
+              <Field label="开始"><TextInput type="date" value={params.start} onChange={(v) => setDate("start", v)} /></Field>
+              <Field label="结束"><TextInput type="date" value={params.end} onChange={(v) => setDate("end", v)} /></Field>
               <Field label="股票池"><SelectInput value={params.market} onChange={(v) => set("market", v)} options={[{ value: "csi300", label: "沪深300" }, { value: "csi500", label: "中证500" }, { value: "all", label: "全市场" }]} /></Field>
               <Field label="基准"><TextInput value={params.benchmark} onChange={(v) => set("benchmark", v)} /></Field>
               <Field label="持股数" hint="每天按评分持有前 topk 只"><NumberInput value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} /></Field>
@@ -201,10 +222,15 @@ export function BacktestPage() {
                 <SelectInput value={method} onChange={setMethod} options={[{ value: "rank", label: "排名加权" }, { value: "lgbm", label: "训练 LightGBM" }]} />
               </Field>
             </FieldGrid>
+            {autoNote && !dateWarning && (
+              <div style={{ marginTop: 12 }}>
+                <Note tone="info" actions={behindMarket.length > 0 ? <Btn disabled={refreshing} onClick={() => refreshStale(behindMarket)}>{refreshing ? "重算中…" : `把 ${behindMarket.length} 个因子重算到最新`}</Btn> : undefined}>{autoNote}</Note>
+              </div>
+            )}
             {dateWarning && (
               <div style={{ marginTop: 12 }}>
                 <Note tone="bad" actions={coverage && <>
-                  {staleFactors.length > 0 && <Btn disabled={refreshing} onClick={refreshStale}>{refreshing ? "重算中…" : `把 ${staleFactors.length} 个因子重算到最新`}</Btn>}
+                  {staleFactors.length > 0 && <Btn disabled={refreshing} onClick={() => refreshStale()}>{refreshing ? "重算中…" : `把 ${staleFactors.length} 个因子重算到最新`}</Btn>}
                   <Btn onClick={fitToCoverage}>{method === "lgbm" ? "按覆盖区间重排三段" : "按覆盖区间填日期"}</Btn>
                 </>}>{dateWarning}</Note>
               </div>
