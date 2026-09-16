@@ -4,7 +4,7 @@ export interface CodeFile { name: string; code: string; task: string; loop: stri
 export interface RoundView {
   id: string;
   hypothesis: Record<string, any>;
-  tasks: { name: string; description?: string }[];
+  tasks: { name: string; description?: string; formulation?: string; variables?: Record<string, string> }[];
   files: CodeFile[];
   metrics: Record<string, number> | null;
   factors: string[];

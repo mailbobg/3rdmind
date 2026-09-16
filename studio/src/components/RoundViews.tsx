@@ -5,7 +5,7 @@ import type { TraceEvent } from "../api/studio";
 import type { RoundView } from "../hooks/rounds";
 import { download } from "../hooks/studioContext";
 import { Section } from "./Section";
-import { CodeView, Hint, MetricTable, StatusChip } from "./widgets";
+import { CodeView, Formula, Hint, MetricTable, Mono, StatusChip } from "./widgets";
 
 /** A round's full detail in the results column. */
 /** `onContinue` adds "继续研究" beside the agent's next hypothesis: the caller resumes the experiment. */
@@ -23,8 +23,6 @@ export function RoundDetail({ round, onContinue }: { round: RoundView; onContinu
           {round.hypothesis.concise_knowledge && <Hint>经验：{round.hypothesis.concise_knowledge}</Hint>}
         </Section>
       )}
-      {round.metrics && <Section title="原生 Qlib 评估" note="LightGBM · TopkDropout"><MetricTable metrics={round.metrics} /></Section>}
-      {round.chartHtml && <Section title="收益图"><iframe srcDoc={round.chartHtml} sandbox="allow-scripts" title="收益图" className="h-[420px] w-full border-0" /></Section>}
       {round.feedback && (
         <Section title="Agent 反馈" note={<Chip size="sm" variant="soft" color={round.feedback.decision ? "success" : "danger"}>{round.feedback.decision ? "接受" : "拒绝"}</Chip>}>
           {round.feedback.observations && <p className="m-0 text-xs">{round.feedback.observations}</p>}
@@ -38,6 +36,27 @@ export function RoundDetail({ round, onContinue }: { round: RoundView; onContinu
           )}
         </Section>
       )}
+      {round.tasks.length > 0 && (
+        <Section title="本轮因子" note={`${round.tasks.length} 个${round.factors.length ? ` · ${round.factors.length} 个已实现` : ""}`}>
+          <div className="flex flex-col gap-3">
+            {round.tasks.map((task) => (
+              <div key={task.name} className="flex flex-col gap-1 border-b border-border pb-3 last:border-b-0 last:pb-0">
+                <div className="flex items-center gap-2">
+                  <Mono>{task.name}</Mono>
+                  <span className={`text-[11px] ${round.factors.includes(task.name) ? "text-success" : "text-muted"}`}>{round.factors.includes(task.name) ? "已实现" : round.metrics ? "未实现" : ""}</span>
+                </div>
+                {task.description && <p className="m-0 text-xs">{task.description}</p>}
+                {task.formulation && <Formula source={task.formulation} />}
+                {task.variables && Object.keys(task.variables).length > 0 && (
+                  <Hint>变量：{Object.entries(task.variables).map(([v, meaning]) => <span key={v}><Mono>{v}</Mono> {meaning}； </span>)}</Hint>
+                )}
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+      {round.metrics && <Section title="原生 Qlib 评估" note="LightGBM · TopkDropout"><MetricTable metrics={round.metrics} /></Section>}
+      {round.chartHtml && <Section title="收益图"><iframe srcDoc={round.chartHtml} sandbox="allow-scripts" title="收益图" className="h-[420px] w-full border-0" /></Section>}
       {round.files.length > 0 && (
         <Section title="生成代码" note={current && <Btn kind="text" onClick={() => download(`${current.task || "round"}-${current.name}`, current.code)}>下载代码</Btn>}>
           {round.files.length > 1 && (
