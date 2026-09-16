@@ -26,7 +26,7 @@ const dayBefore = (date: string) => { const d = new Date(date); d.setDate(d.getD
 const LGBM_DEFAULTS = { learning_rate: 0.05, num_leaves: 63, max_depth: 8, n_estimators: 1000, early_stopping_rounds: 50, colsample_bytree: 0.8, subsample: 0.8, lambda_l2: 1 };
 
 export function BacktestPage() {
-  const { env, backtests, basket, layout } = useStudio();
+  const { env, backtests, basket, layout, workspace } = useStudio();
   const saved = useMemo(() => restoreStudioState(), []);
   const [params, setParams] = useState<Params>({
     start: "", end: "", market: "csi300", benchmark: "SH000300", topk: 10, n_drop: 2, account: 1000000, open_cost: 0.0005, close_cost: 0.0015, ...(saved.params || {}),
@@ -42,6 +42,11 @@ export function BacktestPage() {
   const [tab, setTab] = useState(searchParams.get("tab") === "search" ? "search" : "params");
   const [universes, setUniverses] = useState<Universe[]>([]);
   useEffect(() => { studio.universes().then(setUniverses).catch(() => {}); }, []);
+  useEffect(() => {
+    if (!universes.length || universes.some((u) => u.market === params.market)) return;
+    const u = universes[0];
+    setParams((p) => ({ ...p, market: u.market, benchmark: u.benchmark }));
+  }, [universes]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (searchParams.get("tab")) setSearchParams({}, { replace: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Portfolio search: the basket's factor signals are the candidates, the backtest parameters the setting.
   const searches = useSearches();
@@ -318,7 +323,7 @@ export function BacktestPage() {
       results={
         <div className="flex flex-col gap-3">
           {savingFrom && <Note tone="info" actions={saveForm}>{savingFrom === "search" ? "把搜索推荐的组合保存为策略，以后在「策略」页跟踪它。" : "把这次回测的组合、参数和结果保存为策略，以后在「策略」页跟踪它。"}</Note>}
-          {savedNote && <Note tone="info" actions={<><Btn onClick={() => navigate("/strategies")}>去策略页</Btn><Btn kind="text" onClick={() => setSavedNote("")}>关闭</Btn></>}>{savedNote}</Note>}
+          {savedNote && <Note tone="info" actions={<><Btn onClick={() => navigate(workspace.path("/strategies"))}>去策略页</Btn><Btn kind="text" onClick={() => setSavedNote("")}>关闭</Btn></>}>{savedNote}</Note>}
           {tab === "search"
             ? (searches.result ? <SearchResultView result={searches.result} onAdopt={adoptRecommendation} /> : <Hint>开始搜索后在这里看搜索路径和推荐组合。</Hint>)
             : result ? <BacktestResultView result={result} onDiagnose={backtests.diagnose} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
@@ -396,11 +401,11 @@ export function BacktestPage() {
                   }))} />
                 <P>
                   TopkDropoutStrategy · 前一日评分 · 当日收盘成交 · 权重为负 = 反向使用{method === "lgbm" ? "（LightGBM 模式下权重不生效）" : ""}
-                  {coverageUnknown ? ` · ${coverageUnknown} 个信号的覆盖区间未知，未计入` : ""} · <Link href="#/factors">去因子库增减</Link>
+                  {coverageUnknown ? ` · ${coverageUnknown} 个信号的覆盖区间未知，未计入` : ""} · <Link href={workspace.href("/factors")}>去因子库增减</Link>
                 </P>
               </>
             ) : (
-              <Empty>还没有选信号。去 <Link href="#/factors">因子库</Link> 勾选，或在研究轮次里点“用 N 个因子回测”。</Empty>
+              <Empty>还没有选信号。去 <Link href={workspace.href("/factors")}>因子库</Link> 勾选，或在研究轮次里点“用 N 个因子回测”。</Empty>
             )}
           </Block>
         </>
@@ -415,7 +420,7 @@ export function BacktestPage() {
             </FieldGrid>
             <P>候选是信号篮里的因子（模型预测不参与）。先每个单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。{candidates.length} 个候选最多约 {candidates.length + (candidates.length * (candidates.length - 1)) / 2 + candidates.length + 3} 次回测。</P>
           </Block>
-          <Block title="候选信号" count={candidates.length} note={<><Link href="#/factors?return=search">去因子库增减</Link>{candidates.length < 2 ? " · 至少两个" : ""}</>}>
+          <Block title="候选信号" count={candidates.length} note={<><Link href={workspace.href("/factors?return=search")}>去因子库增减</Link>{candidates.length < 2 ? " · 至少两个" : ""}</>}>
             <div className="mm-row" style={{ marginBottom: 12 }}>
               <Btn disabled={picking} onClick={() => autoPick()}>{picking ? (analyzeProgress || "挑选中…") : "自动挑候选"}</Btn>
               <span className="mm-dim" style={{ fontSize: 12 }}>从整个因子库按 |ICIR| 排序，排除噪声，两两相关 ≥ {DUPLICATE_CORR} 只留一个，最多 8 个，IC 为负的自动反向；会替换当前篮子。</span>
@@ -436,7 +441,7 @@ export function BacktestPage() {
             ) : null}
             {candidates.length < 2 && (
               <div style={{ marginTop: candidates.length ? 12 : 0 }}>
-                <Note tone="info" actions={<Btn onClick={() => navigate("/factors?return=search")}>去因子库勾选</Btn>}>
+                <Note tone="info" actions={<Btn onClick={() => navigate(workspace.path("/factors?return=search"))}>去因子库勾选</Btn>}>
                   搜索至少需要两个因子作为候选{candidates.length ? `，现在只有 ${candidates.length} 个` : ""}。勾好后因子库底部的"回组合搜索"会带你回到这里。
                 </Note>
               </div>

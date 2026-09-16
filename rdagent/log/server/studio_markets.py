@@ -98,3 +98,45 @@ def universe(market: str) -> dict:
 
 def markets() -> list[str]:
     return [r["market"] for r in universes()]
+
+
+REGION_LABELS = {"cn": "A 股", "us": "美股"}
+
+
+def region_of(market: str | None) -> str:
+    """The region a market belongs to; unknown or unmarked records count as A-shares."""
+    market = (market or "").strip().lower()
+    for record in universes():
+        if record["market"] == market:
+            return record["region"]
+    return "cn"
+
+
+def regions() -> list[dict]:
+    """The workspaces the Studio offers: one per region with data, plus "us" as a placeholder when there is no
+    US data yet (so the UI can offer to build it). Each carries its provider directory and calendar span."""
+    seen: dict[str, dict] = {}
+    for record in universes():
+        region = record["region"]
+        entry = seen.setdefault(region, {"region": region, "label": REGION_LABELS.get(region, region.upper()),
+                                         "provider_uri": record["provider_uri"], "markets": []})
+        entry["markets"].append(record["market"])
+    for region in ("cn", "us"):
+        seen.setdefault(region, {"region": region, "label": REGION_LABELS[region], "provider_uri": None, "markets": []})
+    out = []
+    for region in ["cn", "us"] + sorted(r for r in seen if r not in ("cn", "us")):
+        entry = seen[region]
+        dates: list[str] = []
+        if entry["provider_uri"]:
+            calendar = Path(entry["provider_uri"]) / "calendars" / "day.txt"
+            dates = calendar.read_text().split() if calendar.is_file() else []
+        entry.update({"ready": bool(dates) and bool(entry["markets"]), "start": dates[0] if dates else None, "end": dates[-1] if dates else None})
+        out.append(entry)
+    return out
+
+
+def provider_for(region: str) -> Path | None:
+    for entry in regions():
+        if entry["region"] == region and entry["provider_uri"]:
+            return Path(entry["provider_uri"])
+    return None

@@ -90,6 +90,15 @@ Do not place provider credentials in the frontend.
 
 ## Other markets (US example)
 
+Markets are workspaces: the toggle at the top of the rail (A 股 | 美股) switches the whole Studio, like a
+mode switch. Each workspace has its own experiments, factor library, basket, backtests, searches, strategies and
+runs (every list endpoint takes `?region=`; records carry their market and unmarked ones count as A-shares),
+its own data status line (A-shares: 同步数据; US: 重建数据, which runs `scripts/build-us-data.py` in the
+background via `/studio/data/build`) and its own instrument names. Model settings and layout are shared. The
+US workspace lives under `/#/us/...`; a workspace without data shows a single "not built yet" card instead
+of its pages. `/studio/regions` lists the workspaces with their data span.
+
+
 Universes come from `studio_markets.py`: the default Qlib directory (`QLIB_PROVIDER_URI`, the A-share
 snapshot) contributes every `instruments/*.txt` it holds, and any sibling directory that carries a
 `studio-universe.json` contributes its own markets with their region and benchmark:

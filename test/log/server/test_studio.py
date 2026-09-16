@@ -1248,3 +1248,53 @@ def test_backtest_on_a_us_universe_takes_its_data_region_and_rules(studio_client
     assert config["provider_uri"] == str(us) and config["region"] == "us"
     assert config["benchmark"] == "^ndx" and config["limit_threshold"] is None and config["min_cost"] == 1
     assert studio_client.post("/studio/backtests", json=dict(body, market="sp500")).status_code == 400
+
+
+@pytest.mark.offline
+def test_lists_are_scoped_by_region(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cn = tmp_path / "qlib_data" / "cn_data"
+    (cn / "instruments").mkdir(parents=True)
+    (cn / "calendars").mkdir()
+    (cn / "calendars" / "day.txt").write_text("2025-01-02\n2025-06-30\n")
+    (cn / "instruments" / "csi300.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    us = tmp_path / "qlib_data" / "us_ndx"
+    (us / "instruments").mkdir(parents=True)
+    (us / "calendars").mkdir()
+    (us / "calendars" / "day.txt").write_text("2007-01-03\n2026-09-15\n")
+    (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100"}}))
+    (us / "instrument_names.json").write_text(json.dumps({"source": "nasdaq", "names": {"AAPL": {"name": "APPLE INC."}}}))
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(cn))
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    # A second experiment marked as a NASDAQ-100 run.
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/us-run"))
+    task.messages = [{"tag": "research.hypothesis", "loop_id": "0", "timestamp": "2026-09-01T10:00:00", "content": {"hypothesis": "us"}}]
+    (trace_folder / "Finance Data Building/us-run").mkdir(parents=True, exist_ok=True)
+    (trace_folder / "Finance Data Building/us-run" / "studio-run.json").write_text(json.dumps({"market": "nasdaq100"}))
+    ids = lambda rows: sorted(r["id"] for r in rows)  # noqa: E731
+    assert ids(studio_client.get("/studio/experiments").get_json()) == ["Finance Data Building/demo", "Finance Data Building/us-run"]
+    assert ids(studio_client.get("/studio/experiments?region=us").get_json()) == ["Finance Data Building/us-run"]
+    assert ids(studio_client.get("/studio/experiments?region=cn").get_json()) == ["Finance Data Building/demo"]
+    # Factors follow their experiment's market; the demo factor is an A-share one.
+    assert [f["name"] for f in studio_client.get("/studio/factors?region=cn").get_json()] == ["STR_5"]
+    assert studio_client.get("/studio/factors?region=us").get_json() == []
+    # Backtests are scoped by their config's market.
+    for market in ("csi300", "nasdaq100"):
+        body = {"trace": "Finance Data Building/demo", "loop_id": 0, "factors": [{"name": "STR_5", "weight": 1}],
+                "start": "2025-01-03", "end": "2025-06-30", "market": market, "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+        assert studio_client.post("/studio/backtests", json=body).status_code == 202
+    assert [j["config"]["market"] for j in studio_client.get("/studio/backtests?region=us").get_json()] == ["nasdaq100"]
+    assert [j["config"]["market"] for j in studio_client.get("/studio/backtests?region=cn").get_json()] == ["csi300"]
+    assert len(studio_client.get("/studio/backtests").get_json()) == 2
+    # Workspaces, per-region environment and names.
+    regions = {r["region"]: r for r in studio_client.get("/studio/regions").get_json()}
+    assert regions["cn"]["ready"] and regions["us"]["ready"] and regions["us"]["end"] == "2026-09-15" and regions["us"]["markets"] == ["nasdaq100"]
+    env = studio_client.get("/studio/environment?region=us").get_json()
+    assert env["provider_uri"] == str(us) and env["start"] == "2007-01-03"
+    assert studio_client.get("/studio/environment").get_json()["end"] == "2025-06-30"
+    assert studio_client.get("/studio/instruments/names?region=us").get_json()["names"]["AAPL"]["name"] == "APPLE INC."
+    assert studio_client.get("/studio/instruments/names").get_json()["names"] == {}
+    # Without any US data the workspace is still listed, not ready.
+    (us / "studio-universe.json").unlink()
+    regions = {r["region"]: r for r in studio_client.get("/studio/regions").get_json()}
+    assert regions["us"]["ready"] is False and regions["us"]["markets"] == []

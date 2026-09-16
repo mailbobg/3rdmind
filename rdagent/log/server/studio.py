@@ -156,6 +156,16 @@ def task_fallback(registry, name):
     return {}
 
 
+def wanted_region():
+    """The workspace a list request is scoped to (``?region=``), or None for everything."""
+    region = (request.args.get("region") or "").strip().lower()
+    return region or None
+
+
+def in_region(market, region) -> bool:
+    return region is None or studio_markets.region_of(market) == region
+
+
 def run_market(trace) -> str:
     """The universe a trace was researched on (studio-run.json written at start), csi300 for older runs."""
     path = TRACE_ROOT / trace / "studio-run.json"
@@ -374,9 +384,16 @@ def public_config(config):
     return public
 
 
+@studio.get("/regions")
+def regions():
+    """The market workspaces: region, label, data directory, calendar span, markets, ready."""
+    return jsonify(studio_markets.regions())
+
+
 @studio.get("/environment")
 def environment():
-    provider = Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser()
+    """Data status of one workspace (``?region=``, A-shares by default) plus the LLM in use."""
+    provider = studio_markets.provider_for(wanted_region() or "cn") or Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser()
     calendar = provider / "calendars" / "day.txt"
     dates = calendar.read_text().splitlines() if calendar.is_file() else []
     llm = studio_llm.resolve()
@@ -460,7 +477,8 @@ def experiments():
         except ValueError:
             trace_id = key
         rows.append(summarize_task(trace_id, task))
-    return jsonify(rows)
+    region = wanted_region()
+    return jsonify([r for r in rows if in_region(r.get("market"), region)])
 
 
 @studio.get("/rounds")
@@ -478,7 +496,9 @@ def rounds():
 
 @studio.get("/factors")
 def factors():
-    return jsonify(factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"]))
+    region = wanted_region()
+    library = factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"])
+    return jsonify([f for f in library if in_region(f.get("market"), region)])
 
 
 @studio.get("/factors/analysis")
@@ -585,11 +605,15 @@ def factors_correlation():
 def backtests():
     ROOT.mkdir(parents=True, exist_ok=True)
     if request.method == "GET":
+        region = wanted_region()
         jobs = []
         for path in sorted(ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
             result_path = path.parent / "result.json"
             result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
-            jobs.append({"id": path.parent.name, "config": public_config(json.loads(path.read_text())), "status": result["status"],
+            config = public_config(json.loads(path.read_text()))
+            if not in_region(config.get("market"), region):
+                continue
+            jobs.append({"id": path.parent.name, "config": config, "status": result["status"],
                          "total_return": (result.get("metrics") or {}).get("total_return"),
                          "created": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()})
         return jsonify(jobs)
@@ -662,11 +686,14 @@ def searches():
     """Greedy portfolio searches: same request shape as a backtest plus a `search` block (objective, split)."""
     SEARCH_ROOT.mkdir(parents=True, exist_ok=True)
     if request.method == "GET":
+        region = wanted_region()
         jobs = []
         for path in sorted(SEARCH_ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
             result_path = path.parent / "result.json"
             result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
             config = public_config(json.loads(path.read_text()))
+            if not in_region(config.get("market"), region):
+                continue
             jobs.append({"id": path.parent.name, "status": result["status"], "config": config,
                          "created": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
                          "recommended": (result.get("recommended") or {}).get("members"),
@@ -674,12 +701,8 @@ def searches():
         return jsonify(jobs)
     body = request.get_json() or {}
     try:
-        body["factors"] = resolve_factor_paths(None, None, body.get("factors") or [])
         body.setdefault("search", {})
-        config = validate_config(body)
-        config["provider_uri"] = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
-        if not (Path(config["provider_uri"]) / "calendars" / "day.txt").is_file():
-            raise ValueError("Qlib data not found. Configure a local Qlib daily data directory first.")
+        config = prepare_backtest_config(body)
         if len(config["factors"]) < 2:
             raise ValueError("Search needs at least two candidate signals")
     except (ValueError, TypeError, KeyError) as error:
@@ -868,11 +891,14 @@ def validate_strategy_body(body, existing=None):
 def strategies():
     STRATEGY_ROOT.mkdir(parents=True, exist_ok=True)
     if request.method == "GET":
+        region = wanted_region()
         items = []
         for path in sorted(STRATEGY_ROOT.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 strategy = json.loads(path.read_text())
             except ValueError:
+                continue
+            if not in_region((strategy.get("params") or {}).get("market"), region):
                 continue
             latest = run_summary(strategy["runs"][-1]["backtest_id"]) if strategy.get("runs") else None
             items.append({k: strategy.get(k) for k in ("id", "name", "note", "created", "updated", "factors", "model", "params", "evidence")} | {"latest": latest, "run_count": len(strategy.get("runs", []))})
@@ -1011,7 +1037,7 @@ def strategy_signal(strategy_id):
     import io
 
     buffer = io.StringIO()
-    names = instrument_names()["names"]
+    names = instrument_names(studio_markets.region_of((strategy.get("params") or {}).get("market")))["names"]
     fields = ["date", "type", "instrument", "name", "weight", "amount", "price", "value", "score", "rank", "held"]
     writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
@@ -1026,12 +1052,17 @@ def strategy_signal(strategy_id):
     return Response(buffer.getvalue(), mimetype="text/csv", headers={"Content-Disposition": disposition})
 
 
-def instrument_names():
-    """The code → {name, industry} map from studio_data/instrument_names.json, or an empty map."""
-    if not INSTRUMENT_NAMES.is_file():
+def instrument_names(region="cn"):
+    """The code → {name, industry} map: studio_data/instrument_names.json for A-shares, else the
+    instrument_names.json inside the region's data directory; an empty map when there is none."""
+    path = INSTRUMENT_NAMES
+    if region != "cn":
+        provider = studio_markets.provider_for(region)
+        path = provider / "instrument_names.json" if provider else None
+    if path is None or not path.is_file():
         return {"source": None, "names": {}}
     try:
-        data = json.loads(INSTRUMENT_NAMES.read_text())
+        data = json.loads(path.read_text())
     except ValueError:
         return {"source": None, "names": {}}
     return {"source": data.get("source"), "names": data.get("names") or {}}
@@ -1039,7 +1070,7 @@ def instrument_names():
 
 @studio.get("/instruments/names")
 def instruments_names():
-    return jsonify(instrument_names())
+    return jsonify(instrument_names(wanted_region() or "cn"))
 
 
 # ---- Data sync: keep the Qlib snapshot current, by hand or on a daily schedule ------------------------
@@ -1120,3 +1151,44 @@ def llm_test():
 def llm_models():
     result = studio_llm.list_models(request.get_json() or {})
     return jsonify(result), (200 if result.get("ok") else 502)
+
+
+# ---- US data build: run scripts/build-us-data.py in the background and report its progress -----------------
+
+BUILD_LOG = TRACE_ROOT / "studio_data" / "build_us.log"
+
+
+def _build_process():
+    return PROCESSES.get("build:us")
+
+
+@studio.get("/data/build")
+def data_build_status():
+    process = _build_process()
+    running = process is not None and process.poll() is None
+    lines = BUILD_LOG.read_text(errors="replace").splitlines()[-30:] if BUILD_LOG.is_file() else []
+    return jsonify({"running": running, "exit_code": None if running or process is None else process.returncode,
+                    "log": lines, "started": BUILD_LOG.is_file(),
+                    "finished_at": datetime.fromtimestamp(BUILD_LOG.stat().st_mtime, tz=timezone.utc).isoformat() if BUILD_LOG.is_file() and not running else None})
+
+
+@studio.post("/data/build")
+def data_build_start():
+    """Build (or rebuild) the US data directory from Yahoo Finance; refused while anything else is running."""
+    if _build_process() is not None and _build_process().poll() is None:
+        return jsonify({"started": False, "reason": "已经在构建中"}), 409
+    if workers_busy(current_app):
+        return jsonify({"started": False, "reason": "有回测或研究正在运行，等它们结束再构建"}), 409
+    script = Path(__file__).resolve().parents[3] / "scripts" / "build-us-data.py"
+    if not script.is_file():
+        return jsonify({"started": False, "reason": f"找不到 {script}"}), 500
+    BUILD_LOG.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with BUILD_LOG.open("w") as log:
+            PROCESSES["build:us"] = subprocess.Popen(
+                [os.environ.get("STUDIO_PYTHON", sys.executable), str(script)],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True, cwd=str(script.parents[1]),
+            )
+    except OSError as error:
+        return jsonify({"started": False, "reason": str(error)}), 500
+    return jsonify({"started": True}), 202

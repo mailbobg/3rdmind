@@ -30,6 +30,7 @@ LABELS = {"nasdaq100": "纳斯达克 100"}
 
 
 def snapshot(index: str, day: str, cache: Path) -> tuple[str, list[str]]:
+    """Members on ``day`` (cached); the company names seen along the way land in <cache>/names.json."""
     path = cache / f"{index}_{day}.json"
     if path.exists():
         return day, json.loads(path.read_text())
@@ -37,9 +38,14 @@ def snapshot(index: str, day: str, cache: Path) -> tuple[str, list[str]]:
         try:
             r = requests.post(SNAPSHOT_URL.format(index=index, day=day), headers={"Content-Length": "0", "User-Agent": "Mozilla/5.0"}, timeout=30)
             if r.status_code == 200:
-                symbols = sorted({row["Symbol"].strip() for row in r.json().get("aaData", []) if row.get("Symbol")})
+                rows = [row for row in r.json().get("aaData", []) if row.get("Symbol")]
+                symbols = sorted({row["Symbol"].strip() for row in rows})
                 if symbols:
                     path.write_text(json.dumps(symbols))
+                    names_path = cache / "names.json"
+                    names = json.loads(names_path.read_text()) if names_path.exists() else {}
+                    names.update({row["Symbol"].strip(): str(row.get("Name") or "").strip() for row in rows})
+                    names_path.write_text(json.dumps(names, ensure_ascii=False))
                     return day, symbols
         except requests.RequestException:
             pass
@@ -156,6 +162,10 @@ def main() -> int:
     inst["end"] = inst["end"].where(inst["end"] <= calendar[-1], calendar[-1])
     inst["start"] = inst["start"].where(inst["start"] >= calendar[0], calendar[0])
     inst.sort_values(["symbol", "start"]).to_csv(target / "instruments" / f"{args.market}.txt", sep="\t", header=False, index=False)
+    names_path = work / "snapshots" / "names.json"
+    if names_path.exists():
+        names = {sym: {"name": name} for sym, name in json.loads(names_path.read_text()).items() if name}
+        (target / "instrument_names.json").write_text(json.dumps({"source": "indexes.nasdaqomx.com weighting data", "names": names}, ensure_ascii=False))
     benchmark = BENCHMARKS.get(args.index, f"^{args.index}").lower()
     (target / "studio-universe.json").write_text(json.dumps(
         {"region": "us", "label": "美股", "benchmark": benchmark, "markets": {args.market: LABELS.get(args.market, args.market.upper())}}, ensure_ascii=False))

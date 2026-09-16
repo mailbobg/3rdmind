@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Alert, Chip, Disclosure, Input, ProgressBar } from "@heroui/react";
 import type { BacktestResult, Breakdown, InstrumentSummary, SignalDiagnosis, Trade } from "../api/studio";
 import { Btn } from "./minimal";
+import { useStudio } from "../hooks/studioContext";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { Section } from "./Section";
 import { CodeView, CorrelationMatrix, CurveOverlay, DataTable, EquityChart, Hint, Instrument, MetricGrid, Mono, Signed, StatusChip, money, percent } from "./widgets";
@@ -167,6 +168,7 @@ const fmtIc = (v?: number | null) => (typeof v === "number" ? (v > 0 ? "+" : "")
  * window; optionally deepened by the take-apart backtests (each signal alone, portfolio without each signal).
  */
 function PortfolioDiagnosis({ result, onDiagnose }: { result: BacktestResult; onDiagnose?: () => void }) {
+  const { workspace } = useStudio();
   const d = result.diagnosis!;
   const b: Breakdown | null | undefined = result.breakdown;
   const done = b?.status === "completed" && b.base && b.alone && b.without;
@@ -267,7 +269,7 @@ function PortfolioDiagnosis({ result, onDiagnose }: { result: BacktestResult; on
         {!done && onDiagnose && <Btn disabled={running} onClick={onDiagnose}>{running ? `拆开回测中${b?.done != null && b?.total ? ` ${b.done}/${b.total}` : ""}…` : "逐个拆开回测"}</Btn>}
         {b?.status === "failed" && <span className="text-[11px] text-danger">拆开回测失败：{b.error}</span>}
         {!done && !running && <Hint>每个信号单独跑一遍，再每次去掉一个跑一遍，同样的区间和参数；{2 * d.signals.length + 1} 次回测，约 {Math.ceil((2 * d.signals.length + 1) * 0.5)} 分钟。</Hint>}
-        <a href="#/factors" className="text-[11px] text-accent underline">回因子库换信号 →</a>
+        <a href={workspace.href("/factors")} className="text-[11px] text-accent underline">回因子库换信号 →</a>
       </div>
     </Section>
   );

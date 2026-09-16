@@ -46,13 +46,15 @@ const stagesOf = (round: RoundView) => [
 ];
 
 export function ResearchPage() {
-  const { env, trace, basket, layout } = useStudio();
+  const { env, trace, basket, layout, workspace } = useStudio();
   const [search, setSearch] = useSearchParams();
   const navigate = useNavigate();
   const [tab, setTab] = useState(search.get("trace") ? "rounds" : search.get("new") || !trace.traceId ? "new" : "rounds");
   const [form, setForm] = useState(() => ({ scenario: MODES[0].value, loops: 3, duration: 2, objective: restoreStudioState().objective || "", link: "", market: "csi300" }));
   const [universes, setUniverses] = useState<Universe[]>([]);
   useEffect(() => { studio.universes().then(setUniverses).catch(() => {}); }, []);
+  // The form's universe must belong to this workspace; fall back to its first one (e.g. nasdaq100 for US).
+  useEffect(() => { if (universes.length && !universes.some((u) => u.market === form.market)) setForm((f) => ({ ...f, market: universes[0].market })); }, [universes]); // eslint-disable-line react-hooks/exhaustive-deps
   const chosenUniverse = universes.find((u) => u.market === form.market);
   const [files, setFiles] = useState<File[]>([]);
   const [roundId, setRoundId] = useState("");
@@ -71,7 +73,7 @@ export function ResearchPage() {
     const t = setInterval(loadSummaries, 15000);
     return () => clearInterval(t);
   }, [anyLive, loadSummaries]);
-  const experiments = useMemo(() => mergeExperiments(trace.traceIds, summaries), [trace.traceIds, summaries]);
+  const experiments = useMemo(() => mergeExperiments(workspace.region === "cn" ? trace.traceIds : summaries.map((s) => s.id), summaries), [trace.traceIds, summaries]);
 
   useEffect(() => { if (search.get("new")) setTab("new"); }, [search]);
   // The form's explanation lives in the results column, so switching to the form brings that column up.
@@ -142,8 +144,8 @@ export function ResearchPage() {
     } catch (e) { trace.setError(errorText(e)); } finally { setResuming(false); }
   }, [canContinue, moreLoops, trace, loadSummaries, layout]);
 
-  const sendToBacktest = (round: RoundView) => { basket.addRound(trace.traceId, Number(round.id), round.factors); navigate("/backtest"); };
-  const sendPrediction = (round: RoundView) => { basket.addPrediction(trace.traceId, Number(round.id)); navigate("/backtest"); };
+  const sendToBacktest = (round: RoundView) => { basket.addRound(trace.traceId, Number(round.id), round.factors); navigate(workspace.path("/backtest")); };
+  const sendPrediction = (round: RoundView) => { basket.addPrediction(trace.traceId, Number(round.id)); navigate(workspace.path("/backtest")); };
 
   // Rounds of the expanded experiment, nested under its row; the states before the first round are spelled out.
   const roundsBody = () => {

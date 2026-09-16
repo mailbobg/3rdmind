@@ -13,7 +13,7 @@ import { CodeView, CorrelationMatrix, DataTable, Formula, Hint, IcBars, MetricGr
 const GUIDE = "① 单独有没有用：看 IC / Rank IC 的符号和 ICIR（均值÷波动）；|IC|<0.01 且 ICIR≈0 基本是噪声，IC 为负的回测时权重设 −1 反向。② 放一起合不合适：篮内两两相关 |ρ|<0.5 才互补，高相关只是重复计权。③ 覆盖区间要包住回测期。";
 
 export function FactorsPage() {
-  const { basket, layout, env } = useStudio();
+  const { basket, layout, env, workspace } = useStudio();
   const navigate = useNavigate();
   // Arriving from the backtest page's search tab: the basket buttons lead back there instead of to the parameters.
   const [search] = useSearchParams();
@@ -120,7 +120,7 @@ export function FactorsPage() {
         : (basket.items.length ? <>
             <Btn kind="text" onClick={basket.clear}>清空</Btn>
             <Btn disabled={!!refreshingKey} onClick={() => refreshMany(basket.items.map((f) => library.get(key(f))).filter((f): f is LibraryFactor => !!f))}>{refreshingKey ? "重算中…" : "重算到最新"}</Btn>
-            <Btn kind="primary" onClick={() => navigate(returnTo.path)}>{returnTo.label}</Btn>
+            <Btn kind="primary" onClick={() => navigate(workspace.path(returnTo.path))}>{returnTo.label}</Btn>
           </> : undefined)}
       results={view === "factor" ? (
         selected ? (
@@ -245,7 +245,7 @@ export function FactorsPage() {
           <Link onClick={showBasket}><span className="mm-name" style={{ color: "var(--mm-ink)" }}>组合篮 <span className="mm-count mm-mono mm-dim" style={{ fontWeight: 400 }}>{basket.items.length}</span></span></Link>
           <span className="mm-mono mm-dim" style={{ fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{basket.items.map((f) => f.name).join(" · ")}</span>
           <Btn kind="text" onClick={basket.clear}>清空</Btn>
-          <Btn kind="primary" onClick={() => navigate(returnTo.path)}>{returnTo.label}</Btn>
+          <Btn kind="primary" onClick={() => navigate(workspace.path(returnTo.path))}>{returnTo.label}</Btn>
         </div>
       )}
     </PageFrame>

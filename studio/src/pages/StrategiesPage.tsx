@@ -19,7 +19,7 @@ const RUN_STATUS: Record<string, string> = { queued: "排队中", running: "运�
  * with the latest run's full backtest report underneath.
  */
 export function StrategiesPage() {
-  const { basket, layout, env, backtests, trace } = useStudio();
+  const { basket, layout, env, backtests, trace, workspace } = useStudio();
   const navigate = useNavigate();
   const [items, setItems] = useState<Strategy[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -41,7 +41,7 @@ export function StrategiesPage() {
       // The first confirmation asks for the research direction; pre-fill it with the strategy context.
       persistStudioState({ objective: r.instruction });
       trace.registerLaunched(r.id);
-      navigate(`/research?trace=${encodeURIComponent(r.id)}`);
+      navigate(workspace.path(`/research?trace=${encodeURIComponent(r.id)}`));
     } catch (e) { setError(errorText(e)); } finally { setResearching(false); }
   };
   const [draft, setDraft] = useState({ name: "", note: "" });
@@ -97,7 +97,7 @@ export function StrategiesPage() {
       download(`signal-${signal?.as_of || "latest"}-${s.name}.csv`, text, "text/csv");
     } catch (e) { setError(errorText(e)); }
   };
-  const toBasket = (s: Strategy) => { basket.replace(s.factors.map((f) => ({ ...f, kind: f.kind || "factor" }))); navigate("/backtest"); };
+  const toBasket = (s: Strategy) => { basket.replace(s.factors.map((f) => ({ ...f, kind: f.kind || "factor" }))); navigate(workspace.path("/backtest")); };
 
   const rows = useMemo(() => items.filter((s) => filter === "all" || (filter === "tracked" ? (s.run_count ?? 0) > 1 : (s.run_count ?? 0) <= 1)), [items, filter]);
   const runCurves = useMemo(() => {
@@ -108,7 +108,7 @@ export function StrategiesPage() {
   const runsTable = (runs: StrategyRun[]) => (
     <Table label="跟踪记录" columns={[{ label: "时间", width: 100 }, { label: "类型", width: 56 }, { label: "区间" }, { label: "收益", num: true, width: 80 }, { label: "超额", num: true, width: 80, optional: true }, { label: "夏普", num: true, width: 60, optional: true }, { label: "回撤", num: true, width: 72, optional: true }, { label: "状态", width: 64 }]}
       rows={runs.map((r) => ({
-        key: r.id, onClick: () => { backtests.select(r.id); navigate("/backtest"); },
+        key: r.id, onClick: () => { backtests.select(r.id); navigate(workspace.path("/backtest")); },
         cells: [
           <span key="t" className="mm-mono mm-dim">{shortTime(r.created || null)}</span>,
           <span key="k" className="mm-dim">{r.kind === "evidence" ? "证据" : "更新"}</span>,

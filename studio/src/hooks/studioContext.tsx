@@ -5,7 +5,17 @@ import type { BacktestStore } from "./useBacktests";
 import type { BasketStore } from "./useFactorBasket";
 import type { useLayoutState } from "./useLayoutState";
 
+/** The market workspace a shell instance serves: its region and how to build in-app paths inside it. */
+export interface Workspace {
+  region: string;
+  label: string;
+  /** Route prefix: "" for A-shares, "/us" for the US workspace. */
+  base: string;
+  path: (p: string) => string;
+  href: (p: string) => string;
+}
 export interface StudioContextValue {
+  workspace: Workspace;
   env: Environment | null;
   reloadEnv: () => Promise<void>;
   trace: TraceStore;

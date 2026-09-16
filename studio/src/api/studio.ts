@@ -1,3 +1,9 @@
+/** Market workspace every list request is scoped to ("cn" | "us"); set by the shell before pages load. */
+export type Region = "cn" | "us" | string;
+let apiRegion: Region = "cn";
+export const setApiRegion = (r: Region) => { apiRegion = r; };
+export const getApiRegion = () => apiRegion;
+const scoped = (path: string) => `${path}${path.includes("?") ? "&" : "?"}region=${encodeURIComponent(apiRegion)}`;
 export interface TraceEvent {
   tag: string;
   timestamp: string;
@@ -133,9 +139,17 @@ export const traces = () => api<string[]>("/traces");
 export interface Universe { market: string; label: string; group: string; region: string; benchmark: string; ready: boolean }
 export const UNIVERSE_LABELS: Record<string, string> = { csi300: "沪深300", csi500: "中证500", csi800: "中证800", csi1000: "中证1000", csiall: "中证全指", all: "全部 A 股", nasdaq100: "纳斯达克 100" };
 /** Universe list from the server; its labels also feed universeLabel() for every later call. */
-export const universes = () => api<Universe[]>("/universes").then((list) => { for (const u of list) if (u.label) UNIVERSE_LABELS[u.market] = u.label; return list; });
+export const universes = () => api<Universe[]>("/universes").then((list) => { for (const u of list) if (u.label) UNIVERSE_LABELS[u.market] = u.label; return list.filter((u) => u.region === apiRegion); });
+/** The market workspaces: A-shares, US, ... with their data directory and calendar span. */
+export interface RegionInfo { region: Region; label: string; provider_uri: string | null; markets: string[]; ready: boolean; start: string | null; end: string | null }
+export const regions = () => api<RegionInfo[]>("/studio/regions");
+export interface BuildStatus { running: boolean; exit_code: number | null; log: string[]; started: boolean; finished_at: string | null }
+export const dataBuildStatus = () => api<BuildStatus>("/studio/data/build");
+export const startDataBuild = () =>
+  fetch("/studio/data/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    .then(async (r) => ({ ok: r.ok, ...(await r.json()) as { started?: boolean; reason?: string } }));
 export const universeLabel = (m: string) => UNIVERSE_LABELS[m] || m.toUpperCase();
-export const experiments = () => api<ExperimentSummary[]>("/studio/experiments");
+export const experiments = () => api<ExperimentSummary[]>(scoped("/studio/experiments"));
 export const traceSnapshot = (id: string) => api<TraceEvent[]>("/trace", { id, snapshot: true });
 export const startResearch = (form: FormData) => api<{ id: string }>("/upload", form);
 export const stopResearch = (id: string) => api<{ status: string }>("/control", { id, action: "stop" });
@@ -144,9 +158,9 @@ export const resumeResearch = (id: string, loops: number) => api<{ id: string; l
 export const submitInteraction = (id: string, payload: unknown) =>
   api<{ status: string }>("/user_interaction/submit", { id, payload });
 export const stdoutUrl = (id: string) => `/stdout?${new URLSearchParams({ id })}`;
-export const environment = () => api<Environment>("/studio/environment");
+export const environment = () => api<Environment>(scoped("/studio/environment"));
 export const strategySource = () => api<{ name: string; code: string }>("/studio/strategy");
-export const factorLibrary = () => api<LibraryFactor[]>("/studio/factors");
+export const factorLibrary = () => api<LibraryFactor[]>(scoped("/studio/factors"));
 /** Single-factor analysis inside a universe; without `market` the server uses the factor's own research universe. */
 export const factorAnalysis = (ref: FactorRef, market?: string) =>
   api<FactorAnalysis>(`/studio/factors/analysis?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name, ...(market ? { market } : {}) })}`);
@@ -160,7 +174,7 @@ export const predictionCoverage = (trace: string, loop_id: number) =>
 export const refreshFactor = (ref: FactorRef) => api<RefreshMeta>("/studio/factors/refresh", { trace: ref.trace, loop_id: ref.loop_id, name: ref.name });
 export const factorCoverage = (ref: FactorRef) =>
   api<Coverage & { days: number; rows: number }>(`/studio/factors/coverage?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name })}`);
-export const backtests = () => api<BacktestSummary[]>("/studio/backtests");
+export const backtests = () => api<BacktestSummary[]>(scoped("/studio/backtests"));
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);
 export const runBacktest = (config: BacktestRequest) => api<{ id: string }>("/studio/backtests", config);
 export type SearchObjective = "sharpe" | "total_return";
@@ -173,7 +187,7 @@ export interface SearchResult extends SearchSummary {
   objective?: SearchObjective; windows?: { search: [string, string]; validation: [string, string] };
   candidates?: string[]; recommended_portfolio?: SearchPortfolio; everything?: SearchPortfolio;
 }
-export const searches = () => api<SearchSummary[]>("/studio/searches");
+export const searches = () => api<SearchSummary[]>(scoped("/studio/searches"));
 export const search = async (id: string): Promise<SearchResult> => {
   // The worker's "recommended" is the portfolio; the list's "recommended" is just its member names.
   const raw = await api<Record<string, unknown>>(`/studio/searches/${id}`);
@@ -192,7 +206,7 @@ export interface Strategy {
   latest?: StrategyRun | null; run_count?: number;
 }
 export interface StrategyDraft { name: string; note?: string; factors: FactorWeight[]; model: SignalModel; params: StrategyParams; evidence?: Strategy["evidence"] }
-export const strategies = () => api<Strategy[]>("/studio/strategies");
+export const strategies = () => api<Strategy[]>(scoped("/studio/strategies"));
 export const strategy = (id: string) => api<Strategy>(`/studio/strategies/${id}`);
 export const saveStrategy = (draft: StrategyDraft) => api<Strategy>("/studio/strategies", draft);
 export const renameStrategy = (id: string, fields: { name?: string; note?: string }) =>
@@ -222,7 +236,7 @@ export const startDataSync = (force = false) =>
 export const saveDataSyncSettings = (values: { auto?: boolean; hour?: number }) =>
   fetch("/studio/data/sync/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
     .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as SyncStatus["settings"]; });
-export const instrumentNames = () => api<{ source: string | null; names: Record<string, { name: string; industry?: string }> }>("/studio/instruments/names");
+export const instrumentNames = () => api<{ source: string | null; names: Record<string, { name: string; industry?: string }> }>(scoped("/studio/instruments/names"));
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});
 export interface LlmProvider { id: string; label: string; prefix: string; key_env: string; base_env: string; models: string[]; needs_base?: boolean; site: string }
 export interface LlmCurrent {
