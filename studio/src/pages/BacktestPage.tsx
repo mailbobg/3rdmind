@@ -290,8 +290,35 @@ export function BacktestPage() {
     if (accepted) { persistStudioState({ params, model }); layout.openResults(); }
   }, [method, lgbm, basket.items, params, backtests, layout]);
   const result = backtests.result;
-  const jobLabel = (job: BacktestSummary) =>
-    `${backtestStatusLabel(job.status)}${job.total_return != null ? ` ${(job.total_return * 100).toFixed(1)}%` : ""} · ${job.config.factors?.length ?? 0} 信号 · ${job.config.model?.method === "lgbm" ? "LGBM" : "排名"} · ${job.config.start} → ${job.config.end}`;
+  // History dropdowns: two-line rows (status dot, signal names over window · method · status · when, return on
+  // the right) that the filter box matches by any of those words, plus ">5" / "<0" on the return.
+  const statusDot = (status: string) => (
+    <i className={`inline-block size-[7px] rounded-full ${status === "completed" ? "bg-success" : status === "failed" ? "bg-danger" : "bg-warning"}`} />
+  );
+  const signalNames = (factors: { name: string }[] | undefined) => {
+    const names = (factors || []).map((f) => f.name);
+    return names.length <= 2 ? names.join(" + ") || "—" : `${names.slice(0, 2).join(" + ")} +${names.length - 2}`;
+  };
+  const pct = (v: number | null | undefined) => (v == null ? undefined : <span className={v >= 0 ? "text-success" : "text-danger"}>{v >= 0 ? "+" : ""}{(v * 100).toFixed(1)}%</span>);
+  const jobOptions = backtests.jobs.map((j) => {
+    const method = j.config.model?.method === "lgbm" ? "LightGBM" : "排名加权";
+    return {
+      value: j.id, label: signalNames(j.config.factors), icon: statusDot(j.status),
+      description: `${j.config.start} → ${j.config.end} · ${method} · ${backtestStatusLabel(j.status)}${j.created ? ` · ${shortTime(j.created)}` : ""}`,
+      trailing: pct(j.total_return), number: j.total_return == null ? null : j.total_return * 100,
+      keywords: `${j.id} ${(j.config.factors || []).map((f) => f.name).join(" ")} ${j.config.market} ${universeLabel(j.config.market)} ${j.config.model?.method === "lgbm" ? "lgbm lightgbm 训练" : "rank 排名"} top${j.config.topk}`,
+    };
+  });
+  const searchOptions = searches.jobs.map((j) => {
+    const status = j.status === "completed" ? "已完成" : j.status === "failed" ? "失败" : "运行中";
+    return {
+      value: j.id, label: `${j.config.factors.length} 候选 → ${j.recommended?.length ?? "?"} 个`, icon: statusDot(j.status),
+      description: `${j.config.start} → ${j.config.end} · ${status}${j.recommended?.length ? ` · ${j.recommended.slice(0, 3).join(" + ")}${j.recommended.length > 3 ? " …" : ""}` : ""}${j.created ? ` · ${shortTime(j.created)}` : ""}`,
+      trailing: pct(j.validation_return), number: j.validation_return == null ? null : j.validation_return * 100,
+      keywords: `${j.id} ${j.config.factors.map((f) => f.name).join(" ")} ${(j.recommended || []).join(" ")} ${j.config.market}`,
+    };
+  });
+  const HISTORY_SEARCH_HINT = "筛选：因子名、日期、lgbm、已完成、>5、<0…";
 
   const statusLine = [
     coverage ? `覆盖 ${coverage.start} → ${coverage.end}` : "",
@@ -309,13 +336,13 @@ export function BacktestPage() {
       resultsActions={tab === "search" ? (
         <>
           {searches.jobs.length ? <SelectInput ariaLabel="搜索历史" placeholder="搜索历史" className="w-80 max-w-full" value={searches.selectedId || ""} onChange={(id) => { searches.select(id); layout.openResults(); }}
-            options={searches.jobs.map((j) => ({ value: j.id, label: `${j.status === "completed" ? "已完成" : j.status === "failed" ? "失败" : "运行中"} · ${j.config.factors.length} 候选 → ${j.recommended?.length ?? "?"} · ${j.config.start} → ${j.config.end}${j.validation_return != null ? ` · 验证 ${(j.validation_return * 100).toFixed(1)}%` : ""}` }))} /> : undefined}
+            options={searchOptions} searchable listWidth={440} searchPlaceholder={HISTORY_SEARCH_HINT} /> : undefined}
           {searches.result?.recommended_portfolio && <Btn onClick={() => { setSavingFrom("search"); setStrategyName(""); setSavedNote(""); }}>保存为策略</Btn>}
         </>
       ) : (
         <>
           <SelectInput ariaLabel="回测历史" placeholder="回测历史" className="w-80 max-w-full" value={backtests.selectedId || ""} onChange={(id) => { backtests.select(id); layout.openResults(); }}
-            options={backtests.jobs.map((j) => ({ value: j.id, label: jobLabel(j) }))} />
+            options={jobOptions} searchable listWidth={440} searchPlaceholder={HISTORY_SEARCH_HINT} />
           {result?.metrics && <Btn onClick={() => { setSavingFrom("backtest"); setStrategyName(""); setSavedNote(""); }}>保存为策略</Btn>}
           {result?.metrics && <Btn kind="text" onClick={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>导出 JSON</Btn>}
         </>

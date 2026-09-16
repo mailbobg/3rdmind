@@ -57,7 +57,47 @@ export interface Option<T extends string> {
   value: T; label: string; group?: string;
   /** Secondary text shown right-aligned and muted (a count, a benchmark, a date span). */
   hint?: string;
+  /** Second line under the label: makes the option a two-line "rich" row (icon, label, description, trailing). */
+  description?: string;
+  /** Leading glyph of a rich row (a status dot, a symbol). */
+  icon?: ReactNode;
+  /** Trailing element of a rich row, before the check (a return figure, a badge). */
+  trailing?: ReactNode;
+  /** Extra text the filter matches against but never shows (ids, aliases, status words). */
+  keywords?: string;
+  /** A number the filter's comparators apply to: ">5" keeps options whose number is above 5. */
+  number?: number | null;
   disabled?: boolean;
+}
+
+/**
+ * Filter query → predicate. Terms are split on spaces and all must hit (AND); a plain term matches label,
+ * value, hint, description or keywords case-insensitively; ">5", "<0", ">=1.5", "<=-2" compare against the
+ * option's `number`.
+ */
+export function optionMatcher(query: string): (o: Option<string>) => boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return () => true;
+  return (o) => {
+    const text = `${o.label} ${o.value} ${o.hint || ""} ${o.description || ""} ${o.keywords || ""}`.toLowerCase();
+    return terms.every((t) => {
+      const cmp = /^(>=|<=|>|<)(-?\d+(?:\.\d+)?)%?$/.exec(t);
+      if (cmp) {
+        if (o.number == null) return false;
+        const n = Number(cmp[2]);
+        return cmp[1] === ">" ? o.number > n : cmp[1] === "<" ? o.number < n : cmp[1] === ">=" ? o.number >= n : o.number <= n;
+      }
+      return text.includes(t);
+    });
+  };
+}
+
+/** The text with every plain query term wrapped in <mark>, for the filtered list. */
+function highlight(text: string, query: string): ReactNode {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter((t) => t && !/^(>=|<=|>|<)/.test(t));
+  if (!terms.length) return text;
+  const re = new RegExp(`(${terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "ig");
+  return text.split(re).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part));
 }
 
 /** Options that need a filter box: above this many, the list opens with a search field focused. */
@@ -74,8 +114,12 @@ const SEARCH_FROM = 8;
  * The list flips above the trigger when there is more room there, and closes on outside click, page scroll
  * or resize. Groups render as headings; a hint renders muted on the right; the selected option shows a check.
  */
-export function SelectInput<T extends string>({ value, onChange, options, placeholder, className, ariaLabel, searchable }:
-  { value: T | ""; onChange: (v: T) => void; options: Option<T>[]; placeholder?: string; className?: string; ariaLabel?: string; searchable?: boolean }) {
+export function SelectInput<T extends string>({ value, onChange, options, placeholder, className, ariaLabel, searchable, searchPlaceholder, listWidth }:
+  { value: T | ""; onChange: (v: T) => void; options: Option<T>[]; placeholder?: string; className?: string; ariaLabel?: string; searchable?: boolean;
+    /** Placeholder of the filter box, a good place to hint at the query syntax. */
+    searchPlaceholder?: string;
+    /** Minimum width of the list in px (rich lists want more room than their trigger). */
+    listWidth?: number }) {
   const [open, setOpen] = useState(false);
   const [box, setBox] = useState<{ top: number; left: number; width: number; maxHeight: number; up: boolean } | null>(null);
   const [query, setQuery] = useState("");
@@ -88,7 +132,8 @@ export function SelectInput<T extends string>({ value, onChange, options, placeh
   const current = options.find((o) => o.value === value);
   const withSearch = searchable ?? options.length >= SEARCH_FROM;
   const q = query.trim().toLowerCase();
-  const visible = useMemo(() => (q ? options.filter((o) => `${o.label} ${o.value} ${o.hint || ""}`.toLowerCase().includes(q)) : options), [options, q]);
+  const visible = useMemo(() => (q ? options.filter(optionMatcher(query)) : options), [options, q, query]);
+  const rich = options.some((o) => o.description || o.icon);
   const enabled = visible.filter((o) => !o.disabled);
 
   const place = () => {
@@ -97,9 +142,9 @@ export function SelectInput<T extends string>({ value, onChange, options, placeh
     const r = t.getBoundingClientRect();
     const below = window.innerHeight - r.bottom - 12;
     const above = r.top - 12;
-    const wanted = Math.min(360, 8 + visible.length * 30 + (withSearch ? 38 : 0) + (new Set(visible.map((o) => o.group).filter(Boolean)).size * 24));
+    const wanted = Math.min(rich ? 420 : 360, 8 + visible.length * (rich ? 50 : 30) + (withSearch ? 38 : 0) + (new Set(visible.map((o) => o.group).filter(Boolean)).size * 24));
     const up = below < Math.min(wanted, 200) && above > below;
-    const maxHeight = Math.max(120, Math.min(360, up ? above : below));
+    const maxHeight = Math.max(120, Math.min(rich ? 420 : 360, up ? above : below));
     setBox({ top: up ? r.top - 4 : r.bottom + 4, left: r.left, width: r.width, maxHeight, up });
   };
   const openList = () => {
@@ -175,9 +220,14 @@ export function SelectInput<T extends string>({ value, onChange, options, placeh
     lastGroup = o.group;
     items.push(
       <div key={o.value} id={`${id}-${i}`} role="option" aria-selected={o.value === value} aria-disabled={o.disabled || undefined} data-active={i === active || undefined}
-        className="mm-select__option" onPointerMove={() => { if (!o.disabled && active !== i) setActive(i); }} onClick={() => pick(o)}>
-        <span className="mm-select__label">{o.label}</span>
-        {o.hint && <span className="mm-select__hint">{o.hint}</span>}
+        className={`mm-select__option${rich ? " mm-select__option--rich" : ""}`} onPointerMove={() => { if (!o.disabled && active !== i) setActive(i); }} onClick={() => pick(o)}>
+        {rich && <span className="mm-select__icon" aria-hidden>{o.icon}</span>}
+        <span className="mm-select__text">
+          <span className="mm-select__label">{q ? highlight(o.label, query) : o.label}</span>
+          {o.description && <span className="mm-select__desc">{q ? highlight(o.description, query) : o.description}</span>}
+        </span>
+        {o.hint && <span className="mm-select__hint">{q ? highlight(o.hint, query) : o.hint}</span>}
+        {o.trailing && <span className="mm-select__trailing">{o.trailing}</span>}
         <span className="mm-select__check" aria-hidden>{o.value === value ? "✓" : ""}</span>
       </div>,
     );
@@ -191,11 +241,16 @@ export function SelectInput<T extends string>({ value, onChange, options, placeh
       </button>
       {open && box && createPortal(
         <div ref={list} id={`${id}-list`} role="listbox" aria-label={ariaLabel} className={`mm-select__list${box.up ? " mm-select__list--up" : ""}`}
-          style={{ top: box.up ? undefined : box.top, bottom: box.up ? window.innerHeight - box.top : undefined, left: box.left, minWidth: box.width, maxHeight: box.maxHeight }}>
+          style={{ top: box.up ? undefined : box.top, bottom: box.up ? window.innerHeight - box.top : undefined, left: Math.max(12, Math.min(box.left, window.innerWidth - Math.max(box.width, listWidth || 0) - 12)), minWidth: Math.max(box.width, listWidth || 0), maxHeight: box.maxHeight }}>
           {withSearch && (
             <div className="mm-select__search">
-              <input ref={search} className="mm-control" value={query} placeholder="输入筛选…" aria-label="筛选选项" autoComplete="off" spellCheck={false}
+              <svg className="mm-select__glass" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden>
+                <circle cx="6" cy="6" r="4.2" /><path d="M9.2 9.2 12.5 12.5" />
+              </svg>
+              <input ref={search} className="mm-select__input" value={query} placeholder={searchPlaceholder || "输入筛选…"} aria-label="筛选选项" autoComplete="off" spellCheck={false}
                 onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey} />
+              {q ? <button type="button" className="mm-select__clear" aria-label="清除筛选" onMouseDown={(e) => e.preventDefault()} onClick={() => { setQuery(""); search.current?.focus(); }}>×</button> : null}
+              <span className="mm-select__count" aria-live="polite">{q ? `${visible.length} / ${options.length}` : options.length}</span>
             </div>
           )}
           <div className="mm-select__options">
