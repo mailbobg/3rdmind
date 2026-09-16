@@ -645,6 +645,9 @@ def prepare_backtest_config(body):
     record = studio_markets.universe(str(body.get("market") or "csi300"))
     if not body.get("benchmark"):
         body["benchmark"] = record["benchmark"]
+    for key in ("open_cost", "close_cost"):
+        if body.get(key) is None:
+            body[key] = record[key]
     config = validate_config(body)
     config["provider_uri"] = str(Path(config.get("provider_uri") or record["provider_uri"]).expanduser())
     config["region"] = record["region"]

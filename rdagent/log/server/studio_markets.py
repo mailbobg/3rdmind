@@ -18,7 +18,10 @@ from pathlib import Path
 CN_LABELS = {"csi300": "沪深300", "csi500": "中证500", "csi1000": "中证1000", "all": "全部 A 股"}
 CN_BENCHMARKS = {"csi300": "SH000300", "csi500": "SH000905", "csi1000": "SH000852", "all": "SH000300"}
 CN_ORDER = ["csi300", "csi500", "csi1000", "all"]
-RULES = {"cn": {"limit_threshold": 0.095, "min_cost": 5}, "us": {"limit_threshold": None, "min_cost": 1}}
+# Exchange rules per region: A-shares carry the 9.5% price limit, a 5-yuan minimum commission and a sell-side
+# cost that includes stamp duty; US large caps trade without a limit at near-zero brokerage.
+RULES = {"cn": {"limit_threshold": 0.095, "min_cost": 5, "open_cost": 0.0005, "close_cost": 0.0015},
+         "us": {"limit_threshold": None, "min_cost": 1, "open_cost": 0.0001, "close_cost": 0.0001}}
 MANIFEST = "studio-universe.json"
 
 
@@ -85,7 +88,7 @@ def _record(market, label, provider: Path, region, benchmark, group) -> dict:
     rules = RULES.get(region, RULES["cn"])
     return {"market": market, "label": label, "group": group, "provider_uri": str(provider), "region": region,
             "benchmark": benchmark, "limit_threshold": rules["limit_threshold"], "min_cost": rules["min_cost"],
-            "members": _members(provider, market)}
+            "open_cost": rules["open_cost"], "close_cost": rules["close_cost"], "members": _members(provider, market)}
 
 
 def universe(market: str) -> dict:

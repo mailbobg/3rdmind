@@ -484,6 +484,8 @@ def universe_env(market: str) -> dict[str, str]:
         env[f"QLIB_{kind}_REGION"] = record["region"]
         env[f"QLIB_{kind}_PROVIDER_URI"] = record["provider_uri"]
         env[f"QLIB_{kind}_LIMIT_THRESHOLD"] = "null" if record["limit_threshold"] is None else str(record["limit_threshold"])
+        env[f"QLIB_{kind}_OPEN_COST"] = str(record["open_cost"])
+        env[f"QLIB_{kind}_CLOSE_COST"] = str(record["close_cost"])
     if market == "csi300":
         return env
     # RD-Agent's LightGBM penalties (L1 205.7, L2 581) were tuned for CSI300; the leaf gradient sums they are
@@ -535,6 +537,7 @@ def universe_env(market: str) -> dict[str, str]:
 def list_universes():
     prepared = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe"
     return jsonify([{"market": u["market"], "label": u["label"], "group": u["group"], "region": u["region"], "benchmark": u["benchmark"],
+                     "open_cost": u["open_cost"], "close_cost": u["close_cost"], "min_cost": u["min_cost"], "limit_threshold": u["limit_threshold"],
                      "ready": u["market"] == "csi300" or (prepared / u["market"] / "full" / "daily_pv.h5").is_file()}
                     for u in studio_markets.universes()])
 

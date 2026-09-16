@@ -54,8 +54,8 @@ port_analysis_config: &port_analysis_config
         exchange_kwargs:
             limit_threshold: {{ limit_threshold | default("0.095", true) }}
             deal_price: close
-            open_cost: 0.0005
-            close_cost: 0.0015
+            open_cost: {{ open_cost | default("0.0005", true) }}
+            close_cost: {{ close_cost | default("0.0015", true) }}
             min_cost: 5
 task:
     model:

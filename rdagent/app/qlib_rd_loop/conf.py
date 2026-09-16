@@ -24,6 +24,10 @@ class ModelBasePropSetting(BasePropSetting):
     limit_threshold: str = "0.095"
     """Price-limit rule for the backtest exchange (rendered into the Qlib yaml; "null" for markets without one)"""
 
+    open_cost: str = "0.0005"
+    close_cost: str = "0.0015"
+    """Backtest commission rates rendered into the Qlib yaml (A-share defaults; the Studio sets them per market)"""
+
     lgb_lambda_l1: str = "205.6999"
     lgb_lambda_l2: str = "580.9768"
     """LightGBM leaf penalties of the factor-evaluation model. Tuned for CSI300; a smaller universe has fewer
@@ -87,6 +91,10 @@ class FactorBasePropSetting(BasePropSetting):
 
     limit_threshold: str = "0.095"
     """Price-limit rule for the backtest exchange (rendered into the Qlib yaml; "null" for markets without one)"""
+
+    open_cost: str = "0.0005"
+    close_cost: str = "0.0015"
+    """Backtest commission rates rendered into the Qlib yaml (A-share defaults; the Studio sets them per market)"""
 
     lgb_lambda_l1: str = "205.6999"
     lgb_lambda_l2: str = "580.9768"
@@ -167,6 +175,10 @@ class QuantBasePropSetting(BasePropSetting):
 
     limit_threshold: str = "0.095"
     """Price-limit rule for the backtest exchange (rendered into the Qlib yaml; "null" for markets without one)"""
+
+    open_cost: str = "0.0005"
+    close_cost: str = "0.0015"
+    """Backtest commission rates rendered into the Qlib yaml (A-share defaults; the Studio sets them per market)"""
 
     lgb_lambda_l1: str = "205.6999"
     lgb_lambda_l2: str = "580.9768"

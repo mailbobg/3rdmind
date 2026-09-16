@@ -506,6 +506,7 @@ def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, mo
     assert server.available_universes() == ["csi300", "csi1000", "all", "nasdaq100"]  # sp500 has no instruments file
     env = server.universe_env("nasdaq100")
     assert env["QLIB_FACTOR_REGION"] == "us" and env["QLIB_FACTOR_BENCHMARK"] == "^ndx" and env["QLIB_FACTOR_LIMIT_THRESHOLD"] == "null"
+    assert env["QLIB_FACTOR_OPEN_COST"] == "0.0001" and env["QLIB_FACTOR_CLOSE_COST"] == "0.0001"
     assert env["QLIB_PROVIDER_URI"] == env["QLIB_FACTOR_PROVIDER_URI"] == str(us)
     assert calls[-1][2] == str(us) and calls[-1][3] == "nasdaq100" and calls[-1][-1] == "us"
     from rdagent.log.server import studio_markets
@@ -1247,6 +1248,12 @@ def test_backtest_on_a_us_universe_takes_its_data_region_and_rules(studio_client
     config = json.loads((tmp_path / "traces" / "studio_backtests" / response.get_json()["id"] / "config.json").read_text())
     assert config["provider_uri"] == str(us) and config["region"] == "us"
     assert config["benchmark"] == "^ndx" and config["limit_threshold"] is None and config["min_cost"] == 1
+    # Commissions given by the caller are kept; a body without them gets the market's defaults.
+    assert config["open_cost"] == 0.0005 and config["close_cost"] == 0.0015
+    slim = {k: v for k, v in body.items() if k not in ("open_cost", "close_cost")}
+    job = studio_client.post("/studio/backtests", json=slim).get_json()["id"]
+    defaults = json.loads((tmp_path / "traces" / "studio_backtests" / job / "config.json").read_text())
+    assert defaults["open_cost"] == 0.0001 and defaults["close_cost"] == 0.0001
     assert studio_client.post("/studio/backtests", json=dict(body, market="sp500")).status_code == 400
 
 

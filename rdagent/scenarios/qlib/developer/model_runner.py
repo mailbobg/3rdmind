@@ -12,6 +12,12 @@ from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperime
 
 
 class QlibModelRunner(CachedRunner[QlibModelExperiment]):
+    @property
+    def cache_scope(self) -> str:
+        """Market, region and data directory the experiment runs on (part of the result cache key)."""
+        settings = ModelBasePropSetting()
+        return f"{settings.market}|{settings.region}|{settings.provider_uri}"
+
     """
     Docker run
     Everything in a folder
@@ -67,6 +73,8 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
             "region": mbps.region,
             "provider_uri": mbps.provider_uri,
             "limit_threshold": mbps.limit_threshold,
+            "open_cost": mbps.open_cost,
+            "close_cost": mbps.close_cost,
             "lgb_lambda_l1": mbps.lgb_lambda_l1,
             "lgb_lambda_l2": mbps.lgb_lambda_l2,
             "train_start": mbps.train_start,

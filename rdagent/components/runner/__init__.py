@@ -11,7 +11,10 @@ class CachedRunner(Developer[ASpecificExp]):
         all_tasks.extend(exp.sub_tasks)
         task_info_list = [task.get_task_information() for task in all_tasks]
         task_info_str = "\n".join(task_info_list)
-        return md5_hash(task_info_str)
+        # Runners whose results depend on the data they ran on (market, region, data directory) add that
+        # scope here, so the same factor evaluated on two markets never shares a cache entry.
+        scope = getattr(self, "cache_scope", "")
+        return md5_hash(task_info_str + (f"\n@{scope}" if scope else ""))
 
     def assign_cached_result(self, exp: Experiment, cached_res: Experiment) -> Experiment:
         if exp.based_experiments and exp.based_experiments[-1].result is None:

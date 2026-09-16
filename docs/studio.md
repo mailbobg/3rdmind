@@ -110,7 +110,9 @@ snapshot) contributes every `instruments/*.txt` it holds, and any sibling direct
 Research runs on such a universe get `QLIB_*_REGION`, `QLIB_*_PROVIDER_URI` and `QLIB_*_LIMIT_THRESHOLD`
 beside market and benchmark (the Qlib yaml templates render all five), and their factor input data is
 exported from that directory. Backtests, analyses and "重算到最新" read the same registry, so a US backtest
-runs with `region=us`, no price limit and a 1-dollar minimum commission. Each run records its universe in
+runs with `region=us`, no price limit, a 1-dollar minimum commission and 0.01% brokerage each way (A-shares keep
+0.05% / 0.15%); the commission defaults live in the registry and reach both RD-Agent's templates and the Studio's
+backtest form. The report-factor prompts name the market too, and RD-Agent's result cache is keyed by market. Each run records its universe in
 `studio-run.json` beside its trace; the factor library and experiment list show it, and the backtest form
 follows the basket's universe. RD-Agent's factor-evaluation LightGBM carries L1/L2 leaf penalties tuned for
 CSI300 (205.7 / 581); on a universe with fewer than 300 names they are scaled by size (`QLIB_*_LGB_LAMBDA_L1/L2`),

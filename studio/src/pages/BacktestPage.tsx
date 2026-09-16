@@ -45,7 +45,7 @@ export function BacktestPage() {
   useEffect(() => {
     if (!universes.length || universes.some((u) => u.market === params.market)) return;
     const u = universes[0];
-    setParams((p) => ({ ...p, market: u.market, benchmark: u.benchmark }));
+    setParams((p) => ({ ...p, market: u.market, benchmark: u.benchmark, open_cost: u.open_cost, close_cost: u.close_cost }));
   }, [universes]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (searchParams.get("tab")) setSearchParams({}, { replace: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Portfolio search: the basket's factor signals are the candidates, the backtest parameters the setting.
@@ -238,7 +238,7 @@ export function BacktestPage() {
     const [market] = [...markets];
     if (market === params.market) return;
     const u = universes.find((x) => x.market === market);
-    setParams((p) => ({ ...p, market, benchmark: u?.benchmark || p.benchmark }));
+    setParams((p) => ({ ...p, market, ...(u ? { benchmark: u.benchmark, open_cost: u.open_cost, close_cost: u.close_cost } : {}) }));
     setPageError("");
   }, [basket.items, library, universes]); // eslint-disable-line react-hooks/exhaustive-deps
   // Rank mode gets the whole coverage; LightGBM needs history first, so the backtest takes the last third and
@@ -339,13 +339,13 @@ export function BacktestPage() {
             <FieldGrid min={140}>
               <Field label="开始"><TextInput type="date" value={params.start} onChange={(v) => setDate("start", v)} /></Field>
               <Field label="结束"><TextInput type="date" value={params.end} onChange={(v) => setDate("end", v)} /></Field>
-              <Field label="股票池"><SelectInput value={params.market} onChange={(v) => { set("market", v); const b = universes.find((u) => u.market === v)?.benchmark; if (b) set("benchmark", b); }} options={(universes.length ? universes.map((u) => u.market) : ["csi300", "csi500", "all"]).map((m) => ({ value: m as Market, label: universeLabel(m) }))} /></Field>
+              <Field label="股票池"><SelectInput value={params.market} onChange={(v) => { const u = universes.find((x) => x.market === v); setParams((p) => ({ ...p, market: v, ...(u ? { benchmark: u.benchmark, open_cost: u.open_cost, close_cost: u.close_cost } : {}) })); }} options={(universes.length ? universes.map((u) => u.market) : ["csi300", "csi500", "all"]).map((m) => ({ value: m as Market, label: universeLabel(m) }))} /></Field>
               <Field label="基准"><TextInput value={params.benchmark} onChange={(v) => set("benchmark", v)} /></Field>
               <Field label="持股数" hint="每天按评分持有前 topk 只"><NumberInput value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} /></Field>
               <Field label="每日换出" hint="每天最多换出 n_drop 只"><NumberInput value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} /></Field>
               <Field label="初始资金"><NumberInput value={params.account} onChange={(v) => set("account", v)} min={1000} step={100000} /></Field>
               <Field label="买入费率" hint="0.0005 = 万分之五"><NumberInput value={params.open_cost} onChange={(v) => set("open_cost", v)} min={0} max={0.1} step={0.0001} /></Field>
-              <Field label="卖出费率" hint="0.0015 含印花税"><NumberInput value={params.close_cost} onChange={(v) => set("close_cost", v)} min={0} max={0.1} step={0.0001} /></Field>
+              <Field label="卖出费率" hint={universes.find((u) => u.market === params.market)?.region === "us" ? "美股经纪佣金接近零，默认万分之一" : "0.0015 含印花税"}><NumberInput value={params.close_cost} onChange={(v) => set("close_cost", v)} min={0} max={0.1} step={0.0001} /></Field>
               <Field label="信号合成" hint="排名加权：截面百分位排名按权重求和；LightGBM：学信号与次日收益的关系，验证集早停">
                 <SelectInput value={method} onChange={setMethod} options={[{ value: "rank", label: "排名加权" }, { value: "lgbm", label: "训练 LightGBM" }]} />
               </Field>

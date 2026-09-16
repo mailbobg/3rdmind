@@ -26,6 +26,18 @@ from rdagent.scenarios.qlib.factor_experiment_loader.json_loader import (
 from rdagent.utils.agent.tpl import T
 
 
+def market_description() -> str:
+    """The market the extracted factors are meant for, from the factor research settings (e.g. NASDAQ100, US)."""
+    from rdagent.app.qlib_rd_loop.conf import FactorBasePropSetting
+
+    settings = FactorBasePropSetting()
+    if settings.market == "csi300" and settings.region == "cn":
+        return "China A-share market"
+    region = {"cn": "China A-share", "us": "US equity"}.get(settings.region, settings.region.upper())
+    return f"{region} market, {settings.market.upper()} universe"
+
+
+
 def classify_report_from_dict(
     report_dict: Mapping[str, str],
     vote_time: int = 1,
@@ -271,7 +283,7 @@ def __check_factor_dict_relevance(
     factor_df_string: str,
 ) -> dict[str, dict[str, str]]:
     extract_result_resp = APIBackend().build_messages_and_create_chat_completion(
-        system_prompt=T(".prompts:factor_relevance_system").r(),
+        system_prompt=T(".prompts:factor_relevance_system").r(market_desc=market_description()),
         user_prompt=factor_df_string,
         json_mode=True,
     )
@@ -314,7 +326,7 @@ def __check_factor_dict_viability_simulate_json_mode(
     factor_df_string: str,
 ) -> dict[str, dict[str, str]]:
     extract_result_resp = APIBackend().build_messages_and_create_chat_completion(
-        system_prompt=T(".prompts:factor_viability_system").r(),
+        system_prompt=T(".prompts:factor_viability_system").r(market_desc=market_description()),
         user_prompt=factor_df_string,
         json_mode=True,
     )
@@ -365,7 +377,7 @@ def __check_factor_duplication_simulate_json_mode(
         current_df = working_list.pop(0)
         if (
             APIBackend().build_messages_and_calculate_token(
-                user_prompt=current_df.to_string(), system_prompt=T(".prompts:factor_duplicate_system").r()
+                user_prompt=current_df.to_string(), system_prompt=T(".prompts:factor_duplicate_system").r(market_desc=market_description())
             )
             > APIBackend().chat_token_limit
         ):
@@ -378,7 +390,7 @@ def __check_factor_duplication_simulate_json_mode(
     for current_df in final_list:
         current_factor_to_string = current_df.to_string()
         session = APIBackend().build_chat_session(
-            session_system_prompt=T(".prompts:factor_duplicate_system").r(),
+            session_system_prompt=T(".prompts:factor_duplicate_system").r(market_desc=market_description()),
         )
         for _ in range(10):
             extract_result_resp = session.build_chat_completion(

@@ -23,6 +23,12 @@ DIRNAME_local = Path.cwd()
 
 
 class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
+    @property
+    def cache_scope(self) -> str:
+        """Market, region and data directory the experiment runs on (part of the result cache key)."""
+        settings = FactorBasePropSetting()
+        return f"{settings.market}|{settings.region}|{settings.provider_uri}"
+
     """
     Docker run
     Everything in a folder
@@ -78,6 +84,8 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
             "region": fbps.region,
             "provider_uri": fbps.provider_uri,
             "limit_threshold": fbps.limit_threshold,
+            "open_cost": fbps.open_cost,
+            "close_cost": fbps.close_cost,
             "lgb_lambda_l1": fbps.lgb_lambda_l1,
             "lgb_lambda_l2": fbps.lgb_lambda_l2,
             "train_start": fbps.train_start,
