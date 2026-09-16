@@ -15,6 +15,8 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,23 +81,55 @@ def save_settings(values: dict) -> dict:
 
 
 def _get_json(url: str, timeout: int = 20) -> dict:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    # An unauthenticated client gets 60 API calls an hour per IP; a token (GITHUB_TOKEN or GH_TOKEN) lifts that.
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token and "api.github.com" in url:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _latest_tag_by_redirect(timeout: int = 20) -> str:
+    """The latest release tag from the web redirect of /releases/latest, which is not API rate-limited."""
+    request = urllib.request.Request(f"https://github.com/{REPO}/releases/latest", method="HEAD", headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        final = response.geturl()
+    tag = final.rstrip("/").rsplit("/", 1)[-1]
+    if not tag or tag == "latest":
+        raise RuntimeError(f"Could not read the latest release tag from {final}")
+    return urllib.parse.unquote(tag)
+
+
 def check_remote(max_age: float = 900) -> dict:
-    """The latest release (tag, published_at, archive url/size, manifest url), cached for 15 minutes."""
+    """The latest release (tag, published_at, archive url/size, manifest url), cached for 15 minutes.
+
+    Uses the GitHub API; when that is rate-limited (HTTP 403/429) falls back to the release page's redirect for the
+    tag and derives the download URLs (size and publish time then unknown). A stale cache beats an error."""
     now = time.time()
     if _remote_cache["release"] and now - _remote_cache["checked_at"] < max_age:
         return _remote_cache["release"]
-    data = _get_json(f"https://api.github.com/repos/{REPO}/releases/latest")
-    assets = {a["name"]: a for a in data.get("assets", [])}
-    if ARCHIVE not in assets:
-        raise RuntimeError(f"Latest release {data.get('tag_name')} has no {ARCHIVE}")
-    release = {"release": data.get("tag_name"), "published_at": data.get("published_at"),
-               "archive_url": assets[ARCHIVE]["browser_download_url"], "archive_bytes": assets[ARCHIVE].get("size"),
-               "manifest_url": assets.get(MANIFEST, {}).get("browser_download_url")}
+    try:
+        data = _get_json(f"https://api.github.com/repos/{REPO}/releases/latest")
+        assets = {a["name"]: a for a in data.get("assets", [])}
+        if ARCHIVE not in assets:
+            raise RuntimeError(f"Latest release {data.get('tag_name')} has no {ARCHIVE}")
+        release = {"release": data.get("tag_name"), "published_at": data.get("published_at"),
+                   "archive_url": assets[ARCHIVE]["browser_download_url"], "archive_bytes": assets[ARCHIVE].get("size"),
+                   "manifest_url": assets.get(MANIFEST, {}).get("browser_download_url")}
+    except urllib.error.HTTPError as error:
+        if error.code not in (403, 429):
+            raise
+        try:
+            tag = _latest_tag_by_redirect()
+        except Exception as fallback_error:  # noqa: BLE001
+            if _remote_cache["release"]:
+                return _remote_cache["release"]
+            raise RuntimeError(f"GitHub API 限流（HTTP {error.code}），发布页也读不到：{fallback_error}") from fallback_error
+        base = f"https://github.com/{REPO}/releases/download/{tag}"
+        release = {"release": tag, "published_at": None, "archive_url": f"{base}/{ARCHIVE}", "archive_bytes": None,
+                   "manifest_url": f"{base}/{MANIFEST}"}
     _remote_cache.update({"checked_at": now, "release": release})
     return release
 

@@ -31,6 +31,10 @@ azure-ai-formrecognizer
 # factor implementations
 tables
 
+# Research Studio: local backtests, portfolio search and signal synthesis run Qlib in this environment
+pyqlib
+lightgbm
+
 # CI Fix Tool
 tree-sitter-python
 tree-sitter

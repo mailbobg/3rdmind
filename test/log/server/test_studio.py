@@ -1183,3 +1183,30 @@ def test_llm_model_listing_filters_chat_models(studio_client, tmp_path: Path, mo
     assert result["models"] == ["gemini-3.8-flash"] and "key=g" in seen["url"] and "key" not in result["source"]
     result = studio_client.post("/studio/llm/models", json={"provider": "openai_compatible", "api_key": "k", "base_url": "https://relay/v1/"}).get_json()
     assert result["ok"] and seen["url"] == "https://relay/v1/models"
+
+
+@pytest.mark.offline
+def test_sync_remote_check_falls_back_when_the_api_is_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+    from rdagent.log.server import studio_sync
+
+    monkeypatch.setattr(studio_sync, "_remote_cache", {"checked_at": 0.0, "release": None})
+
+    def limited(url, timeout=20):
+        raise urllib.error.HTTPError(url, 403, "rate limit exceeded", {}, None)
+
+    monkeypatch.setattr(studio_sync, "_get_json", limited)
+    monkeypatch.setattr(studio_sync, "_latest_tag_by_redirect", lambda timeout=20: "2026-09-15")
+    release = studio_sync.check_remote(max_age=0)
+    assert release["release"] == "2026-09-15" and release["archive_bytes"] is None
+    assert release["archive_url"] == f"https://github.com/{studio_sync.REPO}/releases/download/2026-09-15/{studio_sync.ARCHIVE}"
+    # Both routes down: the cached answer is served; with no cache the error names the rate limit.
+    monkeypatch.setattr(studio_sync, "_latest_tag_by_redirect", lambda timeout=20: (_ for _ in ()).throw(RuntimeError("offline")))
+    assert studio_sync.check_remote(max_age=0)["release"] == "2026-09-15"
+    monkeypatch.setattr(studio_sync, "_remote_cache", {"checked_at": 0.0, "release": None})
+    with pytest.raises(RuntimeError, match="限流"):
+        studio_sync.check_remote(max_age=0)
+    # Other HTTP errors still surface as they are.
+    monkeypatch.setattr(studio_sync, "_get_json", lambda url, timeout=20: (_ for _ in ()).throw(urllib.error.HTTPError(url, 500, "boom", {}, None)))
+    with pytest.raises(urllib.error.HTTPError):
+        studio_sync.check_remote(max_age=0)
