@@ -36,7 +36,7 @@ export function StudioShell() {
   return (
     <StudioContext.Provider value={value}>
       <div className="grid h-full grid-cols-[230px_minmax(0,1fr)] gap-2 bg-background p-2">
-        <aside className="flex min-h-0 flex-col overflow-y-auto rounded-r-2xl rounded-l-none border border-border bg-surface px-3.5 py-5">
+        <aside className="flex min-h-0 flex-col overflow-y-auto rounded-r-2xl rounded-l-none bg-surface px-3.5 py-5">
           <a href="#/research" className="mx-auto flex flex-col items-center gap-0.5 no-underline" aria-label="AI 研究">
             <img src={`${import.meta.env.BASE_URL}rd-agent-mark.png`} alt="" className="size-20" />
             <small className="text-[11px] text-muted">RD-Agent × Qlib</small>
