@@ -66,11 +66,14 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
 
   return (
     <div className="mb-3 text-xs">
-      <button type="button" className="rail-tool" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open} title="打开同步面板">
-        <i className={`inline-block size-[7px] shrink-0 rounded-full ${running ? "bg-warning" : newer ? "bg-accent" : "bg-success"}`} />
-        <span className="rail-tool__label">同步数据</span>
-        <span className="rail-tool__hint">{headline}</span>
-        <span className="rail-tool__chevron" aria-hidden>›</span>
+      <button type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open}
+        className="-mx-2.5 flex w-[calc(100%+20px)] items-center gap-2.5 rounded-[10px] px-2.5 py-2 text-left text-foreground transition-colors hover:bg-surface-secondary">
+        <span className={`w-[22px] text-center text-[17px] leading-none ${running ? "animate-spin" : ""}`} aria-hidden>⟳</span>
+        <span className="min-w-0 flex-1 text-[13px] font-medium">同步数据</span>
+        <span className={`flex items-center gap-1.5 text-[11px] ${newer ? "text-accent" : "text-muted"}`}>
+          {(running || newer) && <i className={`inline-block size-[6px] rounded-full ${running ? "bg-warning" : "bg-accent"}`} />}
+          {headline}
+        </span>
       </button>
       {open && createPortal(
         <>
