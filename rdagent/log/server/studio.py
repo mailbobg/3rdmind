@@ -12,7 +12,7 @@ from pathlib import Path
 from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
-from rdagent.log.server import studio_sync
+from rdagent.log.server import studio_llm, studio_sync
 from rdagent.log.server.studio_worker import validate_config, write_json
 
 studio = Blueprint("studio", __name__, url_prefix="/studio")
@@ -359,7 +359,8 @@ def environment():
     provider = Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser()
     calendar = provider / "calendars" / "day.txt"
     dates = calendar.read_text().splitlines() if calendar.is_file() else []
-    return jsonify({"chat_model": os.environ.get("LITELLM_CHAT_MODEL", os.environ.get("CHAT_MODEL", "")),
+    llm = studio_llm.resolve()
+    return jsonify({"chat_model": llm["model"] if llm else os.environ.get("LITELLM_CHAT_MODEL", os.environ.get("CHAT_MODEL", "")),
                     "provider_uri": str(provider), "data_ready": bool(dates),
                     "start": dates[0] if dates else None, "end": dates[-1] if dates else None,
                     "python": os.environ.get("STUDIO_PYTHON", sys.executable)})
@@ -1028,6 +1029,7 @@ def workers_busy(app):
 def _configure_sync(state):
     app = state.app
     studio_sync.configure(TRACE_ROOT / "studio_data" / "sync.json", lambda: workers_busy(app))
+    studio_llm.configure(TRACE_ROOT / "studio_data" / "llm.json")
 
 
 @studio.get("/data/sync")
@@ -1064,3 +1066,24 @@ def data_sync_settings():
             return jsonify({"error": "hour must be 0–23"}), 400
         values["hour"] = hour
     return jsonify(studio_sync.save_settings(values))
+
+
+# ---- LLM settings: provider, model and key for research runs ------------------------------------------
+
+@studio.get("/llm")
+def llm_settings():
+    return jsonify(studio_llm.status())
+
+
+@studio.route("/llm", methods=["PUT"])
+def llm_save():
+    try:
+        return jsonify(studio_llm.save(request.get_json() or {}))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.post("/llm/test")
+def llm_test():
+    result = studio_llm.test_connection(request.get_json() or {})
+    return jsonify(result), (200 if result.get("ok") else 502)

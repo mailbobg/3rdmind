@@ -41,6 +41,7 @@ from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.ui.storage import WebStorage
 
 app = Flask(__name__, static_folder=str(Path(UI_SETTING.static_path).resolve()))
+from rdagent.log.server import studio_llm
 from rdagent.log.server.studio import studio
 
 app.register_blueprint(studio)
@@ -109,7 +110,8 @@ class RDAgentTask:
         self.kwargs = kwargs
         # Per-run settings (e.g. the instrument universe) delivered as environment variables, applied in the
         # child before any rdagent settings module is imported so pydantic-settings picks them up.
-        self.env: dict[str, str] = dict(env or {})
+        # The Studio's saved LLM settings (studio_llm) sit beneath the run's own variables.
+        self.env: dict[str, str] = {**studio_llm.env(), **(env or {})}
         self.stdout_path = stdout_path
         self.log_trace_path = log_trace_path
         self.scenario = scenario

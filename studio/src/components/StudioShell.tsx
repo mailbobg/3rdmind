@@ -8,6 +8,7 @@ import { useBacktests } from "../hooks/useBacktests";
 import { useFactorBasket } from "../hooks/useFactorBasket";
 import { useLayoutState } from "../hooks/useLayoutState";
 import { DataSync } from "./DataSync";
+import { LlmSettings } from "./LlmSettings";
 
 const MENU = [
   { path: "/research", symbol: "◎", title: "AI 研究", desc: "提出假设，开发并评估因子或模型" },
@@ -56,6 +57,7 @@ export function StudioShell() {
             <p className="my-2 leading-relaxed">所有成功与失败都保留在运行记录中。</p>
           </div>
           <div className="mt-auto px-2 pt-8 text-xs">
+            <LlmSettings onSaved={reloadEnv} />
             <DataSync onSynced={reloadEnv} />
             <div className="flex items-center gap-2">
               <i className={`inline-block size-[7px] rounded-full ${env ? (env.data_ready ? "bg-success" : "bg-warning") : "bg-danger"}`} />

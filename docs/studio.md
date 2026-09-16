@@ -60,6 +60,13 @@ chenditc/investment_data release, syncs on demand (download, sha256 check, unpac
 while a worker or experiment runs) and, when switched on, once a day at a chosen hour (`/studio/data/sync`,
 settings in `traces/studio_data/sync.json`). After a sync, factor refreshes and universe exports rebuild themselves.
 
+The rail's "模型设置" block picks the LLM for research runs: provider (DeepSeek, OpenAI, Anthropic, Gemini,
+DashScope, Moonshot or any OpenAI-compatible endpoint), model, API key, optional base URL and retry count, with a
+one-message connection test (`/studio/llm`, `/studio/llm/test`). Saved settings go to
+`traces/studio_data/llm.json` (mode 600, one key per provider, never echoed back beyond its last four
+characters) and are injected into the environment of every research process started afterwards, so switching
+provider needs no restart; until something is saved, runs use whatever the .env file gave the server.
+
 `UI_LOAD_LEGACY_PICKLE_TRACES=true` loads finished experiments from the trace folder so they can be replayed;
 without it only experiments started by this server process are visible.
 

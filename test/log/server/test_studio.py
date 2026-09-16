@@ -143,6 +143,7 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(studio_module, "INSTRUMENT_NAMES", trace_folder / "studio_data" / "instrument_names.json")
     monkeypatch.setattr(studio_module, "LATEST_DATA", trace_folder / "studio_data" / "daily_pv_latest.h5")
     monkeypatch.setattr(studio_module, "WORKSPACE_ROOT", workspace_root)
+    monkeypatch.setattr(studio_module.studio_llm, "_settings_path", trace_folder / "studio_data" / "llm.json")
     monkeypatch.setattr(studio_module.subprocess, "Popen", lambda *a, **k: type("P", (), {"poll": lambda self: None})())
     server.rdagent_processes.clear()
     _task_with_metric(trace_folder, "Finance Data Building/demo", workspace_root)
@@ -1098,3 +1099,54 @@ def test_trace_status_distinguishes_unknown_and_loaded(studio_client) -> None:
     assert studio_client.get("/studio/trace-status", query_string={"trace": "nope/none"}).get_json() == {"loaded": False, "alive": False, "messages": 0}
     status = studio_client.get("/studio/trace-status", query_string={"trace": "Finance Data Building/demo"}).get_json()
     assert status["loaded"] is True and status["alive"] is False and status["messages"] >= 2
+
+
+@pytest.mark.offline
+def test_llm_settings_save_env_and_test(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import types
+    from rdagent.log.server import studio_llm
+
+    monkeypatch.setattr(studio_llm, "_settings_path", tmp_path / "llm.json")
+    monkeypatch.setenv("CHAT_MODEL", "deepseek/deepseek-chat")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-12345678")
+    # Nothing saved yet: the UI sees what .env gave the server, without the key itself.
+    current = studio_client.get("/studio/llm").get_json()["current"]
+    assert current["source"] == "env" and current["provider"] == "deepseek" and current["model"] == "deepseek-chat"
+    assert current["has_key"] and current["key_hint"] == "…5678" and "sk-env" not in json.dumps(current)
+    assert studio_llm.env() == {}
+    # Validation.
+    assert studio_client.put("/studio/llm", json={"provider": "nope", "model": "x"}).status_code == 400
+    assert "Base URL" in studio_client.put("/studio/llm", json={"provider": "openai_compatible", "model": "x"}).get_json()["error"]
+    # Saving a provider with a key; the key file is private and the key never comes back.
+    saved = studio_client.put("/studio/llm", json={"provider": "anthropic", "model": "claude-sonnet-5", "api_key": "sk-ant-abcdefgh", "max_retry": 5}).get_json()
+    assert saved["current"] == {**saved["current"], "source": "studio", "provider": "anthropic", "key_hint": "…efgh", "has_key": True, "max_retry": 5}
+    assert "sk-ant" not in json.dumps(saved)
+    assert oct((tmp_path / "llm.json").stat().st_mode & 0o777) == "0o600"
+    env = studio_llm.env()
+    assert env["CHAT_MODEL"] == env["LITELLM_CHAT_MODEL"] == "anthropic/claude-sonnet-5"
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-abcdefgh" and env["MAX_RETRY"] == "5"
+    # A new research task inherits it beneath its own variables.
+    task = server.RDAgentTask("fin_factor", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False, env={"QLIB_FACTOR_MARKET": "csi500"})
+    assert task.env["ANTHROPIC_API_KEY"] == "sk-ant-abcdefgh" and task.env["QLIB_FACTOR_MARKET"] == "csi500"
+    # Switching provider without a key keeps the other provider's key on file and reports no key for the new one.
+    switched = studio_client.put("/studio/llm", json={"provider": "openai", "model": "gpt-5"}).get_json()["current"]
+    assert switched["has_key"] is False and switched["saved_keys"] == {"anthropic": "…efgh"}
+    # Back on the .env provider without a stored key: the inherited key still counts, and is flagged as such.
+    back = studio_client.put("/studio/llm", json={"provider": "deepseek", "model": "deepseek-chat"}).get_json()["current"]
+    assert back["has_key"] and back["key_from_env"] and back["key_hint"] == "…5678"
+    assert studio_llm.env()["DEEPSEEK_API_KEY"] == "sk-env-12345678"
+    studio_client.put("/studio/llm", json={"provider": "openai", "model": "gpt-5"})
+    assert studio_client.get("/studio/environment").get_json()["chat_model"] == "openai/gpt-5"
+    # The connection test uses the form's key over the stored one and reports the model it called.
+    calls = []
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="OK"))])
+
+    monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion))
+    result = studio_client.post("/studio/llm/test", json={"provider": "openai_compatible", "model": "qwen-plus", "api_key": "k1", "base_url": "https://x/v1"}).get_json()
+    assert result["ok"] and result["reply"] == "OK" and result["model"] == "openai/qwen-plus"
+    assert calls[0]["api_key"] == "k1" and calls[0]["api_base"] == "https://x/v1"
+    assert studio_client.post("/studio/llm/test", json={"provider": "openai", "model": "gpt-5"}).status_code == 502

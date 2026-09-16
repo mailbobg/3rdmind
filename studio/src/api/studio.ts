@@ -219,3 +219,17 @@ export const saveDataSyncSettings = (values: { auto?: boolean; hour?: number }) 
     .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as SyncStatus["settings"]; });
 export const instrumentNames = () => api<{ source: string | null; names: Record<string, { name: string; industry?: string }> }>("/studio/instruments/names");
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});
+export interface LlmProvider { id: string; label: string; prefix: string; key_env: string; base_env: string; models: string[]; needs_base?: boolean; site: string }
+export interface LlmCurrent {
+  provider: string | null; model: string; base_url: string; key_hint: string; has_key: boolean; key_from_env?: boolean; max_retry: number;
+  source: "studio" | "env"; updated: string | null; saved_keys: Record<string, string>;
+}
+export interface LlmStatus { current: LlmCurrent; providers: LlmProvider[]; path: string | null }
+export interface LlmForm { provider: string; model: string; api_key?: string; base_url?: string; max_retry?: number; clear_key?: boolean }
+export const llmSettings = () => api<LlmStatus>("/studio/llm");
+export const saveLlmSettings = (values: LlmForm) =>
+  fetch("/studio/llm", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
+    .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as LlmStatus; });
+export const testLlmSettings = (values: LlmForm) =>
+  fetch("/studio/llm/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
+    .then(async (r) => (await r.json()) as { ok: boolean; reply?: string; error?: string; seconds?: number; model?: string });
