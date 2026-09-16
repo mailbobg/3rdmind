@@ -62,7 +62,7 @@ export function StudioShell() {
               {env ? (env.data_ready ? "Qlib 数据已就绪" : "等待 Qlib 数据") : "后端未连接"}
             </div>
             {env ? (
-              <small className="mb-4 mt-1.5 block text-muted">{env.start || "—"} → {env.end || "—"}<br />{(env.chat_model || "未配置研究模型").replace("deepseek/", "")}</small>
+              <small className="mb-4 mt-1.5 block text-muted">{env.start || "—"} → {env.end || "—"}</small>
             ) : (
               <small className="mb-4 mt-1.5 block text-muted">运行 <code>scripts/start-backend.sh</code> 后 <button className="text-accent underline" onClick={() => reloadEnv()}>重试</button></small>
             )}
