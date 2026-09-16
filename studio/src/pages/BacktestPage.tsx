@@ -11,6 +11,7 @@ import { BacktestResultView } from "../components/BacktestResultView";
 import { SearchResultView } from "../components/SearchResultView";
 import { useSearches } from "../hooks/useSearches";
 import { shortTime } from "../hooks/experiments";
+import { DUPLICATE_CORR, pickByCorrelation, rankCandidates } from "../hooks/autoPick";
 import type { SearchObjective } from "../api/studio";
 import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { Hint } from "../components/widgets";
@@ -51,6 +52,39 @@ export function BacktestPage() {
   };
   // The recommendation is rebuilt from the search job's own factor references, so it works even when the
   // basket has changed since (or the result belongs to an earlier search).
+  // 自动挑候选: rank the library by |ICIR|, drop noise, keep one of each near-duplicate pair, sign by Rank IC.
+  const [picking, setPicking] = useState(false);
+  const [pickNote, setPickNote] = useState("");
+  const [pendingAnalysis, setPendingAnalysis] = useState<LibraryFactor[]>([]);
+  const [analyzeProgress, setAnalyzeProgress] = useState("");
+  // Analyses are Qlib subprocesses, so they run one at a time; then the library is re-read and the pick redone.
+  const analyzeThenPick = async () => {
+    setPicking(true);
+    try {
+      for (let i = 0; i < pendingAnalysis.length; i++) {
+        setAnalyzeProgress(`计算指标 ${i + 1}/${pendingAnalysis.length}：${pendingAnalysis[i].name}`);
+        try { await studio.factorAnalysis(pendingAnalysis[i]); } catch (e) { setPageError(`${pendingAnalysis[i].name}：${errorText(e)}`); }
+      }
+      const list = await studio.factorLibrary();
+      const fresh = Object.fromEntries(list.map((f) => [key(f), f]));
+      setLibrary(fresh);
+      await autoPick(Object.values(fresh));
+    } finally { setAnalyzeProgress(""); setPicking(false); }
+  };
+  const autoPick = async (pool: LibraryFactor[] = Object.values(library)) => {
+    setPicking(true); setPickNote("");
+    try {
+      const all = pool;
+      const { ranked, noise, unanalyzed } = rankCandidates(all);
+      setPendingAnalysis(unanalyzed);
+      if (ranked.length < 2) { setPickNote(`因子库里只有 ${ranked.length} 个因子有可用信号（${noise.length} 个是噪声，${unanalyzed.length} 个还没算指标），不够搜索。先在因子库点"分析全部"。`); return; }
+      const shortlist = ranked.slice(0, 12);
+      const corr = await studio.factorCorrelation(shortlist.map((r) => ({ trace: r.factor.trace, loop_id: r.factor.loop_id, name: r.factor.name })));
+      const { picked, duplicates } = pickByCorrelation(shortlist, corr, 8);
+      basket.replace(picked);
+      setPickNote(`看了 ${all.length} 个因子：${noise.length} 个没有可测信号被排除${unanalyzed.length ? `，${unanalyzed.length} 个还没算指标未参与` : ""}；按 |ICIR| 取前 ${shortlist.length} 个算两两相关，${duplicates.length ? `去掉重复的 ${duplicates.map((d) => `${d.name}（与 ${d.of} 相关 ${d.rho.toFixed(2)}）`).join("、")}，` : ""}留下 ${picked.length} 个：${picked.map((p) => `${p.name}${p.weight < 0 ? "（反向）" : ""}`).join("、")}。可以手动增减，然后开始搜索。`);
+    } catch (e) { setPageError(`自动挑候选失败：${errorText(e)}`); } finally { setPicking(false); }
+  };
   const adoptRecommendation = (members: string[], weights: Record<string, number>) => {
     const source = searches.result?.config.factors || [];
     const picked = source.filter((f) => members.includes(f.name)).map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: f.kind || "factor", weight: weights[f.name] ?? f.weight ?? 1 }));
@@ -327,6 +361,15 @@ export function BacktestPage() {
             <P>候选是信号篮里的因子（模型预测不参与）。先每个单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。{candidates.length} 个候选最多约 {candidates.length + (candidates.length * (candidates.length - 1)) / 2 + candidates.length + 3} 次回测。</P>
           </Block>
           <Block title="候选信号" count={candidates.length} note={<><Link href="#/factors?return=search">去因子库增减</Link>{candidates.length < 2 ? " · 至少两个" : ""}</>}>
+            <div className="mm-row" style={{ marginBottom: 12 }}>
+              <Btn disabled={picking} onClick={() => autoPick()}>{picking ? (analyzeProgress || "挑选中…") : "自动挑候选"}</Btn>
+              <span className="mm-dim" style={{ fontSize: 12 }}>从整个因子库按 |ICIR| 排序，排除噪声，两两相关 ≥ {DUPLICATE_CORR} 只留一个，最多 8 个，IC 为负的自动反向；会替换当前篮子。</span>
+            </div>
+            {pickNote && (
+              <div style={{ marginBottom: 12 }}>
+                <Note tone="info" actions={pendingAnalysis.length > 0 ? <Btn disabled={picking} onClick={analyzeThenPick}>先算这 {pendingAnalysis.length} 个指标再挑（约 {Math.ceil(pendingAnalysis.length / 6)} 分钟）</Btn> : undefined}>{pickNote}</Note>
+              </div>
+            )}
             {candidates.length ? (
               <Table label="候选信号" columns={[{ label: "信号" }, { label: "来源", width: 200, optional: true }, { label: "权重", num: true, width: 70 }, { label: "覆盖", width: 156, optional: true }]}
                 rows={candidates.map((f) => ({ key: key(f), cells: [
