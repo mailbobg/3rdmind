@@ -174,11 +174,25 @@ function PortfolioDiagnosis({ result, onDiagnose }: { result: BacktestResult; on
 
   const verdict = useMemo(() => {
     const lines: { tone: "bad" | "warn" | "ok"; text: string }[] = [];
+    // IC is a mean over the whole cross-section; TopkDropout only trades the top of the ranking, so once the
+    // take-apart numbers exist they overrule an IC-based suspicion about a signal that measurably helps.
+    const contribution = (name: string) => {
+      const w = done ? b!.without![name] : undefined;
+      return w && typeof w.total_return === "number" ? base - w.total_return : null;
+    };
     for (const sig of d.signals) {
       const ric = sig.rank_ic;
       if (typeof ric !== "number") continue;
-      if (Math.abs(ric) < 0.005) lines.push({ tone: "warn", text: `${sig.name} 在这段区间几乎没有预测力（Rank IC ${fmtIc(ric)}），留在组合里只是稀释别的信号。` });
-      else if (Math.sign(ric) !== Math.sign(sig.weight)) lines.push({ tone: "bad", text: `${sig.name} 的 Rank IC ${fmtIc(ric)} 与权重 ${sig.weight} 方向相反，正在拖累组合：把权重改成 ${-sig.weight} 或移出。` });
+      const suspicious = Math.abs(ric) < 0.005 ? "weak" : Math.sign(ric) !== Math.sign(sig.weight) ? "reversed" : null;
+      if (!suspicious) continue;
+      const c = contribution(sig.name);
+      if (c != null && c > 0.005) {
+        lines.push({ tone: "ok", text: `${sig.name} 的 Rank IC ${fmtIc(ric)} 看着${suspicious === "weak" ? "没用" : "方向反了"}，但去掉它组合收益会少 ${fmtPct(c)}：它对头部选股有用，IC 这个全截面平均看不出来。` });
+      } else if (suspicious === "weak") {
+        lines.push({ tone: "warn", text: `${sig.name} 在这段区间几乎没有预测力（Rank IC ${fmtIc(ric)}），留在组合里只是稀释别的信号。` });
+      } else {
+        lines.push({ tone: "bad", text: `${sig.name} 的 Rank IC ${fmtIc(ric)} 与权重 ${sig.weight} 方向相反，正在拖累组合：把权重改成 ${-sig.weight} 或移出。` });
+      }
     }
     const { names, matrix } = d.correlation;
     matrix.forEach((row, i) => row.forEach((v, j) => { if (i < j && Math.abs(v) >= 0.7) lines.push({ tone: "warn", text: `${names[i]} 与 ${names[j]} 在这段区间相关 ${v.toFixed(2)}，基本是同一个信号，同时入选只是重复计权。` }); }));
