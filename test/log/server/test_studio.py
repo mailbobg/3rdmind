@@ -511,6 +511,59 @@ def test_upload_passes_the_universe_to_the_run(studio_client, tmp_path: Path, mo
 
 
 @pytest.mark.offline
+def test_data_sync_status_settings_and_guards(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_sync
+
+    provider = tmp_path / "qlib"
+    (provider / "calendars").mkdir(parents=True)
+    (provider / "calendars" / "day.txt").write_text("2025-01-02\n2026-09-11\n")
+    (provider / "studio-data-source.json").write_text(json.dumps({"release": "2026-09-12", "downloaded_at": "x"}))
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setattr(studio_sync, "_settings_path", tmp_path / "sync.json")
+    status = studio_client.get("/studio/data/sync").get_json()
+    assert status["local"]["release"] == "2026-09-12" and status["local"]["calendar_end"] == "2026-09-11"
+    assert status["settings"]["auto"] is False and status["sync"]["running"] is False
+    saved = studio_client.put("/studio/data/sync/settings", json={"auto": True, "hour": 20}).get_json()
+    assert saved["auto"] is True and saved["hour"] == 20
+    assert studio_client.put("/studio/data/sync/settings", json={"hour": 99}).status_code == 400
+    # Already on the latest release: nothing to do; a running worker blocks the start.
+    monkeypatch.setattr(studio_sync, "check_remote", lambda max_age=900: {"release": "2026-09-12", "archive_url": "u", "archive_bytes": 1})
+    monkeypatch.setattr(studio_sync, "_busy_check", lambda: False)
+    response = studio_client.post("/studio/data/sync", json={})
+    assert response.status_code == 409 and "已是最新版" in response.get_json()["reason"]
+    monkeypatch.setattr(studio_sync, "_busy_check", lambda: True)
+    assert "正在运行" in studio_client.post("/studio/data/sync", json={"force": True}).get_json()["reason"]
+
+
+@pytest.mark.offline
+def test_sync_worker_swaps_directories_and_records_the_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import tarfile
+    from rdagent.log.server import studio_sync
+
+    provider = tmp_path / "qlib" / "cn_data"
+    (provider / "calendars").mkdir(parents=True)
+    (provider / "calendars" / "day.txt").write_text("2025-01-02\n")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setattr(studio_sync, "_busy_check", lambda: False)
+    # A fake archive with the layout of the real one: qlib_bin/calendars/day.txt ...
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, content in (("qlib_bin/calendars/day.txt", "2025-01-02\n2026-09-15\n"), ("qlib_bin/features/sh600000/close.day.bin", "x")):
+            info = tarfile.TarInfo(name); data = content.encode(); info.size = len(data); tar.addfile(info, io.BytesIO(data))
+    archive_bytes = buffer.getvalue()
+    monkeypatch.setattr(studio_sync, "_download", lambda url, target, expected: target.write_bytes(archive_bytes))
+    monkeypatch.setattr(studio_sync, "_get_json", lambda url, timeout=20: {"archive_sha256": "sha256:" + __import__("hashlib").sha256(archive_bytes).hexdigest()})
+    studio_sync._sync_worker({"release": "2026-09-15", "archive_url": "u", "archive_bytes": len(archive_bytes), "manifest_url": "m", "published_at": "p"})
+    assert (provider / "calendars" / "day.txt").read_text().splitlines()[-1] == "2026-09-15"
+    assert (provider / "features" / "sh600000" / "close.day.bin").is_file()
+    source = json.loads((provider / "studio-data-source.json").read_text())
+    assert source["release"] == "2026-09-15" and source["calendar_end"] == "2026-09-15"
+    assert not (provider.parent / "cn_data.old").exists() and not (provider.parent / "cn_data.new").exists()
+    assert studio_sync.status()["sync"]["phase"] == "done"
+
+
+@pytest.mark.offline
 def test_rounds_lists_factor_rounds(studio_client) -> None:
     response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
     assert response.status_code == 200

@@ -203,5 +203,19 @@ export const researchFromStrategy = (strategy_id: string, loops: number, all_dur
   api<{ id: string; members: string[]; instruction: string }>("/research/from-strategy", { strategy_id, loops, all_duration });
 export const updateStrategy = (id: string, body: { start?: string; end?: string; refresh?: boolean } = {}) =>
   api<{ backtest_id: string; refreshed: string[]; failures: string[]; start: string; end: string }>(`/studio/strategies/${id}/update`, body);
+export interface SyncStatus {
+  local: { release: string | null; downloaded_at: string | null; calendar_start: string | null; calendar_end: string | null; path: string };
+  settings: { auto: boolean; hour: number; last_auto_check: string | null };
+  sync: { running: boolean; phase: string | null; progress: number | null; started_at: string | null; finished_at: string | null; error: string | null; log: string[] };
+  remote: { release: string; published_at: string | null; archive_bytes: number | null } | null;
+  remote_error?: string | null;
+}
+export const dataSyncStatus = (check = false, fresh = false) => api<SyncStatus>(`/studio/data/sync${check ? `?check=1${fresh ? "&fresh=1" : ""}` : ""}`);
+export const startDataSync = (force = false) =>
+  fetch("/studio/data/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force }) })
+    .then(async (r) => ({ ok: r.ok, ...(await r.json()) as { started?: boolean; reason?: string; release?: string } }));
+export const saveDataSyncSettings = (values: { auto?: boolean; hour?: number }) =>
+  fetch("/studio/data/sync/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
+    .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as SyncStatus["settings"]; });
 export const instrumentNames = () => api<{ source: string | null; names: Record<string, { name: string; industry?: string }> }>("/studio/instruments/names");
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});

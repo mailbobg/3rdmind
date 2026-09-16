@@ -476,7 +476,16 @@ def universe_env(market: str) -> dict[str, str]:
     if market == "csi300":
         return env
     out = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe" / market
-    if not (out / "full" / "daily_pv.h5").is_file():
+    calendar_file = Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser() / "calendars" / "day.txt"
+    calendar_end = calendar_file.read_text().strip().splitlines()[-1] if calendar_file.is_file() else ""
+    built_end = ""
+    if (out / "meta.json").is_file():
+        try:
+            built_end = json.loads((out / "meta.json").read_text()).get("end") or ""
+        except ValueError:
+            built_end = ""
+    # (Re)build when missing, or when the Qlib data has moved past what was exported (after a data sync).
+    if not (out / "full" / "daily_pv.h5").is_file() or (calendar_end and built_end and built_end < calendar_end):
         provider = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
         start = os.environ.get("QLIB_FACTOR_TRAIN_START", "2023-01-01")
         end = os.environ.get("QLIB_FACTOR_TEST_END", "2030-12-31")

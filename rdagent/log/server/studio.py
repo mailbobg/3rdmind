@@ -12,6 +12,7 @@ from pathlib import Path
 from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
+from rdagent.log.server import studio_sync
 from rdagent.log.server.studio_worker import validate_config, write_json
 
 studio = Blueprint("studio", __name__, url_prefix="/studio")
@@ -1011,3 +1012,55 @@ def instrument_names():
 @studio.get("/instruments/names")
 def instruments_names():
     return jsonify(instrument_names())
+
+
+# ---- Data sync: keep the Qlib snapshot current, by hand or on a daily schedule ------------------------
+
+def workers_busy(app):
+    """True while any backtest/search/diagnosis worker or RD-Agent experiment process is alive."""
+    if any(p.poll() is None for p in PROCESSES.values()):
+        return True
+    registry = app.config.get("RDAGENT_PROCESSES") or {}
+    return any(getattr(task, "process", None) is not None and task.is_alive() for task in registry.values())
+
+
+@studio.record_once
+def _configure_sync(state):
+    app = state.app
+    studio_sync.configure(TRACE_ROOT / "studio_data" / "sync.json", lambda: workers_busy(app))
+
+
+@studio.get("/data/sync")
+def data_sync_status():
+    payload = studio_sync.status()
+    if request.args.get("check") == "1":
+        try:
+            payload["remote"] = studio_sync.check_remote(max_age=0 if request.args.get("fresh") == "1" else 900)
+            payload["remote_error"] = None
+        except Exception as error:  # noqa: BLE001
+            payload["remote_error"] = str(error)
+    return jsonify(payload)
+
+
+@studio.post("/data/sync")
+def data_sync_start():
+    body = request.get_json() or {}
+    result = studio_sync.run_sync(force=bool(body.get("force")))
+    return jsonify(result), (202 if result.get("started") else 409)
+
+
+@studio.route("/data/sync/settings", methods=["PUT"])
+def data_sync_settings():
+    body = request.get_json() or {}
+    values = {}
+    if "auto" in body:
+        values["auto"] = bool(body["auto"])
+    if "hour" in body:
+        try:
+            hour = int(body["hour"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "hour must be 0–23"}), 400
+        if not 0 <= hour <= 23:
+            return jsonify({"error": "hour must be 0–23"}), 400
+        values["hour"] = hour
+    return jsonify(studio_sync.save_settings(values))
