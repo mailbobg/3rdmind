@@ -18,6 +18,7 @@ PROCESSES = {}
 TRACE_ROOT = Path(UI_SETTING.trace_folder).resolve()
 ROOT = TRACE_ROOT / "studio_backtests"
 SEARCH_ROOT = TRACE_ROOT / "studio_searches"
+STRATEGY_ROOT = TRACE_ROOT / "studio_strategies"
 # Factors recomputed on the latest data ("重算到最新") live here, one folder per (trace, round, name),
 # beside the shared daily_pv the recomputation reads.
 REFRESH_ROOT = TRACE_ROOT / "studio_refresh"
@@ -569,21 +570,38 @@ def backtests():
         return jsonify(jobs)
     body = request.get_json() or {}
     try:
-        # Request-level trace/loop_id are defaults for factors that do not name their own round.
-        default_trace = str(body.get("trace") or "") or None
-        default_loop = body.get("loop_id")
-        if default_trace and trace_messages(default_trace) is None:
-            raise ValueError("Trace is not loaded on this server")
-        if default_loop is not None:
-            body["loop_id"] = normalize_loop_id(default_loop)
-        body["factors"] = resolve_factor_paths(default_trace, body.get("loop_id"), body.get("factors") or [])
-        config = validate_config(body)
-        config["provider_uri"] = str(Path(config.get("provider_uri") or os.environ.get(
-            "QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
-        if not (Path(config["provider_uri"]) / "calendars" / "day.txt").is_file():
-            raise ValueError("Qlib data not found. Configure a local Qlib daily data directory first.")
+        config = prepare_backtest_config(body)
     except (ValueError, TypeError, KeyError) as error:
         return jsonify({"error": str(error)}), 400
+    try:
+        job_id = launch_backtest(config)
+    except OSError as error:
+        return jsonify({"error": str(error)}), 500
+    return jsonify({"id": job_id}), 202
+
+
+def prepare_backtest_config(body):
+    """Resolve factor paths and validate a backtest request body into a worker config."""
+    body = dict(body)
+    # Request-level trace/loop_id are defaults for factors that do not name their own round.
+    default_trace = str(body.get("trace") or "") or None
+    default_loop = body.get("loop_id")
+    if default_trace and trace_messages(default_trace) is None:
+        raise ValueError("Trace is not loaded on this server")
+    if default_loop is not None:
+        body["loop_id"] = normalize_loop_id(default_loop)
+    body["factors"] = resolve_factor_paths(default_trace, body.get("loop_id"), body.get("factors") or [])
+    config = validate_config(body)
+    config["provider_uri"] = str(Path(config.get("provider_uri") or os.environ.get(
+        "QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
+    if not (Path(config["provider_uri"]) / "calendars" / "day.txt").is_file():
+        raise ValueError("Qlib data not found. Configure a local Qlib daily data directory first.")
+    return config
+
+
+def launch_backtest(config):
+    """Write a job folder and start the worker; returns the job id. Raises OSError when the worker cannot start."""
+    ROOT.mkdir(parents=True, exist_ok=True)
     job_id = str(uuid.uuid4())
     folder = job_folder(job_id)
     folder.mkdir()
@@ -598,8 +616,8 @@ def backtests():
             )
     except OSError as error:
         write_json(folder / "result.json", {"status": "failed", "error": str(error)})
-        return jsonify({"error": str(error)}), 500
-    return jsonify({"id": job_id}), 202
+        raise
+    return job_id
 
 
 def search_folder(job_id):
@@ -744,3 +762,168 @@ def backtest_diagnose(job_id):
         write_json(folder / "diagnosis.json", {"status": "failed", "error": str(error)})
         return jsonify({"error": str(error)}), 500
     return jsonify({"status": "queued"}), 202
+
+
+# ---- Strategies: a named factor portfolio with its evidence and its tracking runs -----------------------
+
+STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost")
+
+
+def strategy_path(strategy_id):
+    uuid.UUID(strategy_id)
+    return STRATEGY_ROOT / f"{strategy_id}.json"
+
+
+def load_strategy(strategy_id):
+    path = strategy_path(strategy_id)
+    if not path.is_file():
+        raise FileNotFoundError(strategy_id)
+    return json.loads(path.read_text())
+
+
+def save_strategy(strategy):
+    STRATEGY_ROOT.mkdir(parents=True, exist_ok=True)
+    strategy["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    write_json(strategy_path(strategy["id"]), strategy)
+    return strategy
+
+
+def run_summary(job_id):
+    """Status, window and headline metrics of one backtest job the strategy points at."""
+    try:
+        folder = job_folder(job_id)
+    except ValueError:
+        return {"id": job_id, "status": "missing"}
+    if not (folder / "config.json").is_file():
+        return {"id": job_id, "status": "missing"}
+    config = json.loads((folder / "config.json").read_text())
+    result = json.loads((folder / "result.json").read_text()) if (folder / "result.json").is_file() else {"status": "queued"}
+    metrics = result.get("metrics") or {}
+    return {"id": job_id, "status": result.get("status"), "start": config.get("start"), "end": config.get("end"),
+            "total_return": metrics.get("total_return"), "sharpe": metrics.get("sharpe"), "max_drawdown": metrics.get("max_drawdown"),
+            "benchmark_return": metrics.get("benchmark_return"), "error": result.get("error"),
+            "created": datetime.fromtimestamp((folder / "config.json").stat().st_mtime, tz=timezone.utc).isoformat()}
+
+
+def strategy_view(strategy):
+    runs = [run_summary(r["backtest_id"]) | {"kind": r.get("kind", "update")} for r in strategy.get("runs", [])]
+    return {**strategy, "run_details": runs}
+
+
+def validate_strategy_body(body, existing=None):
+    """Name, note, factors, model and parameters of a strategy; factors are resolved like a backtest request."""
+    name = str(body.get("name", existing["name"] if existing else "")).strip()
+    if not 1 <= len(name) <= 80:
+        raise ValueError("策略名称需要 1 到 80 个字符")
+    note = str(body.get("note", existing["note"] if existing else "") or "")[:2000]
+    if existing is not None and "factors" not in body:
+        return {**existing, "name": name, "note": note}
+    factors = body.get("factors") or []
+    resolved = resolve_factor_paths(None, None, factors)
+    if not resolved:
+        raise ValueError("策略至少需要一个信号")
+    model = body.get("model") or {"method": "rank"}
+    if not isinstance(model, dict) or model.get("method") not in ("rank", "lgbm"):
+        raise ValueError("Unsupported signal method")
+    params = {k: body.get("params", {}).get(k, body.get(k)) for k in STRATEGY_PARAMS}
+    if any(params[k] is None for k in ("market", "topk", "n_drop")):
+        raise ValueError("策略缺少市场或持仓参数")
+    return {"name": name, "note": note, "model": model, "params": params,
+            "factors": [{"name": f["name"], "kind": f["kind"], "weight": f["weight"], "trace": f["trace"], "loop_id": f["loop_id"]} for f in resolved]}
+
+
+@studio.route("/strategies", methods=["GET", "POST"])
+def strategies():
+    STRATEGY_ROOT.mkdir(parents=True, exist_ok=True)
+    if request.method == "GET":
+        items = []
+        for path in sorted(STRATEGY_ROOT.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                strategy = json.loads(path.read_text())
+            except ValueError:
+                continue
+            latest = run_summary(strategy["runs"][-1]["backtest_id"]) if strategy.get("runs") else None
+            items.append({k: strategy.get(k) for k in ("id", "name", "note", "created", "updated", "factors", "model", "params", "evidence")} | {"latest": latest, "run_count": len(strategy.get("runs", []))})
+        return jsonify(items)
+    body = request.get_json() or {}
+    try:
+        fields = validate_strategy_body(body)
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    evidence = body.get("evidence") or {}
+    runs = []
+    if evidence.get("backtest_id"):
+        try:
+            job_folder(str(evidence["backtest_id"]))
+            runs.append({"backtest_id": str(evidence["backtest_id"]), "kind": "evidence"})
+        except ValueError:
+            return jsonify({"error": "Invalid evidence backtest id"}), 400
+    strategy = save_strategy({"id": str(uuid.uuid4()), "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                              **fields, "evidence": {k: evidence.get(k) for k in ("backtest_id", "search_id", "start", "end") if evidence.get(k)},
+                              "runs": runs})
+    return jsonify(strategy_view(strategy)), 201
+
+
+@studio.route("/strategies/<strategy_id>", methods=["GET", "PATCH", "DELETE"])
+def strategy_item(strategy_id):
+    try:
+        strategy = load_strategy(strategy_id)
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    if request.method == "GET":
+        return jsonify(strategy_view(strategy))
+    if request.method == "DELETE":
+        strategy_path(strategy_id).unlink()
+        return jsonify({"deleted": strategy_id})
+    body = request.get_json() or {}
+    try:
+        fields = validate_strategy_body(body, existing=strategy)
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    return jsonify(strategy_view(save_strategy({**strategy, **fields})))
+
+
+@studio.post("/strategies/<strategy_id>/update")
+def strategy_update(strategy_id):
+    """更新到最新: recompute every member factor on the latest data, then backtest the strategy from its evidence
+    start (or the given start) to the last day of market data, and append the run to its history."""
+    try:
+        strategy = load_strategy(strategy_id)
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    body = request.get_json() or {}
+    refreshed, failures = [], []
+    if body.get("refresh", True):
+        for f in strategy["factors"]:
+            if f.get("kind", "factor") != "factor":
+                continue
+            try:
+                original = Path(resolve_factor_paths(f["trace"], f["loop_id"], [{"name": f["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
+                code_path = original / "factor.py"
+                if not code_path.is_file():
+                    raise ValueError("no factor.py")
+                out = refresh_dir(f["trace"], f["loop_id"], f["name"])
+                for stale in out.glob("studio_analysis.*.json"):
+                    stale.unlink()
+                run_refresh(code_path, f["name"], out)
+                refreshed.append(f["name"])
+            except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+                failures.append(f"{f['name']}: {error}")
+    try:
+        end = str(body.get("end") or "")
+        if not end:
+            calendar = (Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser() / "calendars" / "day.txt")
+            end = calendar.read_text().strip().splitlines()[-1]
+        start = str(body.get("start") or (strategy.get("evidence") or {}).get("start") or "")
+        if not start:
+            raise ValueError("No start date: pass one or save the strategy with its evidence window")
+        request_body = {"factors": strategy["factors"], "model": strategy["model"], **strategy["params"], "start": start, "end": end}
+        config = prepare_backtest_config(request_body)
+        job_id = launch_backtest(config)
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error), "refreshed": refreshed, "failures": failures}), 400
+    except OSError as error:
+        return jsonify({"error": str(error), "refreshed": refreshed, "failures": failures}), 500
+    strategy.setdefault("runs", []).append({"backtest_id": job_id, "kind": "update"})
+    save_strategy(strategy)
+    return jsonify({"backtest_id": job_id, "refreshed": refreshed, "failures": failures, "start": start, "end": end}), 202

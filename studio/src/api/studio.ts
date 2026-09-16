@@ -172,4 +172,23 @@ export const search = async (id: string): Promise<SearchResult> => {
   return { ...(rest as unknown as SearchResult), recommended: portfolio?.members ?? null, recommended_portfolio: portfolio };
 };
 export const runSearch = (config: SearchRequest) => api<{ id: string }>("/studio/searches", config);
+export interface StrategyParams { market: "csi300" | "csi500" | "all"; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number }
+export interface StrategyRun { id: string; kind: "evidence" | "update"; status?: string; start?: string; end?: string; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; benchmark_return?: number | null; error?: string; created?: string }
+export interface Strategy {
+  id: string; name: string; note: string; created: string; updated: string;
+  factors: FactorWeight[]; model: SignalModel; params: StrategyParams;
+  evidence: { backtest_id?: string; search_id?: string; start?: string; end?: string };
+  runs?: { backtest_id: string; kind: string }[]; run_details?: StrategyRun[];
+  latest?: StrategyRun | null; run_count?: number;
+}
+export interface StrategyDraft { name: string; note?: string; factors: FactorWeight[]; model: SignalModel; params: StrategyParams; evidence?: Strategy["evidence"] }
+export const strategies = () => api<Strategy[]>("/studio/strategies");
+export const strategy = (id: string) => api<Strategy>(`/studio/strategies/${id}`);
+export const saveStrategy = (draft: StrategyDraft) => api<Strategy>("/studio/strategies", draft);
+export const renameStrategy = (id: string, fields: { name?: string; note?: string }) =>
+  fetch(`/studio/strategies/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) }).then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as Strategy; });
+export const deleteStrategy = (id: string) =>
+  fetch(`/studio/strategies/${id}`, { method: "DELETE" }).then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as { deleted: string }; });
+export const updateStrategy = (id: string, body: { start?: string; end?: string; refresh?: boolean } = {}) =>
+  api<{ backtest_id: string; refreshed: string[]; failures: string[]; start: string; end: string }>(`/studio/strategies/${id}/update`, body);
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});

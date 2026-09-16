@@ -139,6 +139,7 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(studio_module, "TRACE_ROOT", trace_folder)
     monkeypatch.setattr(studio_module, "ROOT", trace_folder / "studio_backtests")
     monkeypatch.setattr(studio_module, "REFRESH_ROOT", trace_folder / "studio_refresh")
+    monkeypatch.setattr(studio_module, "STRATEGY_ROOT", trace_folder / "studio_strategies")
     monkeypatch.setattr(studio_module, "LATEST_DATA", trace_folder / "studio_data" / "daily_pv_latest.h5")
     monkeypatch.setattr(studio_module, "WORKSPACE_ROOT", workspace_root)
     monkeypatch.setattr(studio_module.subprocess, "Popen", lambda *a, **k: type("P", (), {"poll": lambda self: None})())
@@ -370,6 +371,41 @@ def test_search_routes_start_and_list_jobs(studio_client, tmp_path: Path, monkey
     assert "path" not in detail["config"]["factors"][0]
     one = dict(body, factors=body["factors"][:1])
     assert studio_client.post("/studio/searches", json=one).status_code == 400
+
+
+@pytest.mark.offline
+def test_strategies_are_saved_listed_updated_and_deleted(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Evidence backtest the strategy points at.
+    job = studio_module.ROOT / "22222222-2222-2222-2222-222222222222"
+    job.mkdir(parents=True)
+    studio_module.write_json(job / "config.json", {"start": "2025-01-02", "end": "2025-06-30", "factors": [{"name": "STR_5"}]})
+    studio_module.write_json(job / "result.json", {"status": "completed", "metrics": {"total_return": 0.05, "sharpe": 0.5, "max_drawdown": -0.1}})
+    body = {"name": "反转一号", "note": "验证通过", "factors": [{"name": "STR_5", "weight": -1, "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "model": {"method": "rank"}, "params": {"market": "csi300", "benchmark": "SH000300", "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015},
+            "evidence": {"backtest_id": "22222222-2222-2222-2222-222222222222", "start": "2025-01-02", "end": "2025-06-30"}}
+    created = studio_client.post("/studio/strategies", json=body)
+    assert created.status_code == 201, created.get_json()
+    strategy = created.get_json()
+    assert strategy["factors"][0]["weight"] == -1 and "path" not in strategy["factors"][0]
+    assert strategy["run_details"][0]["total_return"] == 0.05 and strategy["run_details"][0]["kind"] == "evidence"
+    listed = studio_client.get("/studio/strategies").get_json()
+    assert listed[0]["name"] == "反转一号" and listed[0]["latest"]["total_return"] == 0.05 and listed[0]["run_count"] == 1
+    renamed = studio_client.patch(f"/studio/strategies/{strategy['id']}", json={"name": "反转二号"})
+    assert renamed.get_json()["name"] == "反转二号" and renamed.get_json()["factors"] == strategy["factors"]
+    assert studio_client.post("/studio/strategies", json={**body, "name": ""}).status_code == 400
+
+    # 更新到最新: no refresh (no factor.py in the fixture), backtest launched from the evidence start to the given end.
+    monkeypatch.setattr(studio_module, "run_refresh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no qlib here")))
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print(1)")
+    updated = studio_client.post(f"/studio/strategies/{strategy['id']}/update", json={"end": "2025-12-31"})
+    assert updated.status_code == 202, updated.get_json()
+    payload = updated.get_json()
+    assert payload["start"] == "2025-01-02" and payload["end"] == "2025-12-31" and payload["failures"] and not payload["refreshed"]
+    detail = studio_client.get(f"/studio/strategies/{strategy['id']}").get_json()
+    assert [r["kind"] for r in detail["run_details"]] == ["evidence", "update"]
+    assert detail["run_details"][1]["status"] == "queued" and detail["run_details"][1]["end"] == "2025-12-31"
+    assert studio_client.delete(f"/studio/strategies/{strategy['id']}").status_code == 200
+    assert studio_client.get(f"/studio/strategies/{strategy['id']}").status_code == 404
 
 
 @pytest.mark.offline

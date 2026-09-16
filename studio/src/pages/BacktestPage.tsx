@@ -50,6 +50,38 @@ export function BacktestPage() {
     const accepted = await searches.run({ factors: candidates.map((f) => ({ ...f, weight: Number(f.weight) })), model: { method: "rank" }, ...params, search: { objective } });
     if (accepted) layout.openResults();
   };
+  // 保存为策略: the completed backtest (or the search recommendation) becomes a named, tracked portfolio.
+  const [savingFrom, setSavingFrom] = useState<"backtest" | "search" | "">("");
+  const [strategyName, setStrategyName] = useState("");
+  const [savedNote, setSavedNote] = useState("");
+  const saveStrategy = async () => {
+    const name = strategyName.trim();
+    if (!name) { setPageError("给策略起个名字。"); return; }
+    try {
+      if (savingFrom === "backtest" && result?.metrics) {
+        const c = result.config;
+        await studio.saveStrategy({ name, factors: c.factors, model: c.model || { method: "rank" },
+          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost },
+          evidence: { backtest_id: result.id, start: c.start, end: c.end } });
+      } else if (savingFrom === "search" && searches.result?.recommended_portfolio) {
+        const rec = searches.result.recommended_portfolio; const c = searches.result.config;
+        const members = c.factors.filter((f) => rec.members.includes(f.name)).map((f) => ({ ...f, weight: rec.weights?.[f.name] ?? f.weight }));
+        await studio.saveStrategy({ name, factors: members, model: { method: "rank" },
+          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost },
+          evidence: { search_id: searches.result.id, start: c.start, end: c.end } });
+      } else return;
+      setSavedNote(`已保存为策略「${name}」，在左栏「策略」里跟踪。`);
+      setSavingFrom(""); setStrategyName("");
+    } catch (e) { setPageError(errorText(e)); }
+  };
+  const saveForm = (
+    <div className="mm-row">
+      <TextInput value={strategyName} onChange={setStrategyName} placeholder="策略名称" className="w-56" />
+      <Btn kind="primary" onClick={saveStrategy}>保存</Btn>
+      <Btn kind="text" onClick={() => setSavingFrom("")}>取消</Btn>
+    </div>
+  );
+
   // The recommendation is rebuilt from the search job's own factor references, so it works even when the
   // basket has changed since (or the result belongs to an earlier search).
   // 自动挑候选: rank the library by |ICIR|, drop noise, keep one of each near-duplicate pair, sign by Rank IC.
@@ -256,18 +288,27 @@ export function BacktestPage() {
         : <Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length || blocked} title={blocked ? "先处理下面标红的日期问题" : undefined} onClick={submit}>{backtests.busy ? "运行中…" : blocked ? "日期有问题，无法运行" : "运行回测"}</Btn>}
       resultsTitle={tab === "search" ? (searches.result ? `组合搜索 ${searches.result.id.slice(0, 8)}` : "搜索结果") : result ? `回测 ${result.id.slice(0, 8)}` : "回测结果"}
       resultsActions={tab === "search" ? (
-        searches.jobs.length ? <SelectInput ariaLabel="搜索历史" placeholder="搜索历史" className="w-80 max-w-full" value={searches.selectedId || ""} onChange={(id) => { searches.select(id); layout.openResults(); }}
-          options={searches.jobs.map((j) => ({ value: j.id, label: `${j.status === "completed" ? "已完成" : j.status === "failed" ? "失败" : "运行中"} · ${j.config.factors.length} 候选 → ${j.recommended?.length ?? "?"} · ${j.config.start} → ${j.config.end}${j.validation_return != null ? ` · 验证 ${(j.validation_return * 100).toFixed(1)}%` : ""}` }))} /> : undefined
+        <>
+          {searches.jobs.length ? <SelectInput ariaLabel="搜索历史" placeholder="搜索历史" className="w-80 max-w-full" value={searches.selectedId || ""} onChange={(id) => { searches.select(id); layout.openResults(); }}
+            options={searches.jobs.map((j) => ({ value: j.id, label: `${j.status === "completed" ? "已完成" : j.status === "failed" ? "失败" : "运行中"} · ${j.config.factors.length} 候选 → ${j.recommended?.length ?? "?"} · ${j.config.start} → ${j.config.end}${j.validation_return != null ? ` · 验证 ${(j.validation_return * 100).toFixed(1)}%` : ""}` }))} /> : undefined}
+          {searches.result?.recommended_portfolio && <Btn onClick={() => { setSavingFrom("search"); setStrategyName(""); setSavedNote(""); }}>保存为策略</Btn>}
+        </>
       ) : (
         <>
           <SelectInput ariaLabel="回测历史" placeholder="回测历史" className="w-80 max-w-full" value={backtests.selectedId || ""} onChange={(id) => { backtests.select(id); layout.openResults(); }}
             options={backtests.jobs.map((j) => ({ value: j.id, label: jobLabel(j) }))} />
+          {result?.metrics && <Btn onClick={() => { setSavingFrom("backtest"); setStrategyName(""); setSavedNote(""); }}>保存为策略</Btn>}
           {result?.metrics && <Btn kind="text" onClick={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>导出 JSON</Btn>}
         </>
       )}
-      results={tab === "search"
-        ? (searches.result ? <SearchResultView result={searches.result} onAdopt={adoptRecommendation} /> : <Hint>开始搜索后在这里看搜索路径和推荐组合。</Hint>)
-        : result ? <BacktestResultView result={result} onDiagnose={backtests.diagnose} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
+      results={
+        <div className="flex flex-col gap-3">
+          {savingFrom && <Note tone="info" actions={saveForm}>{savingFrom === "search" ? "把搜索推荐的组合保存为策略，以后在「策略」页跟踪它。" : "把这次回测的组合、参数和结果保存为策略，以后在「策略」页跟踪它。"}</Note>}
+          {savedNote && <Note tone="info" actions={<><Btn onClick={() => navigate("/strategies")}>去策略页</Btn><Btn kind="text" onClick={() => setSavedNote("")}>关闭</Btn></>}>{savedNote}</Note>}
+          {tab === "search"
+            ? (searches.result ? <SearchResultView result={searches.result} onAdopt={adoptRecommendation} /> : <Hint>开始搜索后在这里看搜索路径和推荐组合。</Hint>)
+            : result ? <BacktestResultView result={result} onDiagnose={backtests.diagnose} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
+        </div>}
     >
       {(backtests.error || pageError) && <Note tone="bad" actions={<Btn kind="text" onClick={() => { backtests.setError(""); setPageError(""); }}>关闭</Btn>}>{backtests.error || pageError}</Note>}
       {!env && <Note>后端未连接，无法回测。运行 scripts/start-backend.sh 后刷新。</Note>}

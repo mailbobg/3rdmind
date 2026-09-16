@@ -12,6 +12,7 @@ const MENU = [
   { path: "/research", symbol: "◎", title: "AI 研究", desc: "提出假设，开发并评估因子或模型" },
   { path: "/factors", symbol: "⊞", title: "因子库", desc: "研究产出的因子，挑选进组合" },
   { path: "/backtest", symbol: "◇", title: "组合回测", desc: "用已选因子构建并验证策略" },
+  { path: "/strategies", symbol: "◈", title: "策略", desc: "保存验证过的组合，持续跟踪" },
   { path: "/runs", symbol: "↗", title: "运行记录", desc: "统一查看研究与回测" },
 ];
 
@@ -50,7 +51,7 @@ export function StudioShell() {
           </nav>
           <div className="mt-6 border-t border-border px-2 pt-5 text-[11px] text-muted">
             <strong className="font-medium text-foreground/70">标准工作流</strong>
-            <p className="my-2 leading-relaxed">研究产生候选 → 因子库挑选 → 组合回测验证。</p>
+            <p className="my-2 leading-relaxed">研究产生候选 → 因子库挑选 → 组合回测验证 → 保存为策略并跟踪。</p>
             <p className="my-2 leading-relaxed">所有成功与失败都保留在运行记录中。</p>
           </div>
           <div className="mt-auto px-2 pt-8 text-xs">
