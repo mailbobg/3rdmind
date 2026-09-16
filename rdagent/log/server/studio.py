@@ -17,6 +17,7 @@ studio = Blueprint("studio", __name__, url_prefix="/studio")
 PROCESSES = {}
 TRACE_ROOT = Path(UI_SETTING.trace_folder).resolve()
 ROOT = TRACE_ROOT / "studio_backtests"
+SEARCH_ROOT = TRACE_ROOT / "studio_searches"
 # Factors recomputed on the latest data ("重算到最新") live here, one folder per (trace, round, name),
 # beside the shared daily_pv the recomputation reads.
 REFRESH_ROOT = TRACE_ROOT / "studio_refresh"
@@ -599,6 +600,80 @@ def backtests():
         write_json(folder / "result.json", {"status": "failed", "error": str(error)})
         return jsonify({"error": str(error)}), 500
     return jsonify({"id": job_id}), 202
+
+
+def search_folder(job_id):
+    uuid.UUID(job_id)
+    return SEARCH_ROOT / job_id
+
+
+@studio.route("/searches", methods=["GET", "POST"])
+def searches():
+    """Greedy portfolio searches: same request shape as a backtest plus a `search` block (objective, split)."""
+    SEARCH_ROOT.mkdir(parents=True, exist_ok=True)
+    if request.method == "GET":
+        jobs = []
+        for path in sorted(SEARCH_ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
+            result_path = path.parent / "result.json"
+            result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
+            config = public_config(json.loads(path.read_text()))
+            jobs.append({"id": path.parent.name, "status": result["status"], "config": config,
+                         "created": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+                         "recommended": (result.get("recommended") or {}).get("members"),
+                         "validation_return": ((result.get("recommended") or {}).get("validation") or {}).get("total_return")})
+        return jsonify(jobs)
+    body = request.get_json() or {}
+    try:
+        body["factors"] = resolve_factor_paths(None, None, body.get("factors") or [])
+        body.setdefault("search", {})
+        config = validate_config(body)
+        config["provider_uri"] = str(Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser())
+        if not (Path(config["provider_uri"]) / "calendars" / "day.txt").is_file():
+            raise ValueError("Qlib data not found. Configure a local Qlib daily data directory first.")
+        if len(config["factors"]) < 2:
+            raise ValueError("Search needs at least two candidate signals")
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    job_id = str(uuid.uuid4())
+    folder = search_folder(job_id)
+    folder.mkdir()
+    write_json(folder / "config.json", config)
+    write_json(folder / "result.json", {"status": "queued"})
+    try:
+        with (folder / "stdout.log").open("w") as log:
+            PROCESSES[f"search:{job_id}"] = subprocess.Popen(
+                [os.environ.get("STUDIO_PYTHON", sys.executable),
+                 str(Path(__file__).with_name("studio_worker.py")), str(folder), "--search"],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+    except OSError as error:
+        write_json(folder / "result.json", {"status": "failed", "error": str(error)})
+        return jsonify({"error": str(error)}), 500
+    return jsonify({"id": job_id}), 202
+
+
+@studio.get("/searches/<job_id>")
+def search_result(job_id):
+    try:
+        folder = search_folder(job_id)
+    except ValueError:
+        return jsonify({"error": "Invalid job ID"}), 400
+    if not (folder / "result.json").exists():
+        return jsonify({"error": "Job not found"}), 404
+    result = json.loads((folder / "result.json").read_text())
+    process = PROCESSES.get(f"search:{job_id}")
+    if process is not None and process.poll() is not None:
+        if result["status"] in ("running", "queued"):
+            result = {"status": "failed", "error": "Worker exited without a result; inspect execution log."}
+            write_json(folder / "result.json", result)
+        PROCESSES.pop(f"search:{job_id}", None)
+    log = folder / "stdout.log"
+    if log.exists():
+        with log.open("rb") as stream:
+            stream.seek(max(0, log.stat().st_size - 16000))
+            result["log"] = stream.read().decode("utf-8", errors="replace")
+    result.pop("config", None)
+    return jsonify({"id": job_id, "config": public_config(json.loads((folder / "config.json").read_text())), **result})
 
 
 @studio.get("/backtests/<job_id>")

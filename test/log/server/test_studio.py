@@ -324,6 +324,55 @@ def test_diagnose_route_starts_a_worker_for_completed_multi_signal_jobs(studio_c
 
 
 @pytest.mark.offline
+def test_split_window_keeps_a_validation_tail() -> None:
+    import pandas as pd
+    from rdagent.log.server.studio_worker import split_window
+
+    calendar = pd.bdate_range("2025-01-01", periods=300)
+    search, valid = split_window(calendar, "2025-01-01", str(calendar[-1].date()), 2 / 3)
+    assert search[0] == "2025-01-01" and valid[1] == str(calendar[-1].date())
+    assert pd.Timestamp(search[1]) < pd.Timestamp(valid[0])
+    assert (calendar <= pd.Timestamp(search[1])).sum() == 200
+    with pytest.raises(ValueError):
+        split_window(calendar, "2025-01-01", str(calendar[30].date()), 2 / 3)
+
+
+@pytest.mark.offline
+def test_validate_config_checks_the_search_block() -> None:
+    assert validate_config(_config(search={}))["search"] == {"objective": "sharpe", "split": pytest.approx(2 / 3)}
+    assert validate_config(_config(search={"objective": "total_return", "split": 0.5}))["search"]["objective"] == "total_return"
+    with pytest.raises(ValueError):
+        validate_config(_config(search={"objective": "alpha"}))
+    with pytest.raises(ValueError):
+        validate_config(_config(search={"split": 0.95}))
+    assert "search" not in validate_config(_config())
+
+
+@pytest.mark.offline
+def test_search_routes_start_and_list_jobs(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(studio_module, "SEARCH_ROOT", tmp_path / "traces" / "studio_searches")
+    (tmp_path / "ws" / "f1").mkdir(parents=True)
+    (tmp_path / "ws" / "f1" / "result.h5").write_bytes(b"")
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages[1]["content"]["workspaces"]["factors"].append({"name": "RVOL_20", "path": str(tmp_path / "ws" / "f1")})
+    body = {"factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0},
+                        {"name": "RVOL_20", "weight": -1, "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300", "benchmark": "SH000300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "search": {"objective": "total_return"}}
+    response = studio_client.post("/studio/searches", json=body)
+    assert response.status_code == 202, response.get_json()
+    job_id = response.get_json()["id"]
+    listed = studio_client.get("/studio/searches").get_json()
+    assert [j["id"] for j in listed] == [job_id] and listed[0]["status"] == "queued"
+    detail = studio_client.get(f"/studio/searches/{job_id}").get_json()
+    assert detail["status"] == "queued" and detail["config"]["search"]["objective"] == "total_return"
+    assert "path" not in detail["config"]["factors"][0]
+    one = dict(body, factors=body["factors"][:1])
+    assert studio_client.post("/studio/searches", json=one).status_code == 400
+
+
+@pytest.mark.offline
 def test_rounds_lists_factor_rounds(studio_client) -> None:
     response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
     assert response.status_code == 200

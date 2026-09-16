@@ -29,6 +29,8 @@ export function useFactorBasket() {
   }, [items, keys, commit]);
   const setWeight = useCallback((f: FactorWeight, weight: number) => commit(items.map((item) => (basketKey(item) === basketKey(f) ? { ...item, weight } : item))), [items, commit]);
   const clear = useCallback(() => commit([]), [commit]);
-  return { items, has, toggle, addRound, addPrediction, setWeight, clear };
+  /** Replace the whole basket, e.g. with a search's recommendation. */
+  const replace = useCallback((next: FactorWeight[]) => commit(next), [commit]);
+  return { items, has, toggle, addRound, addPrediction, setWeight, clear, replace };
 }
 export type BasketStore = ReturnType<typeof useFactorBasket>;

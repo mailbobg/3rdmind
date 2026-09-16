@@ -153,4 +153,23 @@ export const factorCoverage = (ref: FactorRef) =>
 export const backtests = () => api<BacktestSummary[]>("/studio/backtests");
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);
 export const runBacktest = (config: BacktestRequest) => api<{ id: string }>("/studio/backtests", config);
+export type SearchObjective = "sharpe" | "total_return";
+export interface SearchRequest extends BacktestRequest { search: { objective: SearchObjective; split?: number } }
+export interface SearchStep { step: number; kind: "single" | "start" | "add" | "drop"; tried: string | null; members: string[]; accepted: boolean | null; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; days?: number | null; error?: string }
+export interface SearchPortfolio { members: string[]; weights?: Record<string, number>; search: VariantMetrics; validation: VariantMetrics }
+export interface SearchSummary { id: string; status: string; created: string; config: SearchRequest; recommended?: string[] | null; validation_return?: number | null }
+export interface SearchResult extends SearchSummary {
+  error?: string; log?: string; done?: number; total?: number; steps?: SearchStep[];
+  objective?: SearchObjective; windows?: { search: [string, string]; validation: [string, string] };
+  candidates?: string[]; recommended_portfolio?: SearchPortfolio; everything?: SearchPortfolio;
+}
+export const searches = () => api<SearchSummary[]>("/studio/searches");
+export const search = async (id: string): Promise<SearchResult> => {
+  // The worker's "recommended" is the portfolio; the list's "recommended" is just its member names.
+  const raw = await api<Record<string, unknown>>(`/studio/searches/${id}`);
+  const { recommended, ...rest } = raw;
+  const portfolio = recommended && typeof recommended === "object" ? (recommended as SearchPortfolio) : undefined;
+  return { ...(rest as unknown as SearchResult), recommended: portfolio?.members ?? null, recommended_portfolio: portfolio };
+};
+export const runSearch = (config: SearchRequest) => api<{ id: string }>("/studio/searches", config);
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});

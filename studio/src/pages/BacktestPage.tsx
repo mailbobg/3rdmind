@@ -7,7 +7,11 @@ import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
 import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
 import { BacktestResultView } from "../components/BacktestResultView";
-import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, Table, TextInput, TextTabs } from "../components/minimal";
+import { SearchResultView } from "../components/SearchResultView";
+import { useSearches } from "../hooks/useSearches";
+import { shortTime } from "../hooks/experiments";
+import type { SearchObjective } from "../api/studio";
+import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { Hint } from "../components/widgets";
 
 type Market = "csi300" | "csi500" | "all";
@@ -31,6 +35,20 @@ export function BacktestPage() {
     ...(saved.model?.method === "lgbm" ? { train: saved.model.train, valid: saved.model.valid, params: { ...LGBM_DEFAULTS, ...saved.model.params } } : {}),
   });
   const [tab, setTab] = useState("params");
+  // Portfolio search: the basket's factor signals are the candidates, the backtest parameters the setting.
+  const searches = useSearches();
+  const [objective, setObjective] = useState<SearchObjective>("sharpe");
+  useEffect(() => { searches.load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (tab === "search" && searches.jobs.length && !searches.selectedId) searches.select(searches.jobs[0].id); }, [tab, searches.jobs]); // eslint-disable-line react-hooks/exhaustive-deps
+  const candidates = basket.items.filter((f) => (f.kind || "factor") === "factor");
+  const startSearch = async () => {
+    const accepted = await searches.run({ factors: candidates.map((f) => ({ ...f, weight: Number(f.weight) })), model: { method: "rank" }, ...params, search: { objective } });
+    if (accepted) layout.openResults();
+  };
+  const adoptRecommendation = (members: string[], weights: Record<string, number>) => {
+    basket.replace(candidates.filter((f) => members.includes(f.name)).map((f) => ({ ...f, weight: weights[f.name] ?? f.weight })));
+    setTab("params");
+  };
   const [source, setSource] = useState("");
   const [pageError, setPageError] = useState("");
   const [library, setLibrary] = useState<Record<string, LibraryFactor>>({});
@@ -189,17 +207,24 @@ export function BacktestPage() {
 
   return (
     <PageFrame
-      tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "params", label: "参数设置" }, { key: "source", label: "策略源码" }]} />}
-      actions={<Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length || blocked} title={blocked ? "先处理下面标红的日期问题" : undefined} onClick={submit}>{backtests.busy ? "运行中…" : blocked ? "日期有问题，无法运行" : "运行回测"}</Btn>}
-      resultsTitle={result ? `回测 ${result.id.slice(0, 8)}` : "回测结果"}
-      resultsActions={
+      tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "params", label: "参数设置" }, { key: "search", label: "组合搜索" }, { key: "source", label: "策略源码" }]} />}
+      actions={tab === "search"
+        ? <Btn kind="primary" disabled={searches.busy || !env?.data_ready || candidates.length < 2 || blocked} title={blocked ? "先处理参数设置里标红的日期问题" : candidates.length < 2 ? "至少两个因子信号" : undefined} onClick={startSearch}>{searches.busy ? "提交中…" : "开始搜索"}</Btn>
+        : <Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length || blocked} title={blocked ? "先处理下面标红的日期问题" : undefined} onClick={submit}>{backtests.busy ? "运行中…" : blocked ? "日期有问题，无法运行" : "运行回测"}</Btn>}
+      resultsTitle={tab === "search" ? (searches.result ? `组合搜索 ${searches.result.id.slice(0, 8)}` : "搜索结果") : result ? `回测 ${result.id.slice(0, 8)}` : "回测结果"}
+      resultsActions={tab === "search" ? (
+        searches.jobs.length ? <SelectInput ariaLabel="搜索历史" placeholder="搜索历史" className="w-80 max-w-full" value={searches.selectedId || ""} onChange={(id) => { searches.select(id); layout.openResults(); }}
+          options={searches.jobs.map((j) => ({ value: j.id, label: `${j.status === "completed" ? "已完成" : j.status === "failed" ? "失败" : "运行中"} · ${j.config.factors.length} 候选 → ${j.recommended?.length ?? "?"} · ${j.config.start} → ${j.config.end}${j.validation_return != null ? ` · 验证 ${(j.validation_return * 100).toFixed(1)}%` : ""}` }))} /> : undefined
+      ) : (
         <>
           <SelectInput ariaLabel="回测历史" placeholder="回测历史" className="w-80 max-w-full" value={backtests.selectedId || ""} onChange={(id) => { backtests.select(id); layout.openResults(); }}
             options={backtests.jobs.map((j) => ({ value: j.id, label: jobLabel(j) }))} />
           {result?.metrics && <Btn kind="text" onClick={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>导出 JSON</Btn>}
         </>
-      }
-      results={result ? <BacktestResultView result={result} onDiagnose={backtests.diagnose} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
+      )}
+      results={tab === "search"
+        ? (searches.result ? <SearchResultView result={searches.result} onAdopt={adoptRecommendation} /> : <Hint>开始搜索后在这里看搜索路径和推荐组合。</Hint>)
+        : result ? <BacktestResultView result={result} onDiagnose={backtests.diagnose} /> : <Hint>运行回测后在这里看指标、净值曲线、持仓与成交。</Hint>}
     >
       {(backtests.error || pageError) && <Note tone="bad" actions={<Btn kind="text" onClick={() => { backtests.setError(""); setPageError(""); }}>关闭</Btn>}>{backtests.error || pageError}</Note>}
       {!env && <Note>后端未连接，无法回测。运行 scripts/start-backend.sh 后刷新。</Note>}
@@ -279,6 +304,42 @@ export function BacktestPage() {
             ) : (
               <Empty>还没有选信号。去 <Link href="#/factors">因子库</Link> 勾选，或在研究轮次里点“用 N 个因子回测”。</Empty>
             )}
+          </Block>
+        </>
+      ) : tab === "search" ? (
+        <>
+          {searches.error && <Note tone="bad" actions={<Btn kind="text" onClick={() => searches.setError("")}>关闭</Btn>}>{searches.error}</Note>}
+          <Block title="搜索设置" note={`${params.start || "?"} → ${params.end || "?"} · ${params.market} · 参数沿用「参数设置」`}>
+            <FieldGrid min={160}>
+              <Field label="优化目标" hint="搜索区间上比较各组合的指标"><SelectInput value={objective} onChange={setObjective} options={[{ value: "sharpe", label: "夏普" }, { value: "total_return", label: "总收益" }]} /></Field>
+              <Field label="区间划分"><span className="text-xs" style={{ lineHeight: "28px" }}>前 2/3 搜索 · 后 1/3 验证</span></Field>
+              <Field label="信号合成"><span className="text-xs" style={{ lineHeight: "28px" }}>排名加权（按篮内权重）</span></Field>
+            </FieldGrid>
+            <P>候选是信号篮里的因子（模型预测不参与）。先每个单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。{candidates.length} 个候选最多约 {candidates.length + (candidates.length * (candidates.length - 1)) / 2 + candidates.length + 3} 次回测。</P>
+          </Block>
+          <Block title="候选信号" count={candidates.length} note={candidates.length < 2 ? "至少两个" : undefined}>
+            {candidates.length ? (
+              <Table label="候选信号" columns={[{ label: "信号" }, { label: "来源", width: 200, optional: true }, { label: "权重", num: true, width: 70 }, { label: "覆盖", width: 156, optional: true }]}
+                rows={candidates.map((f) => ({ key: key(f), cells: [
+                  <span key="n" className="mm-mono mm-name">{f.name}</span>,
+                  <span key="s" className="mm-dim block truncate">{shortName(f.trace)} · 第 {f.loop_id + 1} 轮</span>,
+                  String(f.weight),
+                  <span key="c" className="mm-mono mm-dim">{coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}` : "—"}</span>,
+                ] }))} />
+            ) : <Empty>去 <Link href="#/factors">因子库</Link> 勾选至少两个因子。</Empty>}
+          </Block>
+          <Block title="搜索记录" count={searches.jobs.length}>
+            {searches.jobs.length ? (
+              <Table label="搜索记录" columns={[{ label: "时间", width: 100 }, { label: "候选 → 推荐", width: 110 }, { label: "区间" }, { label: "目标", width: 60, optional: true }, { label: "验证收益", num: true, width: 90 }, { label: "状态", width: 64 }]}
+                rows={searches.jobs.map((j) => ({ key: j.id, selected: j.id === searches.selectedId, onClick: () => { searches.select(j.id); layout.openResults(); }, cells: [
+                  <span key="t" className="mm-mono mm-dim">{shortTime(j.created)}</span>,
+                  <span key="n" className="mm-mono">{j.config.factors.length} → {j.recommended?.length ?? "—"}</span>,
+                  <span key="w" className="mm-mono mm-dim">{j.config.start} → {j.config.end}</span>,
+                  <span key="o" className="mm-dim">{j.config.search?.objective === "total_return" ? "收益" : "夏普"}</span>,
+                  <Num key="v" value={j.validation_return} format={(v) => `${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%`} />,
+                  <StatusTag key="s" status={j.status === "completed" ? "已完成" : j.status === "failed" ? "失败" : "运行中"} />,
+                ] }))} />
+            ) : <Empty>还没有搜索记录。</Empty>}
           </Block>
         </>
       ) : (

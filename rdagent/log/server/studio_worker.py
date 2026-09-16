@@ -38,6 +38,15 @@ def validate_config(config):
         raise ValueError("Invalid benchmark")
     result["benchmark"] = benchmark.strip()
     result["model"] = validate_model(result.get("model"), result["start"])
+    if result.get("search") is not None:
+        search = result["search"] if isinstance(result["search"], dict) else {}
+        objective = search.get("objective", "sharpe")
+        if objective not in ("sharpe", "total_return"):
+            raise ValueError("Search objective must be sharpe or total_return")
+        split = float(search.get("split", 2 / 3))
+        if not 0.4 <= split <= 0.85:
+            raise ValueError("Search split must be between 0.4 and 0.85")
+        result["search"] = {"objective": objective, "split": split}
     factors = result.get("factors", [])
     if not isinstance(factors, list) or not 1 <= len(factors) <= 20:
         raise ValueError("Select 1 to 20 factors")
@@ -522,15 +531,130 @@ def diagnose(config, progress=lambda *_: None):
     return clean({"base": base, "alone": alone, "without": without, "names": names, "method": model["method"]})
 
 
+def split_window(calendar, start, end, ratio):
+    """Search on the first ``ratio`` of the trading days in [start, end], validate on the rest."""
+    import pandas as pd
+
+    days = calendar[(calendar >= pd.Timestamp(start)) & (calendar <= pd.Timestamp(end))]
+    if len(days) < 60:
+        raise ValueError("The window is too short to split into search and validation parts (need 60 trading days)")
+    cut = max(20, min(len(days) - 20, int(len(days) * ratio)))
+    return (str(days[0].date()), str(days[cut - 1].date())), (str(days[cut].date()), str(days[-1].date()))
+
+
+def search(config, progress=lambda *_: None):
+    """Greedy portfolio search: forward selection, then backward elimination, judged on a search window and
+    reported on a held-out validation window so the recommendation is not just the best fit of its own data.
+
+    Every candidate is scored with the configured weights (rank blend); LightGBM is not searched because each
+    variant would need a refit. ``progress`` receives (done, total estimate, steps so far) after each backtest.
+    """
+    prepared = prepare(config)
+    factors, model = prepared["factors"], prepared["model"]
+    if model["method"] != "rank":
+        raise ValueError("Portfolio search works with the rank blend; switch 信号合成 to 排名加权")
+    names = [f["name"] for f in factors]
+    if len(names) < 2:
+        raise ValueError("Search needs at least two candidate signals")
+    weights = {f["name"]: f["weight"] for f in factors}
+    objective = (config.get("search") or {}).get("objective", "sharpe")
+    search_win, valid_win = split_window(prepared["calendar"], config["start"], config["end"], (config.get("search") or {}).get("split", 2 / 3))
+    total = [len(names) + len(names) * (len(names) - 1) // 2 + len(names) + 3]
+    steps, done = [], [0]
+
+    def score_of(metrics):
+        value = metrics.get(objective)
+        return value if isinstance(value, (int, float)) else float("-inf")
+
+    def run_variant(columns, window, keep_curve=False):
+        score, _ = combine(prepared, columns, [weights[c] for c in columns], model, log=lambda *_: None)
+        report = backtest_score(score, {**config, "start": window[0], "end": window[1]})[0]
+        metrics, rows = summarize_report(report)
+        if keep_curve:
+            metrics["equity"] = [[r["date"], round(r["equity"], 6)] for r in rows]
+        return metrics
+
+    def record(kind, members, metrics, tried=None, accepted=None):
+        steps.append({"step": len(steps) + 1, "kind": kind, "tried": tried, "members": list(members), "accepted": accepted, **{k: metrics.get(k) for k in ("total_return", "sharpe", "max_drawdown", "days")}})
+        done[0] += 1
+        progress(done[0], total[0], steps)
+
+    def better(candidate, incumbent):
+        return score_of(candidate) > score_of(incumbent) + 1e-9
+
+    # 1. every candidate alone
+    singles = {}
+    for name in names:
+        try:
+            singles[name] = run_variant([name], search_win)
+        except ValueError as error:
+            singles[name] = {"error": str(error)}
+        record("single", [name], singles[name], tried=name)
+    usable = [n for n in names if "error" not in singles[n]]
+    if not usable:
+        raise ValueError("No candidate could be backtested alone on the search window")
+    current = [max(usable, key=lambda n: score_of(singles[n]))]
+    current_metrics = singles[current[0]]
+    record("start", current, current_metrics, accepted=True)
+    # 2. forward: add the candidate that improves the objective most, until none does
+    remaining = [n for n in usable if n not in current]
+    while remaining:
+        trials = {}
+        for name in remaining:
+            try:
+                trials[name] = run_variant(current + [name], search_win)
+            except ValueError as error:
+                trials[name] = {"error": str(error)}
+            record("add", current + [name], trials[name], tried=name, accepted=False)
+        best = max((n for n in remaining if "error" not in trials[n]), key=lambda n: score_of(trials[n]), default=None)
+        if best is None or not better(trials[best], current_metrics):
+            break
+        steps[-len(remaining) + list(remaining).index(best)]["accepted"] = True
+        current, current_metrics = current + [best], trials[best]
+        remaining = [n for n in remaining if n != best]
+    # 3. backward: drop any member whose removal improves the objective
+    changed = True
+    while changed and len(current) > 1:
+        changed = False
+        for name in list(current):
+            rest = [n for n in current if n != name]
+            try:
+                trial = run_variant(rest, search_win)
+            except ValueError as error:
+                trial = {"error": str(error)}
+            improves = "error" not in trial and better(trial, current_metrics)
+            record("drop", rest, trial, tried=name, accepted=improves)
+            if improves:
+                current, current_metrics, changed = rest, trial, True
+                break
+    # 4. the recommendation and the everything-in portfolio, on both windows
+    total[0] = done[0] + 3
+    recommended = {"members": current, "weights": {n: weights[n] for n in current},
+                   "search": run_variant(current, search_win, keep_curve=True),
+                   "validation": run_variant(current, valid_win, keep_curve=True)}
+    done[0] += 2; progress(done[0], total[0], steps)
+    everything = {"members": names, "search": current_metrics if len(current) == len(names) else run_variant(names, search_win, keep_curve=True)}
+    try:
+        everything["validation"] = run_variant(names, valid_win, keep_curve=True)
+    except ValueError as error:
+        everything["validation"] = {"error": str(error)}
+    done[0] += 1; progress(done[0], total[0], steps)
+    return clean({"objective": objective, "windows": {"search": search_win, "validation": valid_win}, "candidates": names,
+                  "steps": steps, "recommended": recommended, "everything": everything, "config": config})
+
+
 if __name__ == "__main__":
     folder = Path(sys.argv[1])
     diagnosing = "--diagnose" in sys.argv[2:]
+    searching = "--search" in sys.argv[2:]
     target = folder / ("diagnosis.json" if diagnosing else "result.json")
     try:
         config = validate_config(json.loads((folder / "config.json").read_text()))
         write_json(target, {"status": "running"})
         if diagnosing:
             output = diagnose(config, progress=lambda done, total: write_json(target, {"status": "running", "done": done, "total": total}))
+        elif searching:
+            output = search(config, progress=lambda done, total, steps: write_json(target, {"status": "running", "done": done, "total": total, "steps": clean(steps)}))
         else:
             output = run(config)
         write_json(target, {"status": "completed", **output})
