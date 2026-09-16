@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type React from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ChangeEvent, MouseEvent, ReactNode } from "react";
 
@@ -52,67 +53,154 @@ export function NumberInput({ value, onChange, min, max, step, disabled, classNa
   return <input type="number" className={`mm-control${className ? ` ${className}` : ""}`} value={value} min={min} max={max} step={step} disabled={disabled} aria-label={ariaLabel} onChange={handle} />;
 }
 
-export interface Option<T extends string> { value: T; label: string; group?: string }
+export interface Option<T extends string> {
+  value: T; label: string; group?: string;
+  /** Secondary text shown right-aligned and muted (a count, a benchmark, a date span). */
+  hint?: string;
+  disabled?: boolean;
+}
+
+/** Options that need a filter box: above this many, the list opens with a search field focused. */
+const SEARCH_FROM = 8;
 
 /**
  * Select with its own list: the OS popup of a native <select> renders outside the page's styling (and
  * unreliably inside the desktop app), so the trigger is a button and the options are a fixed-position
- * list portalled to <body>, with optional group headings. Escape, outside click, scroll and resize close it.
+ * list portalled to <body>.
+ *
+ * Interaction: click or ArrowDown/Enter/Space opens; Arrow keys move the highlight (wrapping), Home/End jump,
+ * Enter picks, Escape closes and returns focus; typing on a closed or unfiltered list jumps to the first label
+ * starting with those letters. Long lists (≥ 8) open with a filter box that matches label, value and hint.
+ * The list flips above the trigger when there is more room there, and closes on outside click, page scroll
+ * or resize. Groups render as headings; a hint renders muted on the right; the selected option shows a check.
  */
-export function SelectInput<T extends string>({ value, onChange, options, placeholder, className, ariaLabel }:
-  { value: T | ""; onChange: (v: T) => void; options: Option<T>[]; placeholder?: string; className?: string; ariaLabel?: string }) {
+export function SelectInput<T extends string>({ value, onChange, options, placeholder, className, ariaLabel, searchable }:
+  { value: T | ""; onChange: (v: T) => void; options: Option<T>[]; placeholder?: string; className?: string; ariaLabel?: string; searchable?: boolean }) {
   const [open, setOpen] = useState(false);
-  const [box, setBox] = useState<{ top: number; left: number; width: number; below: number } | null>(null);
+  const [box, setBox] = useState<{ top: number; left: number; width: number; maxHeight: number; up: boolean } | null>(null);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(-1);
   const trigger = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const typed = useRef<{ text: string; at: number }>({ text: "", at: 0 });
+  const id = useMemo(() => `sel${Math.random().toString(36).slice(2, 8)}`, []);
   const current = options.find((o) => o.value === value);
+  const withSearch = searchable ?? options.length >= SEARCH_FROM;
+  const q = query.trim().toLowerCase();
+  const visible = useMemo(() => (q ? options.filter((o) => `${o.label} ${o.value} ${o.hint || ""}`.toLowerCase().includes(q)) : options), [options, q]);
+  const enabled = visible.filter((o) => !o.disabled);
 
+  const place = () => {
+    const t = trigger.current;
+    if (!t) return;
+    const r = t.getBoundingClientRect();
+    const below = window.innerHeight - r.bottom - 12;
+    const above = r.top - 12;
+    const wanted = Math.min(360, 8 + visible.length * 30 + (withSearch ? 38 : 0) + (new Set(visible.map((o) => o.group).filter(Boolean)).size * 24));
+    const up = below < Math.min(wanted, 200) && above > below;
+    const maxHeight = Math.max(120, Math.min(360, up ? above : below));
+    setBox({ top: up ? r.top - 4 : r.bottom + 4, left: r.left, width: r.width, maxHeight, up });
+  };
+  const openList = () => {
+    setQuery("");
+    const i = visible.findIndex((o) => o.value === value && !o.disabled);
+    setActive(i >= 0 ? i : enabled.length ? visible.indexOf(enabled[0]) : -1);
+    setOpen(true);
+  };
+  const close = (refocus = true) => { setOpen(false); if (refocus) trigger.current?.focus(); };
+  useLayoutEffect(() => { if (open) place(); }, [open, visible.length]); // eslint-disable-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
-    if (!open || !trigger.current) return;
-    const r = trigger.current.getBoundingClientRect();
-    setBox({ top: r.bottom + 4, left: r.left, width: r.width, below: window.innerHeight - r.bottom - 12 });
-  }, [open]);
-  useLayoutEffect(() => { if (open && box) list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" }); }, [open, box]);
+    if (!open || !box) return;
+    if (withSearch) search.current?.focus();
+    list.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [open, box, active, withSearch]);
   useEffect(() => {
     if (!open) return;
-    const close = () => setOpen(false);
     const inside = (t: EventTarget | null) => !!t && (trigger.current?.contains(t as Node) || list.current?.contains(t as Node));
-    const onPointer = (e: PointerEvent) => { if (!inside(e.target)) close(); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { close(); trigger.current?.focus(); } };
-    // The list's own scrolling (including the scrollIntoView on open) must not close it; page scrolling does.
-    const onScroll = (e: Event) => { if (!inside(e.target)) close(); };
+    const onPointer = (e: PointerEvent) => { if (!inside(e.target)) close(false); };
+    // The list's own scrolling (including scrollIntoView) must not close it; page scrolling does.
+    const onScroll = (e: Event) => { if (!inside(e.target)) close(false); };
+    const onResize = () => close(false);
     document.addEventListener("pointerdown", onPointer);
-    document.addEventListener("keydown", onKey);
-    window.addEventListener("resize", close);
     document.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
     return () => {
       document.removeEventListener("pointerdown", onPointer);
-      document.removeEventListener("keydown", onKey);
-      window.removeEventListener("resize", close);
       document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
     };
-  }, [open]);
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A filtered list keeps its highlight on a visible option.
+  useEffect(() => { if (open && (active < 0 || active >= visible.length || visible[active]?.disabled)) setActive(enabled.length ? visible.indexOf(enabled[0]) : -1); }, [visible, enabled, open, active]);
 
-  const pick = (o: Option<T>) => { setOpen(false); if (o.value !== value) onChange(o.value); trigger.current?.focus(); };
+  const pick = (o: Option<T>) => { if (o.disabled) return; close(); if (o.value !== value) onChange(o.value); };
+  const move = (delta: number) => {
+    if (!enabled.length) return;
+    const pos = enabled.findIndex((o) => o === visible[active]);
+    const next = enabled[((pos < 0 ? (delta > 0 ? -1 : 0) : pos) + delta + enabled.length) % enabled.length];
+    setActive(visible.indexOf(next));
+  };
+  const jumpTo = (letters: string) => {
+    const l = letters.toLowerCase();
+    const hit = enabled.find((o) => o.label.toLowerCase().startsWith(l)) || enabled.find((o) => o.label.toLowerCase().includes(l));
+    if (!hit) return;
+    if (open) setActive(visible.indexOf(hit)); else onChange(hit.value);
+  };
+  const typeAhead = (key: string) => {
+    const now = Date.now();
+    typed.current = { text: now - typed.current.at < 700 ? typed.current.text + key : key, at: now };
+    jumpTo(typed.current.text);
+  };
+  const onTriggerKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Enter" || e.key === " ") { e.preventDefault(); if (!open) openList(); else if (e.key === "Enter" || e.key === " ") { const o = visible[active]; if (o) pick(o); } else move(e.key === "ArrowDown" ? 1 : -1); }
+    else if (e.key === "Escape" && open) { e.preventDefault(); close(); }
+    else if (e.key === "Home" && open) { e.preventDefault(); if (enabled[0]) setActive(visible.indexOf(enabled[0])); }
+    else if (e.key === "End" && open) { e.preventDefault(); if (enabled.length) setActive(visible.indexOf(enabled[enabled.length - 1])); }
+    else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey && !(open && withSearch)) { typeAhead(e.key); }
+  };
+  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); move(e.key === "ArrowDown" ? 1 : -1); }
+    else if (e.key === "Enter") { e.preventDefault(); const o = visible[active]; if (o) pick(o); }
+    else if (e.key === "Escape") { e.preventDefault(); close(); }
+    else if (e.key === "Home" || e.key === "End") { if (!e.currentTarget.value) { e.preventDefault(); const o = e.key === "Home" ? enabled[0] : enabled[enabled.length - 1]; if (o) setActive(visible.indexOf(o)); } }
+    else if (e.key === "Tab") { close(false); }
+  };
+
   // Options keep their order; a group heading is emitted where a new group starts.
   const items: ReactNode[] = [];
   let lastGroup: string | undefined;
-  for (const o of options) {
-    if (o.group && o.group !== lastGroup) items.push(<div key={`g:${o.group}`} className="mm-select__group">{o.group}</div>);
+  visible.forEach((o, i) => {
+    if (o.group && o.group !== lastGroup) items.push(<div key={`g:${o.group}`} className="mm-select__group" role="presentation">{o.group}</div>);
     lastGroup = o.group;
     items.push(
-      <div key={o.value} role="option" aria-selected={o.value === value} className="mm-select__option" onClick={() => pick(o)}>{o.label}</div>,
+      <div key={o.value} id={`${id}-${i}`} role="option" aria-selected={o.value === value} aria-disabled={o.disabled || undefined} data-active={i === active || undefined}
+        className="mm-select__option" onPointerMove={() => { if (!o.disabled && active !== i) setActive(i); }} onClick={() => pick(o)}>
+        <span className="mm-select__label">{o.label}</span>
+        {o.hint && <span className="mm-select__hint">{o.hint}</span>}
+        <span className="mm-select__check" aria-hidden>{o.value === value ? "✓" : ""}</span>
+      </div>,
     );
-  }
+  });
   return (
     <>
       <button ref={trigger} type="button" className={`mm-control mm-select${className ? ` ${className}` : ""}`} aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}>
+        aria-controls={open ? `${id}-list` : undefined} aria-activedescendant={open && active >= 0 ? `${id}-${active}` : undefined}
+        onClick={() => (open ? close() : openList())} onKeyDown={onTriggerKey}>
         <span className={current ? undefined : "mm-dim"}>{current ? current.label : placeholder || ""}</span>
       </button>
       {open && box && createPortal(
-        <div ref={list} role="listbox" aria-label={ariaLabel} className="mm-select__list" style={{ top: box.top, left: box.left, minWidth: box.width, maxHeight: Math.max(120, Math.min(360, box.below)) }}>
-          {items.length ? items : <div className="mm-select__group">没有可选项</div>}
+        <div ref={list} id={`${id}-list`} role="listbox" aria-label={ariaLabel} className={`mm-select__list${box.up ? " mm-select__list--up" : ""}`}
+          style={{ top: box.up ? undefined : box.top, bottom: box.up ? window.innerHeight - box.top : undefined, left: box.left, minWidth: box.width, maxHeight: box.maxHeight }}>
+          {withSearch && (
+            <div className="mm-select__search">
+              <input ref={search} className="mm-control" value={query} placeholder="输入筛选…" aria-label="筛选选项" autoComplete="off" spellCheck={false}
+                onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey} />
+            </div>
+          )}
+          <div className="mm-select__options">
+            {items.length ? items : <div className="mm-select__group">{q ? `没有匹配 “${query.trim()}” 的选项` : "没有可选项"}</div>}
+          </div>
         </div>,
         document.body,
       )}

@@ -257,7 +257,7 @@ export function ResearchPage() {
             </Field>
             {form.scenario.startsWith("Finance") && universes.length > 0 && (
               <Field label="股票池" hint="因子在这个池子里计算、排序和回测">
-                <SelectInput value={form.market} onChange={(v) => setForm((f) => ({ ...f, market: v }))} options={universes.map((u) => ({ value: u.market, label: `${universeLabel(u.market)}${u.ready ? "" : "（首次需准备数据）"}` }))} />
+                <SelectInput value={form.market} onChange={(v) => setForm((f) => ({ ...f, market: v }))} options={universes.map((u) => ({ value: u.market, label: `${universeLabel(u.market)}${u.ready ? "" : "（首次需准备数据）"}`, hint: u.members ? `${u.members} 只 · ${u.benchmark}` : u.benchmark }))} />
               </Field>
             )}
             {mode.loops && <Field label="轮数" hint="1–30"><NumberInput value={form.loops} onChange={(v) => setForm((f) => ({ ...f, loops: v }))} min={1} max={30} /></Field>}

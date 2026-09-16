@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import * as studio from "../api/studio";
 import type { SyncStatus } from "../api/studio";
 import { errorText } from "../hooks/studioContext";
-import { Btn } from "./minimal";
+import { Btn, SelectInput } from "./minimal";
 
 const PHASES: Record<string, string> = { starting: "准备", downloading: "下载", extracting: "校验解包", swapping: "替换目录", done: "完成", failed: "失败" };
 const fmtTime = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString("zh-CN", { hour12: false }) : "—");
@@ -109,9 +109,8 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
                 <label className="flex items-center gap-2">
                   <input type="checkbox" className="mm-check" checked={!!status?.settings.auto} onChange={toggleAuto} />
                   <span>每天自动同步，</span>
-                  <select className="mm-control" style={{ height: 26, padding: "0 22px 0 8px" }} value={status?.settings.hour ?? 19} onChange={(e) => setHour(Number(e.target.value))} aria-label="自动同步时间">
-                    {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
-                  </select>
+                  <SelectInput className="!h-[26px] w-[84px]" value={String(status?.settings.hour ?? 19)} onChange={(v) => setHour(Number(v))} ariaLabel="自动同步时间" searchable={false}
+                    options={Array.from({ length: 24 }, (_, h) => ({ value: String(h), label: `${String(h).padStart(2, "0")}:00` }))} />
                   <span>之后检查一次</span>
                 </label>
                 {status?.settings.last_auto_check && <div className="text-[11px] text-muted">上次自动检查：{status.settings.last_auto_check}</div>}

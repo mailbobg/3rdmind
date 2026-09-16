@@ -549,7 +549,7 @@ def universe_env(market: str) -> dict[str, str]:
 def list_universes():
     prepared = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe"
     return jsonify([{"market": u["market"], "label": u["label"], "group": u["group"], "region": u["region"], "benchmark": u["benchmark"],
-                     "open_cost": u["open_cost"], "close_cost": u["close_cost"], "min_cost": u["min_cost"], "limit_threshold": u["limit_threshold"],
+                     "open_cost": u["open_cost"], "close_cost": u["close_cost"], "min_cost": u["min_cost"], "limit_threshold": u["limit_threshold"], "members": u.get("members"),
                      "ready": u["market"] == "csi300" or (prepared / u["market"] / "full" / "daily_pv.h5").is_file()}
                     for u in studio_markets.universes()])
 

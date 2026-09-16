@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert, Card, Checkbox, Chip, Disclosure, TextArea } from "@heroui/react";
-import { Btn } from "./minimal";
+import { Btn, SelectInput } from "./minimal";
 import type { TraceEvent } from "../api/studio";
 import type { RoundView } from "../hooks/rounds";
 import { download } from "../hooks/studioContext";
@@ -60,9 +60,8 @@ export function RoundDetail({ round, onContinue }: { round: RoundView; onContinu
       {round.files.length > 0 && (
         <Section title="生成代码" note={current && <Btn kind="text" onClick={() => download(`${current.task || "round"}-${current.name}`, current.code)}>下载代码</Btn>}>
           {round.files.length > 1 && (
-            <select className="rounded-lg border border-border bg-surface px-2 py-1 text-xs" value={file} onChange={(e) => setFile(Number(e.target.value))}>
-              {round.files.map((f, i) => <option key={i} value={i}>{f.task ? f.task + " · " : ""}{f.name}</option>)}
-            </select>
+            <SelectInput value={String(file)} onChange={(v) => setFile(Number(v))} ariaLabel="代码文件"
+              options={round.files.map((f, i) => ({ value: String(i), label: f.name, group: f.task || undefined }))} />
           )}
           {current && <CodeView code={current.code} />}
         </Section>

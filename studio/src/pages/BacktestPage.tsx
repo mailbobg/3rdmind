@@ -339,7 +339,7 @@ export function BacktestPage() {
             <FieldGrid min={140}>
               <Field label="开始"><TextInput type="date" value={params.start} onChange={(v) => setDate("start", v)} /></Field>
               <Field label="结束"><TextInput type="date" value={params.end} onChange={(v) => setDate("end", v)} /></Field>
-              <Field label="股票池"><SelectInput value={params.market} onChange={(v) => { const u = universes.find((x) => x.market === v); setParams((p) => ({ ...p, market: v, ...(u ? { benchmark: u.benchmark, open_cost: u.open_cost, close_cost: u.close_cost } : {}) })); }} options={(universes.length ? universes.map((u) => u.market) : ["csi300", "csi500", "all"]).map((m) => ({ value: m as Market, label: universeLabel(m) }))} /></Field>
+              <Field label="股票池"><SelectInput value={params.market} onChange={(v) => { const u = universes.find((x) => x.market === v); setParams((p) => ({ ...p, market: v, ...(u ? { benchmark: u.benchmark, open_cost: u.open_cost, close_cost: u.close_cost } : {}) })); }} options={universes.length ? universes.map((u) => ({ value: u.market as Market, label: universeLabel(u.market), hint: u.members ? `${u.members} 只 · ${u.benchmark}` : u.benchmark })) : ["csi300", "csi500", "all"].map((m) => ({ value: m as Market, label: universeLabel(m) }))} /></Field>
               <Field label="基准"><TextInput value={params.benchmark} onChange={(v) => set("benchmark", v)} /></Field>
               <Field label="持股数" hint="每天按评分持有前 topk 只"><NumberInput value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} /></Field>
               <Field label="每日换出" hint="每天最多换出 n_drop 只"><NumberInput value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} /></Field>
