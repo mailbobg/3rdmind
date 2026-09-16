@@ -187,4 +187,5 @@ static/
 AGENTS.md
 !rdagent/**/AGENTS.md
 
-scripts/
+scripts/*
+!scripts/start-studio.sh

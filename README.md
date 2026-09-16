@@ -1,3 +1,9 @@
+> **Research Studio fork.** This repository adds a React front end (`studio/`) and a set of log-server
+> endpoints (`rdagent/log/server/studio*.py`) on top of RD-Agent's Qlib scenarios: an experiment browser,
+> a factor library with single-factor analysis, portfolio backtests with take-apart diagnosis and greedy
+> portfolio search, saved strategies with tracking and signal export, research on top of a strategy, and
+> data sync. See [docs/studio.md](docs/studio.md). Start it with `sh scripts/start-studio.sh`.
+
 <h4 align="center">
   <img src="docs/_static/logo.png" alt="RA-Agent logo" style="width:70%; ">
   
