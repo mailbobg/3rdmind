@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
 import type { BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
@@ -35,6 +35,7 @@ export function BacktestPage() {
     train: ["", ""], valid: ["", ""], params: { ...LGBM_DEFAULTS },
     ...(saved.model?.method === "lgbm" ? { train: saved.model.train, valid: saved.model.valid, params: { ...LGBM_DEFAULTS, ...saved.model.params } } : {}),
   });
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState(searchParams.get("tab") === "search" ? "search" : "params");
   useEffect(() => { if (searchParams.get("tab")) setSearchParams({}, { replace: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -48,8 +49,13 @@ export function BacktestPage() {
     const accepted = await searches.run({ factors: candidates.map((f) => ({ ...f, weight: Number(f.weight) })), model: { method: "rank" }, ...params, search: { objective } });
     if (accepted) layout.openResults();
   };
+  // The recommendation is rebuilt from the search job's own factor references, so it works even when the
+  // basket has changed since (or the result belongs to an earlier search).
   const adoptRecommendation = (members: string[], weights: Record<string, number>) => {
-    basket.replace(candidates.filter((f) => members.includes(f.name)).map((f) => ({ ...f, weight: weights[f.name] ?? f.weight })));
+    const source = searches.result?.config.factors || [];
+    const picked = source.filter((f) => members.includes(f.name)).map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: f.kind || "factor", weight: weights[f.name] ?? f.weight ?? 1 }));
+    if (!picked.length) { setPageError("推荐组合里的因子在这次搜索的记录里找不到，无法放进篮子。"); return; }
+    basket.replace(picked);
     setTab("params");
   };
   const [source, setSource] = useState("");
@@ -329,7 +335,14 @@ export function BacktestPage() {
                   String(f.weight),
                   <span key="c" className="mm-mono mm-dim">{coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}` : "—"}</span>,
                 ] }))} />
-            ) : <Empty>去 <Link href="#/factors?return=search">因子库</Link> 勾选至少两个因子，勾好后底部按钮会带你回到这里。</Empty>}
+            ) : null}
+            {candidates.length < 2 && (
+              <div style={{ marginTop: candidates.length ? 12 : 0 }}>
+                <Note tone="info" actions={<Btn onClick={() => navigate("/factors?return=search")}>去因子库勾选</Btn>}>
+                  搜索至少需要两个因子作为候选{candidates.length ? `，现在只有 ${candidates.length} 个` : ""}。勾好后因子库底部的"回组合搜索"会带你回到这里。
+                </Note>
+              </div>
+            )}
           </Block>
           <Block title="搜索记录" count={searches.jobs.length}>
             {searches.jobs.length ? (
