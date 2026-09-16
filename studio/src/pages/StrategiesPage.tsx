@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import * as studio from "../api/studio";
-import type { BacktestResult, Strategy, StrategyRun } from "../api/studio";
+import type { BacktestResult, SignalExport, Strategy, StrategyRun } from "../api/studio";
 import { shortTime } from "../hooks/experiments";
-import { errorText, shortName, useStudio } from "../hooks/studioContext";
+import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
 import { Section } from "../components/Section";
 import { BacktestResultView } from "../components/BacktestResultView";
 import { Block, Btn, Empty, Note, Num, P, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
-import { CurveOverlay, Hint, MetricGrid, Mono, Signed, percent } from "../components/widgets";
+import { CurveOverlay, DataTable, Hint, MetricGrid, Mono, Signed, money, percent } from "../components/widgets";
 
 const RUN_STATUS: Record<string, string> = { queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", missing: "记录丢失" };
 
@@ -24,6 +24,7 @@ export function StrategiesPage() {
   const [selectedId, setSelectedId] = useState("");
   const [detail, setDetail] = useState<Strategy | null>(null);
   const [latestRun, setLatestRun] = useState<BacktestResult | null>(null);
+  const [signal, setSignal] = useState<SignalExport | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const [filter, setFilter] = useState("all");
@@ -41,7 +42,7 @@ export function StrategiesPage() {
   // The newest run's full report; polled while it is still running.
   const lastRunId = detail?.run_details?.length ? detail.run_details[detail.run_details.length - 1].id : "";
   useEffect(() => {
-    setLatestRun(null);
+    setLatestRun(null); setSignal(null);
     if (!lastRunId) return;
     let stop = false;
     const tick = async () => {
@@ -49,6 +50,7 @@ export function StrategiesPage() {
         const r = await studio.backtest(lastRunId);
         if (stop) return;
         setLatestRun(r);
+        if (r.status === "completed" && selectedId) studio.strategySignal(selectedId).then((sig) => { if (!stop) setSignal(sig); }).catch(() => { if (!stop) setSignal(null); });
         if (r.status === "queued" || r.status === "running") setTimeout(tick, 3000);
         else if (detail && selectedId) { studio.strategy(selectedId).then((s) => { if (!stop) setDetail(s); }).catch(() => {}); load(); }
       } catch (e) { if (!stop) setError(errorText(e)); }
@@ -73,6 +75,12 @@ export function StrategiesPage() {
   const saveEdit = async () => {
     if (!detail) return;
     try { const s = await studio.renameStrategy(detail.id, draft); setDetail(s); setEditing(false); await load(); } catch (e) { setError(errorText(e)); }
+  };
+  const exportCsv = async (s: Strategy) => {
+    try {
+      const text = await fetch(studio.strategySignalCsvUrl(s.id)).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error || `HTTP ${r.status}`); return r.text(); });
+      download(`signal-${signal?.as_of || "latest"}-${s.name}.csv`, text, "text/csv");
+    } catch (e) { setError(errorText(e)); }
   };
   const toBasket = (s: Strategy) => { basket.replace(s.factors.map((f) => ({ ...f, kind: f.kind || "factor" }))); navigate("/backtest"); };
 
@@ -133,6 +141,36 @@ export function StrategiesPage() {
             {detail.run_details?.length ? runsTable(detail.run_details) : <Hint>还没有回测记录。点“更新到最新”跑第一次。</Hint>}
             <Hint>“证据”是保存时依据的那次回测；“更新”是之后每次把成员因子重算到最新、从证据区间起点跑到行情末日的结果。区间越往后延，超额收益还在不在，就是这个策略是否仍然有效的答案。</Hint>
           </Section>
+          {signal && (
+            <Section title="最新信号" note={<span className="flex items-center gap-2">截至 {signal.as_of}<Btn onClick={() => detail && exportCsv(detail)}>导出 CSV</Btn><Btn kind="text" onClick={() => download(`signal-${signal.as_of}-${detail.name}.json`, JSON.stringify(signal, null, 2), "application/json")}>JSON</Btn></span>}>
+              <Hint>目标持仓是策略在最新一次回测结束时的持仓，即进入下一个交易日的仓位；评分是最后一个信号日的排名，下一次调仓按它买前 {signal.topk} 名、每天最多换出 {signal.n_drop} 只。交易系统直接读 CSV：type 列为 holding 的是持仓（权重、数量、价格），为 score 的是排名。</Hint>
+              <MetricGrid columns={3} items={[
+                { label: "持仓数", value: String(signal.rows.filter((r) => r.type === "holding").length) },
+                { label: "持仓市值", value: money(signal.rows.filter((r) => r.type === "holding").reduce((a, r) => a + (r.value || 0), 0)) },
+                { label: "现金", value: money(signal.cash) },
+              ]} />
+              <DataTable label="目标持仓" head={[["标的"], ["权重", "end"], ["数量", "end"], ["价格", "end"], ["市值", "end"], ["最新排名", "end"]]}
+                rows={signal.rows.filter((r) => r.type === "holding").map((r) => {
+                  const rank = signal.rows.find((x) => x.type === "score" && x.instrument === r.instrument)?.rank;
+                  return { key: r.instrument, cells: [
+                    <Mono key="i">{r.instrument}</Mono>,
+                    <span key="w" className="tabular-nums">{typeof r.weight === "number" ? percent(r.weight, 1) : "—"}</span>,
+                    <span key="a" className="tabular-nums">{typeof r.amount === "number" ? Math.round(r.amount).toLocaleString() : "—"}</span>,
+                    <span key="p" className="tabular-nums">{typeof r.price === "number" ? r.price.toFixed(3) : "—"}</span>,
+                    <span key="v" className="tabular-nums">{money(r.value)}</span>,
+                    <span key="r" className={`tabular-nums ${rank == null ? "text-muted" : rank <= signal.topk ? "" : "text-danger"}`}>{rank ?? `> ${signal.rows.filter((x) => x.type === "score").length}`}</span>,
+                  ] };
+                })} />
+              <DataTable label="最新评分" head={[["排名", "end"], ["标的"], ["评分", "end"], ["当前"]]}
+                rows={signal.rows.filter((r) => r.type === "score").slice(0, signal.topk * 2).map((r) => ({ key: `s-${r.instrument}`, cells: [
+                  <span key="r" className="tabular-nums">{r.rank}</span>,
+                  <Mono key="i">{r.instrument}</Mono>,
+                  <span key="s" className="tabular-nums">{typeof r.score === "number" ? r.score.toFixed(4) : "—"}</span>,
+                  <span key="h" className={`text-[11px] ${r.held ? "text-success" : "text-muted"}`}>{r.held ? "持有中" : (r.rank ?? 0) <= signal.topk ? "待买入" : ""}</span>,
+                ] }))} />
+              <Hint>排名跌出前 {signal.topk} 的持仓标红：按 TopkDropout 规则它们是下一次调仓最先被换出的候选。</Hint>
+            </Section>
+          )}
           {latestRun?.metrics && (
             <Section title="最新一次" note={`${latestRun.config.start} → ${latestRun.config.end}`}>
               <MetricGrid columns={3} items={[

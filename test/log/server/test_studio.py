@@ -409,6 +409,44 @@ def test_strategies_are_saved_listed_updated_and_deleted(studio_client, tmp_path
 
 
 @pytest.mark.offline
+def test_latest_scores_ranks_the_last_day() -> None:
+    import pandas as pd
+    from rdagent.log.server.studio_worker import latest_scores
+
+    index = pd.MultiIndex.from_product([pd.to_datetime(["2025-06-27", "2025-06-30"]), ["A", "B", "C"]], names=["datetime", "instrument"])
+    score = pd.Series([0.1, 0.2, 0.3, 0.9, 0.1, 0.5], index=index)
+    out = latest_scores(score, topk=1)
+    assert out["date"] == "2025-06-30" and out["universe"] == 3
+    assert [(r["instrument"], r["rank"]) for r in out["scores"]] == [("A", 1), ("C", 2), ("B", 3)]
+
+
+@pytest.mark.offline
+def test_strategy_signal_exports_holdings_and_scores(studio_client, tmp_path: Path) -> None:
+    job = studio_module.ROOT / "33333333-3333-3333-3333-333333333333"
+    job.mkdir(parents=True)
+    studio_module.write_json(job / "config.json", {"start": "2025-01-02", "end": "2025-06-30", "market": "csi300", "topk": 2, "n_drop": 1, "factors": [{"name": "STR_5"}]})
+    studio_module.write_json(job / "result.json", {"status": "completed", "metrics": {"total_return": 0.01},
+        "holdings": {"positions": [{"instrument": "SH600000", "amount": 100, "price": 10.0, "value": 1000.0, "weight": 0.5}], "cash": 1000.0, "total": 2000.0},
+        "latest_signal": {"date": "2025-06-30", "universe": 300, "scores": [{"instrument": "SH600000", "score": 0.9, "rank": 1}, {"instrument": "SZ000001", "score": 0.8, "rank": 2}]}})
+    body = {"name": "导出测试", "factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "model": {"method": "rank"}, "params": {"market": "csi300", "benchmark": "SH000300", "topk": 2, "n_drop": 1, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015},
+            "evidence": {"backtest_id": "33333333-3333-3333-3333-333333333333", "start": "2025-01-02", "end": "2025-06-30"}}
+    strategy = studio_client.post("/studio/strategies", json=body).get_json()
+    payload = studio_client.get(f"/studio/strategies/{strategy['id']}/signal").get_json()
+    assert payload["as_of"] == "2025-06-30" and payload["cash"] == 1000.0
+    assert [(r["type"], r["instrument"]) for r in payload["rows"]] == [("holding", "SH600000"), ("score", "SH600000"), ("score", "SZ000001")]
+    assert payload["rows"][1]["held"] is True and payload["rows"][2]["held"] is False
+    csv_response = studio_client.get(f"/studio/strategies/{strategy['id']}/signal", query_string={"format": "csv"})
+    assert csv_response.status_code == 200 and csv_response.mimetype == "text/csv"
+    assert csv_response.headers["Content-Disposition"].encode("latin-1")  # non-ASCII names must be percent-encoded
+    lines = csv_response.get_data(as_text=True).strip().splitlines()
+    assert lines[0] == "date,type,instrument,weight,amount,price,value,score,rank,held" and len(lines) == 4
+    # A strategy whose runs are not completed has nothing to export yet.
+    studio_module.write_json(job / "result.json", {"status": "running"})
+    assert studio_client.get(f"/studio/strategies/{strategy['id']}/signal").status_code == 409
+
+
+@pytest.mark.offline
 def test_rounds_lists_factor_rounds(studio_client) -> None:
     response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
     assert response.status_code == 200

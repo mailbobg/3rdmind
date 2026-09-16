@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.server.studio_worker import validate_config, write_json
@@ -927,3 +927,66 @@ def strategy_update(strategy_id):
     strategy.setdefault("runs", []).append({"backtest_id": job_id, "kind": "update"})
     save_strategy(strategy)
     return jsonify({"backtest_id": job_id, "refreshed": refreshed, "failures": failures, "start": start, "end": end}), 202
+
+
+def signal_export(strategy):
+    """Target holdings and the latest ranking from the strategy's newest completed run, as rows for CSV/JSON.
+
+    The holdings are the book TopkDropoutStrategy ends the run with, i.e. what it would hold going into the
+    next trading day; the scores are the last signal day's ranking that the next rebalance will read.
+    """
+    for entry in reversed(strategy.get("runs", [])):
+        try:
+            folder = job_folder(entry["backtest_id"])
+        except ValueError:
+            continue
+        if not (folder / "result.json").is_file():
+            continue
+        result = json.loads((folder / "result.json").read_text())
+        if result.get("status") != "completed":
+            continue
+        config = json.loads((folder / "config.json").read_text())
+        holdings = result.get("holdings") or {}
+        signal = result.get("latest_signal") or {}
+        rows = []
+        for row in holdings.get("positions", []):
+            rows.append({"date": signal.get("date") or config.get("end"), "type": "holding", "instrument": row["instrument"], "weight": row.get("weight"),
+                         "amount": row.get("amount"), "price": row.get("price"), "value": row.get("value"), "score": None, "rank": None})
+        held = {row["instrument"] for row in holdings.get("positions", [])}
+        for row in signal.get("scores", []):
+            rows.append({"date": signal.get("date"), "type": "score", "instrument": row["instrument"], "weight": None, "amount": None, "price": None,
+                         "value": None, "score": row["score"], "rank": row["rank"], "held": row["instrument"] in held})
+        return {"strategy": strategy["name"], "strategy_id": strategy["id"], "backtest_id": entry["backtest_id"],
+                "as_of": signal.get("date") or config.get("end"), "market": config.get("market"), "topk": config.get("topk"), "n_drop": config.get("n_drop"),
+                "cash": holdings.get("cash"), "total": holdings.get("total"), "rows": rows}
+    raise ValueError("这个策略还没有跑完的回测；先点“更新到最新”")
+
+
+@studio.get("/strategies/<strategy_id>/signal")
+def strategy_signal(strategy_id):
+    """?format=csv for the file execution systems read; JSON otherwise."""
+    try:
+        strategy = load_strategy(strategy_id)
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    try:
+        payload = signal_export(strategy)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 409
+    if request.args.get("format") != "csv":
+        return jsonify(payload)
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    fields = ["date", "type", "instrument", "weight", "amount", "price", "value", "score", "rank", "held"]
+    writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in payload["rows"]:
+        writer.writerow({k: ("" if row.get(k) is None else row.get(k)) for k in fields})
+    from urllib.parse import quote
+
+    # Header values must be latin-1: ASCII fallback plus the RFC 5987 percent-encoded UTF-8 name.
+    filename = f"signal-{payload['as_of']}-{strategy['name']}.csv".replace("/", "_")
+    disposition = f"attachment; filename=\"signal-{payload['as_of']}.csv\"; filename*=UTF-8''{quote(filename)}"
+    return Response(buffer.getvalue(), mimetype="text/csv", headers={"Content-Disposition": disposition})

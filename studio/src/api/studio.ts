@@ -189,6 +189,10 @@ export const renameStrategy = (id: string, fields: { name?: string; note?: strin
   fetch(`/studio/strategies/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) }).then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as Strategy; });
 export const deleteStrategy = (id: string) =>
   fetch(`/studio/strategies/${id}`, { method: "DELETE" }).then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as { deleted: string }; });
+export interface SignalRow { date: string; type: "holding" | "score"; instrument: string; weight?: number | null; amount?: number | null; price?: number | null; value?: number | null; score?: number | null; rank?: number | null; held?: boolean }
+export interface SignalExport { strategy: string; strategy_id: string; backtest_id: string; as_of: string; market: string; topk: number; n_drop: number; cash: number | null; total: number | null; rows: SignalRow[] }
+export const strategySignal = (id: string) => api<SignalExport>(`/studio/strategies/${id}/signal`);
+export const strategySignalCsvUrl = (id: string) => `/studio/strategies/${id}/signal?format=csv`;
 export const updateStrategy = (id: string, body: { start?: string; end?: string; refresh?: boolean } = {}) =>
   api<{ backtest_id: string; refreshed: string[]; failures: string[]; start: string; end: string }>(`/studio/strategies/${id}/update`, body);
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});

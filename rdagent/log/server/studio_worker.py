@@ -473,11 +473,21 @@ def signal_diagnosis(prepared, score):
     return {"signals": signals, "correlation": {"names": names, "matrix": matrix, "days": int(window.index.get_level_values("datetime").nunique())}}
 
 
+def latest_scores(score, topk):
+    """The last signal day's ranking: what the strategy would buy next, for the signal export."""
+    last = score.index.get_level_values("datetime").max()
+    day = score.xs(last, level="datetime").sort_values(ascending=False)
+    keep = max(2 * int(topk), 20)
+    return {"date": str(last.date()), "universe": int(len(day)),
+            "scores": [{"instrument": str(inst), "score": float(v), "rank": i + 1} for i, (inst, v) in enumerate(day.head(keep).items())]}
+
+
 def run(config):
     prepared = prepare(config)
     factors, model = prepared["factors"], prepared["model"]
     score, model_report = combine(prepared, [f["name"] for f in factors], [f["weight"] for f in factors], model)
     test_ic, test_rank_ic = information_coefficient(score, prepared["label"])
+    signal = latest_scores(score, config["topk"])
     report, positions, indicator = backtest_score(score, config)
     trades = trades_from_indicator(getattr(indicator, "order_indicator_his", {}))
     last_day = max(positions) if positions else None
@@ -487,7 +497,7 @@ def run(config):
     return clean({"metrics": {**metrics, "signal_ic": test_ic, "signal_rank_ic": test_rank_ic},
                   "model": model_report,
                   "rows": rows, "config": config,
-                  "trades": trades, "holdings": holdings, "instruments": instruments,
+                  "trades": trades, "holdings": holdings, "instruments": instruments, "latest_signal": signal,
                   "diagnosis": signal_diagnosis(prepared, score) if len(factors) > 1 else None,
                   "method": "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})
 
