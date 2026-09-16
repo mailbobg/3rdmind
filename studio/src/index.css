@@ -82,7 +82,7 @@ body { margin: 0; background: var(--background); color: var(--foreground); font-
 @keyframes select-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
 @keyframes select-in-up { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: none; } }
 /* Filter row: a bare input with a magnifier, a clear ×, and the count as a quiet pill; no box inside the box. */
-.mm-select__search { display: flex; align-items: center; gap: 8px; height: 84px; margin: 6px 6px 0; padding: 0 6px 0 8px; border-bottom: 1px solid var(--mm-rule-soft); }
+.mm-select__search { flex: none; display: flex; align-items: center; gap: 8px; height: 60px; margin: 6px 6px 0; padding: 0 6px 0 8px; border-bottom: 1px solid var(--mm-rule-soft); }
 .mm-select__glass { flex: none; color: var(--mm-muted); }
 .mm-select__input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; font: inherit; font-size: 12.5px; color: var(--mm-ink); }
 .mm-select__input::placeholder { color: var(--mm-muted); opacity: 0.8; }
