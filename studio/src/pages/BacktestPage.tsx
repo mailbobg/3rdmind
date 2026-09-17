@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
-import type { BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor, Universe } from "../api/studio";
+import type { BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor, Strategy, Universe } from "../api/studio";
 import { universeLabel } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
@@ -125,33 +125,48 @@ export function BacktestPage() {
     } finally { setConfirming(false); }
   };
   // 保存为策略: the completed backtest (or the search recommendation) becomes a named, tracked portfolio.
+  // It can also overwrite an existing strategy of this workspace (new members, parameters and evidence; the
+  // tracking history starts over), which is how a strategy's portfolio or parameters get changed.
   const [savingFrom, setSavingFrom] = useState<"backtest" | "search" | "">("");
   const [strategyName, setStrategyName] = useState("");
+  const [replaceId, setReplaceId] = useState("");
+  const [existing, setExisting] = useState<Strategy[]>([]);
   const [savedNote, setSavedNote] = useState("");
+  const beginSave = (from: "backtest" | "search") => {
+    setSavingFrom(from); setStrategyName(""); setReplaceId(""); setSavedNote("");
+    studio.strategies().then(setExisting).catch(() => setExisting([]));
+  };
   const saveStrategy = async () => {
-    const name = strategyName.trim();
+    const target = existing.find((s) => s.id === replaceId);
+    const name = strategyName.trim() || target?.name || "";
     if (!name) { setPageError(t("给策略起个名字。")); return; }
+    if (target && !window.confirm(t("覆盖策略「{0}」？它的成员、参数和证据都会换成这次的，原有的跟踪记录会清空。", [target.name]))) return;
     try {
+      const replace = target ? { replace: target.id } : {};
       if (savingFrom === "backtest" && result?.metrics) {
         const c = result.config;
         await studio.saveStrategy({ name, factors: c.factors, model: c.model || { method: "rank" },
           params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost },
-          evidence: { backtest_id: result.id, start: c.start, end: c.end } });
+          evidence: { backtest_id: result.id, start: c.start, end: c.end }, ...replace });
       } else if (savingFrom === "search" && searches.result?.recommended_portfolio) {
         const rec = searches.result.recommended_portfolio; const c = searches.result.config;
         const members = c.factors.filter((f) => rec.members.includes(f.name)).map((f) => ({ ...f, weight: rec.weights?.[f.name] ?? f.weight }));
         await studio.saveStrategy({ name, factors: members, model: { method: "rank" },
           params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost },
-          evidence: { search_id: searches.result.id, start: c.start, end: c.end } });
+          evidence: { search_id: searches.result.id, start: c.start, end: c.end }, ...replace });
       } else return;
-      setSavedNote(t("已保存为策略「{0}」，在左栏「策略」里跟踪。", [name]));
-      setSavingFrom(""); setStrategyName("");
+      setSavedNote(target ? t("已覆盖策略「{0}」，跟踪从这次回测重新开始。", [name]) : t("已保存为策略「{0}」，在左栏「策略」里跟踪。", [name]));
+      setSavingFrom(""); setStrategyName(""); setReplaceId("");
     } catch (e) { setPageError(errorText(e)); }
   };
   const saveForm = (
     <div className="mm-row">
-      <TextInput value={strategyName} onChange={setStrategyName} placeholder={t("策略名称")} className="w-56" />
-      <Btn kind="primary" onClick={saveStrategy}>{t("保存")}</Btn>
+      {existing.length > 0 && (
+        <SelectInput ariaLabel={t("保存方式")} className="w-56" value={replaceId} onChange={setReplaceId}
+          options={[{ value: "", label: t("保存为新策略") }, ...existing.map((s) => ({ value: s.id, label: t("覆盖：{0}", [s.name]), hint: s.evidence?.end ? t("证据到 {0}", [s.evidence.end]) : undefined }))]} />
+      )}
+      <TextInput value={strategyName} onChange={setStrategyName} placeholder={replaceId ? (existing.find((s) => s.id === replaceId)?.name || t("策略名称")) : t("策略名称")} className="w-56" />
+      <Btn kind="primary" onClick={saveStrategy}>{replaceId ? t("覆盖并保存") : t("保存")}</Btn>
       <Btn kind="text" onClick={() => setSavingFrom("")}>{t("取消")}</Btn>
     </div>
   );
@@ -376,13 +391,13 @@ export function BacktestPage() {
         <>
           {searches.jobs.length ? <SelectInput ariaLabel={t("搜索历史")} placeholder={t("搜索历史")} className="w-80 max-w-full" value={searches.selectedId || ""} onChange={(id) => { searches.select(id); layout.openResults(); }}
             options={searchOptions} searchable listWidth={440} searchPlaceholder={HISTORY_SEARCH_HINT} /> : undefined}
-          {searches.result?.recommended_portfolio && <Btn onClick={() => { setSavingFrom("search"); setStrategyName(""); setSavedNote(""); }}>{t("保存为策略")}</Btn>}
+          {searches.result?.recommended_portfolio && <Btn onClick={() => beginSave("search")}>{t("保存为策略")}</Btn>}
         </>
       ) : (
         <>
           <SelectInput ariaLabel={t("回测历史")} placeholder={t("回测历史")} className="w-80 max-w-full" value={backtests.selectedId || ""} onChange={(id) => { backtests.select(id); layout.openResults(); }}
             options={jobOptions} searchable listWidth={440} searchPlaceholder={HISTORY_SEARCH_HINT} />
-          {result?.metrics && <Btn onClick={() => { setSavingFrom("backtest"); setStrategyName(""); setSavedNote(""); }}>{t("保存为策略")}</Btn>}
+          {result?.metrics && <Btn onClick={() => beginSave("backtest")}>{t("保存为策略")}</Btn>}
           {result?.metrics && <Btn kind="text" onClick={() => download(`backtest-${result.id.slice(0, 8)}.json`, JSON.stringify(result, null, 2), "application/json")}>{t("导出 JSON")}</Btn>}
         </>
       )}

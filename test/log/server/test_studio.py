@@ -546,6 +546,20 @@ def test_strategies_are_saved_listed_updated_and_deleted(studio_client, tmp_path
     detail = studio_client.get(f"/studio/strategies/{strategy['id']}").get_json()
     assert [r["kind"] for r in detail["run_details"]] == ["evidence", "update"]
     assert detail["run_details"][1]["status"] == "queued" and detail["run_details"][1]["end"] == "2025-12-31"
+    # 更新到最新 with its own window: the tracking run takes the given start too.
+    windowed = studio_client.post(f"/studio/strategies/{strategy['id']}/update", json={"start": "2025-03-03", "end": "2025-12-31", "refresh": False})
+    assert windowed.status_code == 202, windowed.get_json()
+    assert wait_job(studio_client, windowed.get_json()["job"])["result"]["start"] == "2025-03-03"
+    # Saving another backtest over this strategy replaces its portfolio and evidence and starts tracking over;
+    # id, creation time and note survive, the name stays when none is given.
+    studio_client.patch(f"/studio/strategies/{strategy['id']}", json={"note": "keep me"})
+    replaced = studio_client.post("/studio/strategies", json={**body, "name": "", "note": "", "replace": strategy["id"], "params": {**body["params"], "topk": 5},
+                                                              "evidence": {"backtest_id": "22222222-2222-2222-2222-222222222222", "start": "2025-02-03", "end": "2025-06-30"}})
+    assert replaced.status_code == 200, replaced.get_json()
+    r = replaced.get_json()
+    assert r["id"] == strategy["id"] and r["name"] == "反转二号" and r["note"] == "keep me" and r["created"] == strategy["created"]
+    assert r["params"]["topk"] == 5 and r["evidence"]["start"] == "2025-02-03" and [x["kind"] for x in r["run_details"]] == ["evidence"]
+    assert studio_client.post("/studio/strategies", json={**body, "replace": "00000000-0000-0000-0000-000000000000"}).status_code == 404
     assert studio_client.delete(f"/studio/strategies/{strategy['id']}").status_code == 200
     assert studio_client.get(f"/studio/strategies/{strategy['id']}").status_code == 404
 

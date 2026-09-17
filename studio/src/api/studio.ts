@@ -251,7 +251,7 @@ export interface Strategy {
   runs?: { backtest_id: string; kind: string }[]; run_details?: StrategyRun[];
   latest?: StrategyRun | null; run_count?: number;
 }
-export interface StrategyDraft { name: string; note?: string; factors: FactorWeight[]; model: SignalModel; params: StrategyParams; evidence?: Strategy["evidence"] }
+export interface StrategyDraft { name: string; note?: string; factors: FactorWeight[]; model: SignalModel; params: StrategyParams; evidence?: Strategy["evidence"]; replace?: string }
 export const strategies = () => api<Strategy[]>(scoped("/studio/strategies"));
 export const strategy = (id: string) => api<Strategy>(`/studio/strategies/${id}`);
 export const saveStrategy = (draft: StrategyDraft) => api<Strategy>("/studio/strategies", draft);

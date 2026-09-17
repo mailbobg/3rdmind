@@ -8,7 +8,7 @@ import { persistStudioState } from "../hooks/studioStorage";
 import { PageFrame } from "../components/PageFrame";
 import { Section } from "../components/Section";
 import { BacktestResultView } from "../components/BacktestResultView";
-import { Block, Btn, Empty, Note, Num, NumberInput, P, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
+import { Block, Btn, Empty, Field, Note, Num, NumberInput, P, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { CurveOverlay, DataTable, Hint, Instrument, MetricGrid, Mono, Signed, money, percent } from "../components/widgets";
 import { t } from "../i18n";
 
@@ -78,10 +78,15 @@ export function StrategiesPage() {
     return () => { stop = true; };
   }, [lastRunId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 更新到最新 takes an optional window: start defaults to the evidence start, end to the data's last day.
+  const [updating, setUpdating] = useState(false);
+  const [span, setSpan] = useState({ start: "", end: "" });
+  const openUpdate = (s: Strategy) => { setSpan({ start: s.evidence?.start || "", end: env?.end || "" }); setUpdating((v) => !v); };
   const update = async (s: Strategy) => {
-    setBusy(s.id);
+    if (span.start && span.end && span.start >= span.end) { setError(t("更新区间的开始必须早于结束。")); return; }
+    setBusy(s.id); setUpdating(false);
     try {
-      const r = await studio.updateStrategy(s.id);
+      const r = await studio.updateStrategy(s.id, { start: span.start || undefined, end: span.end || undefined });
       if (r.failures.length) setError(t("部分因子没能重算：{0}。回测已用现有数据启动。", [r.failures.join("；")]));
       await load();
       await open(s.id);
@@ -135,11 +140,22 @@ export function StrategiesPage() {
         <>
           <Btn kind="text" onClick={() => setEditing((v) => !v)}>{editing ? t("取消") : t("重命名")}</Btn>
           <Btn onClick={() => toBasket(detail)}>{t("放进信号篮 →")}</Btn>
-          <Btn kind="primary" disabled={busy === detail.id || !env?.data_ready} onClick={() => update(detail)}>{busy === detail.id ? t("重算并回测中…") : t("更新到最新")}</Btn>
+          <Btn kind="primary" disabled={busy === detail.id || !env?.data_ready} onClick={() => openUpdate(detail)}>{busy === detail.id ? t("重算并回测中…") : t("更新到最新")}</Btn>
         </>
       ) : undefined}
       results={detail ? (
         <div className="flex flex-col gap-3">
+          {updating && (
+            <Section title={t("更新到最新")} note={t("重算成员因子，再在这个区间上回测，结果追加到跟踪记录")}>
+              <div className="flex flex-wrap items-end gap-3">
+                <Field label={t("开始")} hint={t("默认证据起点")}><TextInput type="date" value={span.start} onChange={(v) => setSpan((w) => ({ ...w, start: v }))} /></Field>
+                <Field label={t("结束")} hint={t("默认行情最后一天")}><TextInput type="date" value={span.end} onChange={(v) => setSpan((w) => ({ ...w, end: v }))} /></Field>
+                <Btn kind="primary" disabled={busy === detail.id} onClick={() => update(detail)}>{t("开始更新")}</Btn>
+                <Btn kind="text" onClick={() => setUpdating(false)}>{t("取消")}</Btn>
+              </div>
+              <Hint>{t("成员、权重和参数不在这里改：点“放进信号篮 →”到组合回测里调整并跑一次，保存时选“覆盖这个策略”。")}</Hint>
+            </Section>
+          )}
           {editing && (
             <Section title={t("重命名")}>
               <div className="flex flex-col gap-2">

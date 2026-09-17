@@ -1190,6 +1190,16 @@ def strategies():
             items.append({k: strategy.get(k) for k in ("id", "name", "note", "created", "updated", "factors", "model", "params", "evidence")} | {"latest": latest, "run_count": len(strategy.get("runs", []))})
         return jsonify(items)
     body = request.get_json() or {}
+    # ``replace``: overwrite an existing strategy with this portfolio. Members, weights, synthesis, parameters
+    # and evidence are replaced and the tracking history starts over (the old runs no longer describe this
+    # portfolio); id, creation time and note stay, and the name stays unless a new one is given.
+    existing = None
+    if body.get("replace"):
+        try:
+            existing = load_strategy(str(body["replace"]))
+        except (ValueError, FileNotFoundError):
+            return jsonify({"error": "Strategy to replace not found"}), 404
+        body = {**body, "name": body.get("name") or existing["name"]}
     try:
         fields = validate_strategy_body(body)
     except (ValueError, TypeError, KeyError) as error:
@@ -1202,10 +1212,14 @@ def strategies():
             runs.append({"backtest_id": str(evidence["backtest_id"]), "kind": "evidence"})
         except ValueError:
             return jsonify({"error": "Invalid evidence backtest id"}), 400
-    strategy = save_strategy({"id": str(uuid.uuid4()), "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                              **fields, "evidence": {k: evidence.get(k) for k in ("backtest_id", "search_id", "start", "end") if evidence.get(k)},
-                              "runs": runs})
-    return jsonify(strategy_view(strategy)), 201
+    record = {"id": str(uuid.uuid4()), "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              **fields, "evidence": {k: evidence.get(k) for k in ("backtest_id", "search_id", "start", "end") if evidence.get(k)},
+              "runs": runs}
+    if existing is not None:
+        record.update({"id": existing["id"], "created": existing["created"], "note": fields["note"] or existing.get("note", ""),
+                       "replaced": (existing.get("replaced") or 0) + 1})
+    strategy = save_strategy(record)
+    return jsonify(strategy_view(strategy)), (200 if existing is not None else 201)
 
 
 @studio.route("/strategies/<strategy_id>", methods=["GET", "PATCH", "DELETE"])
