@@ -66,7 +66,7 @@ export function BacktestPage() {
   useEffect(() => { searches.load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (tab === "search" && searches.jobs.length && !searches.selectedId) searches.select(searches.jobs[0].id); }, [tab, searches.jobs]); // eslint-disable-line react-hooks/exhaustive-deps
   const candidates = basket.items.filter((f) => (f.kind || "factor") === "factor");
-  // 智能搜索，一步走完：先展示不花钱的预筛（单因子指标 + 两两相关），勾选确认后再跑回测。
+  // 预筛候选，一步走完：先展示不花钱的预筛（单因子指标 + 两两相关），勾选确认后再跑回测。
   interface PreviewRow { name: string; trace: string; loop_id: number; kind: "factor"; weight: number; reason: string; checked: boolean; flipped: boolean }
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<PreviewRow[] | null>(null);
@@ -369,7 +369,7 @@ export function BacktestPage() {
     <PageFrame
       tabs={<TextTabs label={t("工作区视图")} value={tab} onChange={setTab} items={[{ key: "params", label: t("参数设置") }, { key: "search", label: t("组合搜索") }, { key: "history", label: t("历史回测"), count: backtests.jobs.length || undefined }, { key: "source", label: t("策略源码") }]} />}
       actions={tab === "search"
-        ? <Btn kind="primary" disabled={searches.busy || previewing || confirming || !env?.data_ready || blocked} title={blocked ? t("先处理参数设置里标红的日期问题") : undefined} onClick={previewSearch}>{previewing ? t("预筛中…") : t("智能搜索")}</Btn>
+        ? <Btn kind="primary" disabled={searches.busy || previewing || confirming || !env?.data_ready || blocked} title={blocked ? t("先处理参数设置里标红的日期问题") : undefined} onClick={previewSearch}>{previewing ? t("预筛中…") : t("预筛候选")}</Btn>
         : <Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length || blocked} title={blocked ? t("先处理下面标红的日期问题") : undefined} onClick={submit}>{backtests.busy ? t("运行中…") : blocked ? t("日期有问题，无法运行") : t("运行回测")}</Btn>}
       resultsTitle={tab === "search" ? (searches.result ? t("组合搜索 {0}", [searches.result.id.slice(0, 8)]) : t("搜索结果")) : result ? t("回测 {0}", [result.id.slice(0, 8)]) : t("回测结果")}
       resultsActions={tab === "search" ? (
@@ -502,13 +502,10 @@ export function BacktestPage() {
               <Field label={t("区间划分")}><span className="text-xs" style={{ lineHeight: "28px" }}>{t("前 2/3 搜索 · 后 1/3 验证")}</span></Field>
               <Field label={t("信号合成")}><span className="text-xs" style={{ lineHeight: "28px" }}>{t("排名加权（按篮内权重）")}</span></Field>
             </FieldGrid>
-            <P>{t("点智能搜索，先看不花钱的预筛（单因子指标和两两相关），勾选确认后再跑回测：每个候选单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。")}</P>
+            <P>{t("点预筛候选，先看不花钱的预筛（单因子指标和两两相关），勾选确认后再跑回测：每个候选单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。")}</P>
           </Block>
           <Block title={t("候选信号")} count={candidates.length} note={<><Link href={workspace.href("/factors?return=search")}>{t("去因子库增减")}</Link>{candidates.length < 2 ? t(" · 篮子不够两个会从全库推荐") : ""}</>}>
-            <div className="mm-row" style={{ marginBottom: 12 }}>
-              <Btn kind="primary" disabled={previewing || confirming} onClick={previewSearch}>{previewing ? t("预筛中…") : t("智能搜索")}</Btn>
-              <span className="mm-dim" style={{ fontSize: 12 }}>{t("先看预筛，勾选确认后再跑回测；确认结果会同步到信号篮。")}</span>
-            </div>
+            <P>{t("先看预筛，勾选确认后再跑回测；确认结果会同步到信号篮。")}</P>
             {preview && (
               <div style={{ marginBottom: 12 }}>
                 <Table label={t("预筛确认")} columns={[{ label: "", width: 30 }, { label: t("信号") }, { label: t("结论"), width: "55%" }]}
@@ -536,7 +533,7 @@ export function BacktestPage() {
             {candidates.length < 2 && (
               <div style={{ marginTop: candidates.length ? 12 : 0 }}>
                 <Note tone="info" actions={<Btn onClick={() => navigate(workspace.path("/factors?return=search"))}>{t("去因子库勾选")}</Btn>}>
-                  搜索至少需要两个因子作为候选{candidates.length ? t("，现在只有 {0} 个", [candidates.length]) : "t("}。勾好后因子库底部的")回组合搜索"会带你回到这里。
+                  {t("搜索至少需要两个因子作为候选{0}。勾好后因子库底部的“回组合搜索”会带你回到这里。", [candidates.length ? t("，现在只有 {0} 个", [candidates.length]) : ""])}
                 </Note>
               </div>
             )}
