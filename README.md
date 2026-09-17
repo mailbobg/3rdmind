@@ -6,6 +6,10 @@
 </p>
 
 <p align="center">
+  <b>English</b> · <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
   A local research studio for quantitative factor investing.<br>
   An LLM agent proposes and tests factors on <a href="https://github.com/microsoft/qlib">Qlib</a>; you curate them into portfolios, backtest, save strategies and track them over time.
 </p>
