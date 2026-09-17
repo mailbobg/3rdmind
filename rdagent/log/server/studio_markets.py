@@ -50,9 +50,34 @@ def _extra_providers(default: Path) -> list[tuple[Path, dict]]:
     return found
 
 
+_CACHE: dict = {"key": None, "at": 0.0, "value": None}
+_CACHE_TTL = 15.0
+
+
 def universes() -> list[dict]:
-    """Every known universe: A-share lists first (small to large), then each declared provider's markets."""
+    """Every known universe: A-share lists first (small to large), then each declared provider's markets.
+
+    Reading the instrument lists (thousands of lines for the all-market ones) costs ~80 ms, and list endpoints
+    ask per record, so the answer is cached for a few seconds per default provider."""
+    import time
+
     default = default_provider()
+    # The key carries the directory mtimes, so adding a manifest or an instruments file invalidates at once.
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+    siblings = [p for p in (default.parent.iterdir() if default.parent.is_dir() else []) if p.is_dir()]
+    key = (str(default), mtime(default / "instruments"), mtime(default.parent), tuple(mtime(p / MANIFEST) for p in siblings), tuple(mtime(p / "instruments") for p in siblings))
+    if _CACHE["value"] is not None and _CACHE["key"] == key and time.monotonic() - _CACHE["at"] < _CACHE_TTL:
+        return _CACHE["value"]
+    value = _universes(default)
+    _CACHE.update({"key": key, "at": time.monotonic(), "value": value})
+    return value
+
+
+def _universes(default: Path) -> list[dict]:
     # Without any Qlib data yet, still offer CSI300 so the rest of the Studio reports "data missing" instead of
     # "unknown universe".
     names = _instruments(default) or {"csi300"}
@@ -109,10 +134,12 @@ REGION_LABELS = {"cn": "A 股", "us": "美股"}
 def region_of(market: str | None) -> str:
     """The region a market belongs to; unknown or unmarked records count as A-shares."""
     market = (market or "").strip().lower()
-    for record in universes():
-        if record["market"] == market:
-            return record["region"]
-    return "cn"
+    records = universes()
+    index = _CACHE.get("regions")
+    if index is None or _CACHE.get("regions_for") is not records:
+        index = {r["market"]: r["region"] for r in records}
+        _CACHE["regions"], _CACHE["regions_for"] = index, records
+    return index.get(market, "cn")
 
 
 def regions() -> list[dict]:
