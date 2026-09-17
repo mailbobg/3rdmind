@@ -24,7 +24,8 @@ import { useNow } from "./Progress";
 import type { AttentionItem } from "../api/studio";
 import { LlmSettings } from "./LlmSettings";
 import { Btn } from "./minimal";
-import { lang, setLang, t } from "../i18n";
+import { t } from "../i18n";
+import { LanguageSelect } from "./LanguageSelect";
 
 /** The market workspaces, in toggle order. Each has its own experiments, factors, backtests and strategies. */
 export const WORKSPACES: { region: string; label: string; base: string }[] = [
@@ -160,15 +161,7 @@ export function StudioShell({ region }: { region: string }) {
             ) : (
               <small className="mb-4 mt-1.5 block text-muted">{t("运行")} <code>scripts/start-backend.sh</code> {t("后")} <button className="text-accent underline" onClick={() => reloadEnv()}>{t("重试")}</button></small>
             )}
-            <div className="mb-3 flex items-center gap-1 text-[11px]" role="radiogroup" aria-label="Language">
-              {(["zh", "en"] as const).map((l, i) => (
-                <span key={l} className="inline-flex items-center gap-1">
-                  {i > 0 && <span className="text-muted">/</span>}
-                  <button type="button" role="radio" aria-checked={lang === l} onClick={() => setLang(l)}
-                    className={`rounded px-1 ${lang === l ? "font-semibold text-foreground" : "text-muted hover:text-foreground"}`}>{l === "zh" ? "中文" : "EN"}</button>
-                </span>
-              ))}
-            </div>
+            <div className="mb-3"><LanguageSelect /></div>
             <a href={PLAYGROUND_URL} target="_blank" rel="noreferrer" className="text-muted">{t("原生 Playground ↗")}</a>
           </div>
         </aside>

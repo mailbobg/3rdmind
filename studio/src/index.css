@@ -288,3 +288,31 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .jobbar__fill--busy { width: 40%; animation: jobbar-slide 1.2s ease-in-out infinite; }
 @keyframes jobbar-slide { 0% { left: -40%; } 100% { left: 100%; } }
 .jobbar__text { font-size: 11px; color: var(--mm-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Language switch (beui.dev motion-combobox style): bordered trigger, a panel that springs out of it upward,
+   rich rows with an icon tile, a gliding highlight and a check on the selected row. */
+.lang-select__trigger { display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px 0 8px; border: 1px solid var(--mm-rule); border-radius: 12px;
+  background: transparent; font: inherit; font-size: 12px; color: var(--mm-ink); text-align: left; cursor: pointer; transition: border-color 150ms, box-shadow 150ms; }
+.lang-select__trigger:hover { border-color: #cfcbc3; }
+.lang-select__trigger:focus-visible, .lang-select__trigger[data-state="open"] { outline: none; border-color: #cfcbc3; box-shadow: 0 0 0 2px rgba(27, 27, 25, 0.12); }
+.lang-select__glyph { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; background: var(--mm-ground); font-size: 11px; font-weight: 600; color: var(--mm-muted); }
+.lang-select__value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lang-select__chevrons { flex: none; color: var(--mm-muted); }
+.lang-select__panel { position: fixed; z-index: 70; overflow: hidden; border: 1px solid var(--mm-rule); border-radius: 14px; background: #fff;
+  box-shadow: 0 1px 2px rgba(27, 27, 25, 0.06), 0 12px 32px -10px rgba(27, 27, 25, 0.24); transform-origin: bottom center; will-change: height, transform;
+  transition: height 480ms cubic-bezier(0.3, 1.24, 0.42, 1), transform 480ms cubic-bezier(0.3, 1.24, 0.42, 1), opacity 260ms ease-out; }
+.lang-select__list { position: relative; isolation: isolate; display: flex; flex-direction: column; padding: 6px; }
+.lang-select__glide { position: absolute; z-index: 0; left: 6px; right: 6px; top: 6px; height: 44px; border-radius: 10px; background: var(--mm-ground);
+  transition: transform 320ms cubic-bezier(0.3, 1.18, 0.42, 1); }
+.lang-select__option { position: relative; z-index: 1; display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 8px; border: 0; border-radius: 10px; background: transparent;
+  font: inherit; text-align: left; color: var(--mm-muted); cursor: pointer; transition: color 150ms; }
+.lang-select__option[data-active] { color: var(--mm-ink); }
+.lang-select__tile { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 8px; font-size: 12.5px; font-weight: 600; }
+.lang-select__tile--zh { background: rgba(178, 60, 44, 0.14); color: #9a3324; }
+.lang-select__tile--en { background: rgba(47, 87, 196, 0.14); color: #2a4bb0; }
+.lang-select__text { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; }
+.lang-select__label { font-size: 12.5px; font-weight: 500; color: var(--mm-ink); line-height: 1.2; }
+.lang-select__detail { font-size: 10.5px; color: var(--mm-muted); line-height: 1.2; }
+.lang-select__check { flex: none; color: var(--mm-ink); opacity: 0; transform: scale(0.82); transition: opacity 140ms ease-out, transform 140ms ease-out; }
+.lang-select__check[data-on] { opacity: 1; transform: scale(1); }
+@media (prefers-reduced-motion: reduce) { .lang-select__panel, .lang-select__glide, .lang-select__check { transition: none; } }
