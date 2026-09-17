@@ -1,0 +1,47 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import * as studio from "../api/studio";
+import type { RecentItem } from "../api/studio";
+
+export interface Toast { id: string; title: string; body?: string; tone: "ok" | "bad" | "info"; trace?: string; at: number }
+
+/**
+ * Completion toasts: polls /studio/recent with a moving cursor (seeded on the first poll, so nothing that already
+ * happened is announced) and turns new round / run completions into toasts that fade after ~8 s.
+ */
+export function useToasts(enabled: boolean) {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const cursor = useRef<string | null>(null);
+  const dismiss = useCallback((id: string) => setToasts((list) => list.filter((t) => t.id !== id)), []);
+  const push = useCallback((t: Omit<Toast, "id" | "at">) => {
+    const id = Math.random().toString(36).slice(2);
+    setToasts((list) => [...list.slice(-3), { ...t, id, at: Date.now() }]);
+    setTimeout(() => dismiss(id), 9000);
+  }, [dismiss]);
+  useEffect(() => {
+    if (!enabled) return;
+    let stop = false;
+    const poll = async () => {
+      try {
+        const r = await studio.recent(cursor.current || undefined);
+        if (stop) return;
+        if (cursor.current) r.items.forEach((i) => push(describe(i)));
+        cursor.current = r.now;
+      } catch { /* backend away */ }
+    };
+    poll();
+    const t = setInterval(poll, 8000);
+    return () => { stop = true; clearInterval(t); };
+  }, [enabled, push]);
+  return { toasts, dismiss, push };
+}
+
+function describe(i: RecentItem): Omit<Toast, "id" | "at"> {
+  const name = i.trace.split("/").pop() || i.trace;
+  if (i.kind === "round_done") {
+    const ic = i.ic != null ? ` · IC ${i.ic.toFixed(3)}` : "";
+    const n = i.factors.length ? ` · ${i.factors.length} 个因子` : "";
+    return { tone: i.decision ? "ok" : "info", trace: i.trace, title: `${name} 第 ${i.round ?? "?"} 轮完成 · ${i.decision ? "接受" : "拒绝"}`, body: `${ic}${n}`.replace(/^ · /, "") || undefined };
+  }
+  return { tone: i.status === "completed" ? "ok" : i.status === "failed" ? "bad" : "info", trace: i.trace,
+    title: `${name} ${i.status === "completed" ? "研究结束" : i.status === "failed" ? "研究失败" : "研究已停止"}`, body: i.status === "completed" ? "点开看总结" : undefined };
+}

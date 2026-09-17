@@ -72,46 +72,125 @@ export function RoundDetail({ round, onContinue }: { round: RoundView; onContinu
 
 const LABELS: Record<string, string> = { user_instruction: "研究方向", hypothesis: "研究假设", reason: "依据与反馈", decision: "评估决定" };
 
-/** The agent's pending confirmation request: editable fields for the common keys, raw JSON underneath. */
+type Kind = "instruction" | "features" | "hypothesis" | "feedback" | "other";
+const kindOf = (c: any): Kind => (c && typeof c === "object"
+  ? "features" in c ? "features" : "user_instruction" in c ? "instruction" : "decision" in c ? "feedback" : "hypothesis" in c ? "hypothesis" : "other" : "other");
+const KIND_TITLES: Record<Kind, string> = { instruction: "开始前的研究方向", features: "基础特征集", hypothesis: "这一轮的假设", feedback: "这一轮的评估结论", other: "继续" };
+const KIND_HINTS: Record<Kind, string> = {
+  instruction: "留空就由 Agent 自行选题；写了会作为总体指示进入每一轮的假设生成。",
+  features: "Agent 会在这些 Qlib 特征之上补充新因子。去掉的特征这次研究就不会用。",
+  hypothesis: "认可就直接继续；想换方向就改写后继续。",
+  feedback: "Agent 对这一轮的判断。不同意就切换接受 / 拒绝，下一步假设也可以改。",
+  other: "不改直接提交即按 Agent 的原案继续。",
+};
+
+/**
+ * The agent's pending confirmation, as a form for what the decision actually is: a hypothesis to accept or
+ * rewrite, a verdict to accept or flip, a feature list to prune, an instruction to write. The raw JSON stays
+ * available under "高级" for anything else.
+ */
 export function InteractionPanel({ event, busy, defaultInstruction, onSubmit }: { event: TraceEvent; busy: boolean; defaultInstruction?: string; onSubmit: (payload: object) => void }) {
+  const kind = kindOf(event.content);
   const original = useMemo(() => {
     const c = event.content;
-    const seeded = defaultInstruction && c && typeof c === "object" && "user_instruction" in c ? { ...c, user_instruction: c.user_instruction || defaultInstruction } : c;
+    const seeded = defaultInstruction && kind === "instruction" ? { ...c, user_instruction: c.user_instruction || defaultInstruction } : c;
     return JSON.stringify(seeded, null, 2);
   }, [event.timestamp]); // eslint-disable-line react-hooks/exhaustive-deps
   const [text, setText] = useState(original);
-  useEffect(() => setText(original), [original]);
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { setText(original); setEditing(false); }, [original]);
   const parsed = useMemo(() => { try { return { value: JSON.parse(text), error: "" }; } catch { return { value: null, error: "JSON 格式错误。" }; } }, [text]);
-  const fields = parsed.value && typeof parsed.value === "object" ? Object.keys(LABELS).filter((k) => k in parsed.value).map((k) => ({ key: k, value: parsed.value[k] })) : [];
-  const update = (k: string, v: unknown) => { if (parsed.value) setText(JSON.stringify({ ...parsed.value, [k]: v }, null, 2)); };
-  const c = event.content || {};
-  const stageHint = "features" in c ? "基础特征集：Agent 会在这些 Qlib 特征之上补充新因子，不改直接继续。"
-    : "user_instruction" in c ? "开始前的总体指示：可留空，Agent 会自行选题。"
-    : "hypothesis" in c ? "这一轮 Agent 提出的假设：认可就直接继续，也可以改写后提交。"
-    : "decision" in c ? "这一轮的评估结论：不同意 Agent 的判断可以在这里改。" : "不改直接提交即按 Agent 的原案继续。";
+  const value = parsed.value && typeof parsed.value === "object" ? parsed.value : null;
+  const update = (k: string, v: unknown) => { if (value) setText(JSON.stringify({ ...value, [k]: v }, null, 2)); };
+  const changed = text !== original;
   const submit = () => {
     const d = parsed.value;
     if (!d || typeof d !== "object" || Array.isArray(d)) return;
-    onSubmit("features" in c && d.features ? d.features : d);
+    onSubmit(kind === "features" && d.features ? d.features : d);
+  };
+  const features: Record<string, string> = kind === "features" && value?.features ? value.features : {};
+  const originalFeatures: Record<string, string> = kind === "features" ? event.content?.features || {} : {};
+  const toggleFeature = (name: string) => {
+    const next = { ...features };
+    if (name in next) delete next[name]; else next[name] = originalFeatures[name];
+    update("features", next);
   };
   return (
-    <Card variant="secondary" className="gap-2 p-3">
-      <div className="flex items-center justify-between"><span className="text-xs font-semibold">RD-Agent 等待你的确认</span><span className="text-[11px] text-muted">{event.timestamp}</span></div>
-      <Hint>{stageHint}</Hint>
-      {fields.map((f) =>
-        typeof f.value === "string" ? (
-          <label key={f.key} className="flex flex-col gap-1 text-[11px] text-muted">{LABELS[f.key]}
-            <TextArea rows={3} value={f.value} onChange={(e) => update(f.key, e.target.value)} variant="secondary" />
-          </label>
-        ) : typeof f.value === "boolean" ? (
-          <Checkbox key={f.key} isSelected={f.value} onChange={(v) => update(f.key, v)}><Checkbox.Content><Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>{LABELS[f.key]}</Checkbox.Content></Checkbox>
-        ) : <Hint key={f.key}>{LABELS[f.key]}：{JSON.stringify(f.value)}</Hint>)}
+    <Card variant="secondary" className="interact gap-3 p-3">
+      <div className="flex items-center justify-between">
+        <span className="inline-flex items-center gap-2 text-xs font-semibold"><i className="live__dot" aria-hidden />等你确认：{KIND_TITLES[kind]}</span>
+        <span className="text-[11px] text-muted">{event.timestamp.slice(11, 19)}</span>
+      </div>
+      <Hint>{KIND_HINTS[kind]}</Hint>
+
+      {kind === "hypothesis" && value && (
+        <div className="flex flex-col gap-2">
+          {editing
+            ? <TextArea rows={5} value={value.hypothesis || ""} onChange={(e) => update("hypothesis", e.target.value)} variant="secondary" aria-label="研究假设" />
+            : <p className="m-0 text-[13px] leading-relaxed">{value.hypothesis}</p>}
+          {value.reason && <p className="m-0 text-[11px] leading-relaxed text-muted">{value.reason}</p>}
+        </div>
+      )}
+
+      {kind === "feedback" && value && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-muted">Agent 的判断</span>
+            <div className="mm-seg" role="radiogroup" aria-label="评估决定">
+              <button type="button" role="radio" aria-checked={value.decision === true} className="mm-seg__item mm-seg__item--ok" onClick={() => update("decision", true)}>接受</button>
+              <button type="button" role="radio" aria-checked={value.decision !== true} className="mm-seg__item mm-seg__item--bad" onClick={() => update("decision", false)}>拒绝</button>
+            </div>
+            {value.decision !== event.content?.decision && <span className="text-[11px] text-warning">你改了 Agent 的判断</span>}
+          </div>
+          {value.hypothesis_evaluation && <p className="m-0 text-[12px] leading-relaxed">{value.hypothesis_evaluation}</p>}
+          {value.reason && <p className="m-0 text-[11px] leading-relaxed text-muted">{value.reason}</p>}
+          {"new_hypothesis" in value && (
+            <label className="flex flex-col gap-1 text-[11px] text-muted">下一步假设
+              {editing
+                ? <TextArea rows={4} value={value.new_hypothesis || ""} onChange={(e) => update("new_hypothesis", e.target.value)} variant="secondary" aria-label="下一步假设" />
+                : <span className="text-[12px] leading-relaxed text-foreground">{value.new_hypothesis || <span className="text-muted">（无）</span>}</span>}
+            </label>
+          )}
+        </div>
+      )}
+
+      {kind === "instruction" && value && (
+        <TextArea rows={4} value={value.user_instruction || ""} placeholder="留空则由 Agent 自行选题" onChange={(e) => update("user_instruction", e.target.value)} variant="secondary" aria-label="研究方向" />
+      )}
+
+      {kind === "features" && (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between text-[11px] text-muted">
+            <span>{Object.keys(features).length} / {Object.keys(originalFeatures).length} 个特征</span>
+            <span className="flex gap-3">
+              <button type="button" className="mm-link" onClick={() => update("features", { ...originalFeatures })}>全选</button>
+              <button type="button" className="mm-link" onClick={() => update("features", {})}>清空</button>
+            </span>
+          </div>
+          <div className="grid max-h-56 gap-1 overflow-auto pr-1" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))" }}>
+            {Object.entries(originalFeatures).map(([name, expr]) => (
+              <label key={name} className="flex items-start gap-2 rounded-md px-1.5 py-1 text-[11px] hover:bg-surface-secondary" title={expr}>
+                <input type="checkbox" className="mm-check mt-0.5" checked={name in features} onChange={() => toggleFeature(name)} />
+                <span className="min-w-0"><span className="mm-mono">{name}</span><span className="block truncate text-muted">{expr}</span></span>
+              </label>
+            ))}
+          </div>
+          {event.content?.feature_validation_msg && <Alert status="warning"><Alert.Indicator /><Alert.Content><Alert.Title>{event.content.feature_validation_msg}</Alert.Title></Alert.Content></Alert>}
+        </div>
+      )}
+
       <Disclosure>
-        <Disclosure.Heading><Disclosure.Trigger className="text-[11px]">完整 JSON<Disclosure.Indicator /></Disclosure.Trigger></Disclosure.Heading>
+        <Disclosure.Heading><Disclosure.Trigger className="text-[11px]">高级：完整 JSON<Disclosure.Indicator /></Disclosure.Trigger></Disclosure.Heading>
         <Disclosure.Content><TextArea aria-label="完整 JSON" rows={10} value={text} onChange={(e) => setText(e.target.value)} variant="secondary" className="w-full font-mono text-[11px]" /></Disclosure.Content>
       </Disclosure>
       {parsed.error && <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{parsed.error}</Alert.Title></Alert.Content></Alert>}
-      <div><Btn kind="primary" disabled={busy || !!parsed.error} onClick={submit}>{text !== original ? "提交修改" : "按原案继续"}</Btn></div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Btn kind="primary" disabled={busy || !!parsed.error} onClick={submit}>
+          {busy ? "提交中…" : changed ? "按修改继续" : kind === "hypothesis" ? "认可，继续" : kind === "feedback" ? "同意判断，继续" : kind === "features" ? "用这些特征继续" : kind === "instruction" ? (value?.user_instruction ? "带着方向开始" : "让 Agent 自选，开始") : "按原案继续"}
+        </Btn>
+        {(kind === "hypothesis" || kind === "feedback") && !editing && <Btn onClick={() => setEditing(true)}>改写</Btn>}
+        {(kind === "hypothesis" || kind === "feedback") && editing && changed && <Btn kind="text" onClick={() => { setText(original); setEditing(false); }}>撤销改动</Btn>}
+      </div>
     </Card>
   );
 }

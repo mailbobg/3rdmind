@@ -130,6 +130,8 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
 export type ExperimentStatus = "starting" | "running" | "completed" | "stopped" | "failed" | "ended";
 export interface ExperimentSummary {
   market: string;
+  /** Set while the run is blocked on a confirmation: what kind. */
+  waiting?: string | null;
   id: string; scenario: string; rounds: number; accepted: number; status: ExperimentStatus;
   updated: string | null; hypothesis: string | null; messages: number;
 }
@@ -257,3 +259,10 @@ export const listLlmModels = (values: Pick<LlmForm, "provider" | "api_key" | "ba
     .then(async (r) => (await r.json()) as { ok: boolean; models?: string[]; error?: string; source?: string });
 export interface TraceTail { lines: string[]; updated: string | null; size: number }
 export const traceTail = (trace: string, lines = 12) => api<TraceTail>(`/studio/trace-tail?${new URLSearchParams({ trace, lines: String(lines) })}`);
+/** A live run blocked on the user: what it waits for and since when. */
+export interface AttentionItem { trace: string; market: string; kind: "instruction" | "features" | "hypothesis" | "feedback" | "other"; since: string | null; round: number | null }
+export const attention = () => api<AttentionItem[]>(scoped("/studio/attention"));
+export type RecentItem =
+  | { kind: "round_done"; trace: string; market: string; timestamp: string; round: number | null; decision: boolean; ic: number | null; factors: string[] }
+  | { kind: "run_done"; trace: string; market: string; timestamp: string; status: "completed" | "stopped" | "failed" };
+export const recent = (since?: string) => api<{ items: RecentItem[]; now: string }>(scoped(`/studio/recent${since ? `?since=${encodeURIComponent(since)}` : ""}`));

@@ -110,3 +110,42 @@ export function LiveStatus({ traceId, events, running, waiting, roundId }: { tra
     </div>
   );
 }
+
+/** The card shown once a research run has ended: what it did, how long it took, what to do next. */
+export function RunSummary({ events, status, onBacktest, onContinue }: {
+  events: TraceEvent[]; status: string; onBacktest?: (factors: string[]) => void; onContinue?: () => void }) {
+  const rounds = roundProgress(events, false);
+  if (!rounds.length) return null;
+  const feedbacks = events.filter((e) => e.tag === "feedback.hypothesis_feedback");
+  const accepted = feedbacks.filter((e) => e.content?.decision === true).length;
+  const acceptedLoops = new Set(feedbacks.filter((e) => e.content?.decision === true).map((e) => String(e.loop_id)));
+  const factorsByLoop = new Map<string, string[]>();
+  for (const e of events) {
+    if (e.tag !== "feedback.metric") continue;
+    factorsByLoop.set(String(e.loop_id), ((e.content?.workspaces?.factors || []) as { name: string }[]).map((f) => f.name));
+  }
+  const allFactors = [...new Set([...factorsByLoop.values()].flat())];
+  const acceptedFactors = [...new Set([...factorsByLoop.entries()].filter(([loop]) => acceptedLoops.has(loop)).flatMap(([, names]) => names))];
+  const stamps = events.map((e) => new Date(e.timestamp).getTime()).filter((t) => isFinite(t));
+  const total = stamps.length ? Math.max(...stamps) - Math.min(...stamps) : null;
+  const tone = status === "已完成" ? "研究结束" : status === "执行失败" ? "研究失败" : status === "已停止" ? "研究已停止" : "研究已结束";
+  return (
+    <div className="summary">
+      <div className="summary__head">
+        <span className="summary__title">{tone}</span>
+        <span className="mm-dim" style={{ fontSize: 11 }}>{total != null ? `共 ${fmtDuration(total)}` : ""}{rounds.length ? ` · 每轮约 ${fmtDuration(medianRoundMs(rounds))}` : ""}</span>
+      </div>
+      <div><div className="summary__k">轮次</div><div className="summary__v">{rounds.length}</div></div>
+      <div><div className="summary__k">接受</div><div className="summary__v">{accepted}<span className="mm-dim" style={{ fontSize: 12 }}> / {feedbacks.length}</span></div></div>
+      <div><div className="summary__k">产出因子</div><div className="summary__v">{allFactors.length}</div></div>
+      <div><div className="summary__k">被接受轮次的因子</div><div className="summary__v">{acceptedFactors.length}</div></div>
+      {(onBacktest || onContinue) && (
+        <div className="summary__actions">
+          {onBacktest && acceptedFactors.length > 0 && <Btn kind="primary" onClick={() => onBacktest(acceptedFactors)}>用被接受的 {acceptedFactors.length} 个因子回测 →</Btn>}
+          {onBacktest && allFactors.length > 0 && acceptedFactors.length !== allFactors.length && <Btn onClick={() => onBacktest(allFactors)}>用全部 {allFactors.length} 个因子回测</Btn>}
+          {onContinue && <Btn kind={acceptedFactors.length ? undefined : "primary"} onClick={onContinue}>继续研究</Btn>}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -5,10 +5,12 @@ import os
 import random
 import subprocess
 import sys
+import threading
+import time
 import traceback
 from collections import defaultdict
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from multiprocessing import Process, Queue
 from pathlib import Path
 from queue import Empty
@@ -112,6 +114,10 @@ class RDAgentTask:
         # child before any rdagent settings module is imported so pydantic-settings picks them up.
         # The Studio's saved LLM settings (studio_llm) sit beneath the run's own variables.
         self.env: dict[str, str] = {**studio_llm.env(), **(env or {})}
+        # How confirmations are handled while the run is unattended: mode "all" waits for the user on every
+        # request, "hypothesis" only on hypotheses (instruction, features and verdicts pass as proposed),
+        # "auto" never waits; timeout_min (0 = never) passes an unanswered request as proposed after that long.
+        self.confirm: dict = {"mode": "hypothesis", "timeout_min": 30, "instruction": ""}
         self.stdout_path = stdout_path
         self.log_trace_path = log_trace_path
         self.scenario = scenario
@@ -236,6 +242,98 @@ upload_folder_path = Path(UI_SETTING.upload_folder).resolve()
 # always be reached through current_app.
 app.config["RDAGENT_PROCESSES"] = rdagent_processes
 app.config["LOG_FOLDER_PATH"] = log_folder_path
+
+
+CONFIRM_MODES = ("all", "hypothesis", "auto")
+
+
+def parse_confirm(mode, timeout, instruction="") -> dict:
+    """Validated confirmation policy from request fields (missing ones keep the defaults)."""
+    mode = str(mode or "hypothesis").strip().lower()
+    if mode not in CONFIRM_MODES:
+        raise ValueError("confirm_mode must be all, hypothesis or auto")
+    try:
+        timeout_min = int(timeout) if timeout not in (None, "") else 30
+    except (TypeError, ValueError) as error:
+        raise ValueError("confirm_timeout must be minutes") from error
+    if not 0 <= timeout_min <= 24 * 60:
+        raise ValueError("confirm_timeout must be 0–1440 minutes")
+    return {"mode": mode, "timeout_min": timeout_min, "instruction": str(instruction or "").strip()}
+
+
+def request_kind(content) -> str:
+    if not isinstance(content, dict):
+        return "other"
+    if "features" in content:
+        return "features"
+    if "user_instruction" in content:
+        return "instruction"
+    if "decision" in content:
+        return "feedback"
+    if "hypothesis" in content:
+        return "hypothesis"
+    return "other"
+
+
+def default_reply(content, instruction: str = ""):
+    """The payload that continues a request exactly as the agent proposed."""
+    kind = request_kind(content)
+    if kind == "features":
+        return content["features"]
+    if kind == "instruction":
+        return {**content, "user_instruction": content.get("user_instruction") or instruction}
+    return content
+
+
+def auto_answer(task: RDAgentTask, message: dict, why: str) -> None:
+    """Continue a pending request as proposed, and record that the Studio did so and why."""
+    try:
+        task.user_response_q.put(default_reply(message.get("content"), task.confirm.get("instruction", "")), block=False)
+    except Exception:  # noqa: BLE001
+        app.logger.exception("Failed to auto-answer a user request")
+        return
+    message["answered"] = True
+    message["auto"] = why
+    task.messages.append({"tag": "user_interaction.auto", "timestamp": datetime.now(timezone.utc).isoformat(),
+                          "loop_id": message.get("loop_id"), "content": {"kind": request_kind(message.get("content")), "why": why}})
+
+
+def apply_confirm_policy(task: RDAgentTask) -> None:
+    """Answer the task's pending request when its policy says so (mode) or it has waited too long (timeout)."""
+    if not task.messages or not task.is_alive():
+        return
+    last = task.messages[-1]
+    if last.get("tag") != "user_interaction.request" or last.get("answered"):
+        return
+    kind = request_kind(last.get("content"))
+    mode = task.confirm.get("mode", "hypothesis")
+    if mode == "auto" or (mode == "hypothesis" and kind != "hypothesis"):
+        auto_answer(task, last, "policy")
+        return
+    timeout_min = int(task.confirm.get("timeout_min") or 0)
+    if timeout_min:
+        try:
+            since = datetime.fromisoformat(str(last.get("timestamp")).replace("Z", "+00:00"))
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return
+        if datetime.now(timezone.utc) - since >= timedelta(minutes=timeout_min):
+            auto_answer(task, last, "timeout")
+
+
+def _confirm_watcher() -> None:
+    """Drain requests of every live run and apply its confirmation policy, so unattended runs never stall."""
+    while True:
+        try:
+            for task in list(rdagent_processes.values()):
+                if task is None or task.process is None or not task.is_alive():
+                    continue
+                _drain_user_requests_into_messages(task)
+                apply_confirm_policy(task)
+        except Exception:  # noqa: BLE001
+            app.logger.exception("confirm watcher failed")
+        time.sleep(2)
 
 
 def _drain_user_requests_into_messages(task: RDAgentTask) -> None:
@@ -567,6 +665,10 @@ def upload_file():
     loop_n = request.form.get("loops")
     all_duration = request.form.get("all_duration")
     market = (request.form.get("market") or "csi300").strip().lower()
+    try:
+        confirm = parse_confirm(request.form.get("confirm_mode"), request.form.get("confirm_timeout"), request.form.get("objective"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     run_env: dict[str, str] = {}
     if scenario.startswith("Finance"):
         try:
@@ -652,6 +754,7 @@ def upload_file():
         ui_server_port=app.config["UI_SERVER_PORT"],
         env=run_env,
     )
+    task.confirm = confirm
     task.start()
     record_run_market(log_trace_path, market)
     app.logger.warning(f"Task {log_trace_path} started (universe {market}).")
@@ -706,6 +809,11 @@ def submit_user_interaction_response():
     except Exception:
         app.logger.exception("Failed to enqueue a user response")
         return jsonify({"error": "Failed to enqueue user response"}), 500
+    # Mark the request answered so the Studio's attention list stops showing it.
+    for message in reversed(task.messages):
+        if message.get("tag") == "user_interaction.request":
+            message["answered"] = True
+            break
 
     return jsonify({"status": "success"}), 200
 
@@ -779,6 +887,12 @@ def resume_research():
     task.messages = history
     if previous is not None:
         task.pointers = previous.pointers
+        task.confirm = dict(previous.confirm)
+    if any(k in data for k in ("confirm_mode", "confirm_timeout")):
+        try:
+            task.confirm = parse_confirm(data.get("confirm_mode", task.confirm["mode"]), data.get("confirm_timeout", task.confirm["timeout_min"]), task.confirm.get("instruction", ""))
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
     task.start()
     rdagent_processes[str(log_trace_path)] = task
     app.logger.warning(f"Resumed {log_trace_path} for {loops} more loop(s) (loop_n={total}).")
@@ -929,7 +1043,12 @@ def server_static_files(fn):
     return send_from_directory(app.static_folder, _normalize_static_request_path(fn))
 
 
+def start_confirm_watcher() -> None:
+    threading.Thread(target=_confirm_watcher, name="studio-confirm-watcher", daemon=True).start()
+
+
 def main(port: int = 19899, host: str = UI_SETTING.server_host) -> None:
+    start_confirm_watcher()
     if host not in {"127.0.0.1", "::1", "localhost"} and not app.config.get("AUTH_TOKEN"):
         raise ValueError("UI_SERVER_AUTH_TOKEN is required when binding the log server beyond localhost")
     app.config["UI_SERVER_PORT"] = port

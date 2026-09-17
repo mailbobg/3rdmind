@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
 import type { ExperimentSummary, Universe } from "../api/studio";
@@ -13,7 +13,7 @@ import { Block, Btn, Empty, Field, FieldGrid, Note, NumberInput, P, SelectInput,
 import type { Row } from "../components/minimal";
 import { Section } from "../components/Section";
 import { Hint, MetricGrid } from "../components/widgets";
-import { LiveStatus, StepStrip, useNow } from "../components/Progress";
+import { LiveStatus, RunSummary, StepStrip, useNow } from "../components/Progress";
 import { fmtDuration, progressLine, roundProgress } from "../hooks/progress";
 
 interface Mode {
@@ -45,7 +45,9 @@ export function ResearchPage() {
   const [search, setSearch] = useSearchParams();
   const navigate = useNavigate();
   const [tab, setTab] = useState(search.get("trace") ? "rounds" : search.get("new") || !trace.traceId ? "new" : "rounds");
-  const [form, setForm] = useState(() => ({ scenario: MODES[0].value, loops: 3, duration: 2, objective: restoreStudioState().objective || "", link: "", market: "csi300" }));
+  const saved0 = restoreStudioState();
+  const [form, setForm] = useState(() => ({ scenario: MODES[0].value, loops: 3, duration: 2, objective: saved0.objective || "", link: "", market: "csi300",
+    confirmMode: (saved0.confirm?.mode as string) || "hypothesis", confirmTimeout: typeof saved0.confirm?.timeout === "number" ? saved0.confirm.timeout as number : 30 }));
   const [universes, setUniverses] = useState<Universe[]>([]);
   useEffect(() => { studio.universes().then(setUniverses).catch(() => {}); }, []);
   // The form's universe must belong to this workspace; fall back to its first one (e.g. nasdaq100 for US).
@@ -73,13 +75,13 @@ export function ResearchPage() {
   useEffect(() => { if (search.get("new")) setTab("new"); }, [search]);
   // The form's explanation lives in the results column, so switching to the form brings that column up.
   useEffect(() => { if (tab === "new") layout.openResults(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { persistStudioState({ objective: form.objective }); }, [form.objective]);
+  useEffect(() => { persistStudioState({ objective: form.objective, confirm: { mode: form.confirmMode, timeout: form.confirmTimeout } }); }, [form.objective, form.confirmMode, form.confirmTimeout]);
   // The URL's ?trace= seeds the first load only; afterwards the user's pick wins on reload.
   useEffect(() => {
     const wanted = search.get("trace") || trace.traceId;
     if (wanted && (wanted !== trace.traceId || !trace.events.length)) trace.select(wanted);
-    if (search.get("trace")) setSearch({}, { replace: true });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    if (search.get("trace")) { setSearch({}, { replace: true }); setTab("rounds"); layout.openResults(); }
+  }, [search]); // eslint-disable-line react-hooks/exhaustive-deps
   // Which rounds recorded a Qlib model prediction lives on disk, so it comes from /studio/rounds.
   useEffect(() => {
     setPredictionLoops(new Set());
@@ -113,6 +115,8 @@ export function ResearchPage() {
     if (mode.loops) data.append("loops", String(form.loops));
     if (mode.duration) data.append("all_duration", String(form.duration));
     if (form.scenario.startsWith("Finance")) data.append("market", form.market);
+    if (mode.loops) { data.append("confirm_mode", form.confirmMode); data.append("confirm_timeout", String(form.confirmTimeout)); }
+    if (mode.objective && form.objective.trim()) data.append("objective", form.objective.trim());
     for (const file of files) data.append("files", file, file.name);
     if (mode.input === "paper" && !files.length) data.append("files", form.link.trim()); // the server reads a link from the files field
     try {
@@ -178,17 +182,32 @@ export function ResearchPage() {
       </>
     );
   };
+  // A row flashes when its round count grows (a round just finished); remembered per experiment.
+  const roundsSeen = useRef<Record<string, number>>({});
+  const [flash, setFlash] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const next: Record<string, number> = {};
+    for (const e of experiments) {
+      const prev = roundsSeen.current[e.id];
+      if (e.rounds != null && prev != null && e.rounds > prev) next[e.id] = Date.now();
+      if (e.rounds != null) roundsSeen.current[e.id] = e.rounds;
+    }
+    if (Object.keys(next).length) setFlash((f) => ({ ...f, ...next }));
+  }, [experiments]);
   const experimentRows: Row[] = experiments.flatMap((e) => {
     const open = e.id === trace.traceId;
     const row: Row = {
-      key: e.id, expanded: open, onClick: () => { if (open) pick(""); else { pick(e.id); layout.openResults(); } },
+      key: e.id, expanded: open, className: flash[e.id] && Date.now() - flash[e.id] < 3000 ? "row-flash" : undefined,
+      onClick: () => { if (open) pick(""); else { pick(e.id); layout.openResults(); } },
       cells: [
         <span key="c" className="mm-caret" data-open={open || undefined} aria-hidden />,
         <span key="n" className="block truncate" title={e.hypothesis || undefined}>{shortName(e.id)}</span>,
         <span key="sc" className="mm-dim">{scenarioName(e.id)}{e.market && e.market !== "csi300" ? ` · ${universeLabel(e.market)}` : ""}</span>,
         e.rounds == null ? <span key="r" className="mm-dim">—</span> : String(e.rounds),
         e.accepted == null ? <span key="a" className="mm-dim">—</span> : String(e.accepted),
-        open && trace.active && progress.length
+        e.waiting && (e.status === "running" || e.status === "starting")
+          ? <span key="st" className="flex items-center gap-2 text-[11px] text-accent" title="等你确认"><i className="live__dot" aria-hidden />等你确认</span>
+          : open && trace.active && progress.length
           ? <span key="st" className="flex items-center gap-2 text-[11px]" title={progressLine(progress, now)}><i className="live__dot" aria-hidden /><span className="truncate">{progressLine(progress, now)}</span></span>
           : <StatusTag key="st" status={open && trace.events.length ? status : EXPERIMENT_STATUS_LABELS[e.status]} />,
         <span key="u" className="mm-mono mm-dim">{shortTime(e.updated)}</span>,
@@ -225,7 +244,7 @@ export function ResearchPage() {
               { label: "研究模型", value: env?.chat_model?.replace("deepseek/", "") || "未配置" },
               { label: "Qlib 数据", value: env ? `${env.start || "—"} → ${env.end || "—"}` : "后端未连接" },
               ...(form.scenario.startsWith("Finance") ? [{ label: "股票池", value: `${universeLabel(form.market)} · 基准 ${chosenUniverse?.benchmark || "SH000300"}` }] : []),
-              ...(mode.loops ? [{ label: "轮数", value: String(form.loops) }] : []),
+              ...(mode.loops ? [{ label: "轮数", value: String(form.loops) }, { label: "确认", value: `${{ hypothesis: "只确认假设", all: "全部确认", auto: "全自动" }[form.confirmMode] || form.confirmMode}${form.confirmMode !== "auto" && form.confirmTimeout ? ` · ${form.confirmTimeout} 分钟无人则自动继续` : form.confirmMode !== "auto" ? " · 一直等" : ""}` }] : []),
               ...(mode.duration ? [{ label: "时限", value: `${form.duration} 小时` }] : []),
             ]} />
             {mode.input && <Hint>{files.length ? `已选 ${files.length} 个文件：${files.map((f) => f.name).join("，")}` : mode.input === "reports" ? "还没有上传研报。" : form.link.trim() ? `将读取链接 ${form.link.trim()}` : "还没有上传论文或填写链接。"}</Hint>}
@@ -245,6 +264,14 @@ export function ResearchPage() {
       ) : (
         <div className="flex flex-col gap-3">
           {trace.interaction && <InteractionPanel event={trace.interaction} busy={trace.busy} defaultInstruction={form.objective} onSubmit={trace.answer} />}
+          {trace.traceId && !trace.active && trace.rounds.length > 0 && ["已完成", "已停止", "执行失败", "已结束"].includes(status) && (
+            <RunSummary events={trace.events} status={status} onContinue={canContinue ? continueResearch : undefined}
+              onBacktest={(names) => {
+                const wanted = new Set(names);
+                for (const r of trace.rounds) { const mine = r.factors.filter((f) => wanted.has(f)); if (mine.length) basket.addRound(trace.traceId, Number(r.id), mine); }
+                navigate(workspace.path("/backtest"));
+              }} />
+          )}
           {trace.traceId && (progress.length > 0 || trace.active) && <LiveStatus traceId={trace.traceId} events={trace.events} running={trace.active} waiting={!!trace.interaction} roundId={activeRound?.id ?? null} />}
           {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} /> : <Hint>在左侧展开一个实验，点一轮查看假设、评估与代码。</Hint>}
         </div>
@@ -264,6 +291,20 @@ export function ResearchPage() {
             )}
             {mode.loops && <Field label="轮数" hint="1–30"><NumberInput value={form.loops} onChange={(v) => setForm((f) => ({ ...f, loops: v }))} min={1} max={30} /></Field>}
             {mode.duration && <Field label="时限（小时）" hint="0.1–24"><NumberInput value={form.duration} onChange={(v) => setForm((f) => ({ ...f, duration: v }))} min={0.1} max={24} step={0.1} /></Field>}
+            {mode.loops && (
+              <Field label="确认方式" hint="运行中哪些环节要等你点头">
+                <SelectInput value={form.confirmMode} onChange={(v) => setForm((f) => ({ ...f, confirmMode: v }))} options={[
+                  { value: "hypothesis", label: "只确认假设", hint: "推荐" },
+                  { value: "all", label: "全部确认", hint: "指示·特征·假设·结论" },
+                  { value: "auto", label: "全自动", hint: "不打断" },
+                ]} />
+              </Field>
+            )}
+            {mode.loops && form.confirmMode !== "auto" && (
+              <Field label="无人处理时（分钟）" hint="等这么久没人确认就按 Agent 原案继续；0 = 一直等">
+                <NumberInput value={form.confirmTimeout} onChange={(v) => setForm((f) => ({ ...f, confirmTimeout: v }))} min={0} max={1440} />
+              </Field>
+            )}
             {mode.input && (
               <Field label={mode.input === "reports" ? "研报 PDF（可多选）" : "论文 PDF"}>
                 <input type="file" accept=".pdf,application/pdf" multiple={mode.input === "reports"} onChange={(e) => setFiles([...(e.target.files || [])])} className="mm-control--file" />

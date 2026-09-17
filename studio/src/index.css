@@ -236,3 +236,43 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .live__meta { font-size: 11px; color: var(--mm-muted); }
 .live__foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 11px; }
 .live__log { margin: 0; max-height: 180px; overflow: auto; padding: 8px 10px; border-radius: 6px; background: var(--mm-ground); font-family: var(--mm-mono); font-size: 11px; line-height: 1.6; color: var(--mm-muted); white-space: pre-wrap; word-break: break-all; }
+
+/* Attention banner: a run is waiting on the user (AttentionBar.tsx). */
+.attn { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 14px; border-radius: 12px; font-size: 12px; color: var(--mm-ink);
+  background: color-mix(in srgb, var(--mm-accent) 8%, #fff); border: 1px solid color-mix(in srgb, var(--mm-accent) 35%, transparent); }
+.attn__dot { flex: none; }
+.attn__text { flex: 1; min-width: 200px; }
+.attn__prefs { display: flex; gap: 12px; margin-left: auto; font-size: 11px; color: var(--mm-muted); }
+.attn__pref { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+/* The confirmation card itself stands out from ordinary content. */
+.interact { border: 1px solid color-mix(in srgb, var(--mm-accent) 45%, var(--mm-rule)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--mm-accent) 10%, transparent); border-radius: 10px; }
+
+/* Two-way segmented choice (accept / reject) in the confirmation card. */
+.mm-seg { display: inline-flex; padding: 2px; border-radius: 999px; background: var(--mm-ground); border: 1px solid var(--mm-rule); }
+.mm-seg__item { border: 0; background: transparent; border-radius: 999px; padding: 3px 12px; font: inherit; font-size: 12px; color: var(--mm-muted); cursor: pointer; transition: background 160ms ease, color 160ms ease; }
+.mm-seg__item[aria-checked="true"] { color: #fff; }
+.mm-seg__item--ok[aria-checked="true"] { background: var(--mm-ok); }
+.mm-seg__item--bad[aria-checked="true"] { background: var(--mm-bad); }
+
+/* Completion toasts (Toasts.tsx). */
+.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 65; display: flex; flex-direction: column; gap: 8px; width: 320px; max-width: calc(100vw - 36px); }
+.toast { display: flex; align-items: stretch; border-radius: 10px; background: #1b1b19; color: #fff; box-shadow: 0 10px 30px -10px rgba(27, 27, 25, 0.5); overflow: hidden; animation: toast-in 220ms cubic-bezier(0.2, 0.9, 0.2, 1); border-left: 3px solid var(--mm-accent); }
+.toast--ok { border-left-color: #3ccf7a; }
+.toast--bad { border-left-color: #ff6b5b; }
+@keyframes toast-in { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
+.toast__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.toast__title { font-size: 12.5px; font-weight: 600; }
+.toast__text { font-size: 11px; opacity: 0.7; }
+.toast__close { border: 0; background: transparent; color: rgba(255, 255, 255, 0.55); font-size: 16px; padding: 0 10px; cursor: pointer; }
+.toast__close:hover { color: #fff; }
+/* A row whose round count just changed. */
+@keyframes row-flash { 0% { background: color-mix(in srgb, var(--mm-accent) 18%, transparent); } 100% { background: transparent; } }
+.mm-table tr.row-flash > td { animation: row-flash 2.4s ease-out; }
+
+/* Run summary card when a research run has ended (RunSummary in Progress.tsx). */
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; padding: 12px 14px; border: 1px solid var(--mm-rule); border-radius: 8px; background: var(--mm-paper); }
+.summary__head { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.summary__title { font-size: 13px; font-weight: 600; }
+.summary__k { font-size: 11px; color: var(--mm-muted); }
+.summary__v { font-family: var(--mm-mono); font-size: 16px; font-variant-numeric: tabular-nums; }
+.summary__actions { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }

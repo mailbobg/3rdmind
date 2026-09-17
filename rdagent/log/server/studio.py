@@ -457,10 +457,116 @@ def summarize_task(trace_id, task):
         status = "running" if task.messages else "starting"
     else:
         status = "ended"
+    pending = pending_request(task)
     return {
         "id": trace_id, "scenario": trace_id.split("/")[0], "rounds": len(loops), "accepted": accepted, "market": run_market(trace_id),
         "status": status, "updated": updated or ended_at or None, "hypothesis": hypothesis, "messages": len(task.messages),
+        "waiting": pending["kind"] if pending else None,
     }
+
+
+def pending_request(task):
+    """The unanswered user-interaction request a live task is blocked on, or None."""
+    process = getattr(task, "process", None)
+    if process is None or not task.is_alive():
+        return None
+    last = task.messages[-1] if task.messages else None
+    if not last or last.get("tag") != "user_interaction.request" or last.get("answered"):
+        return None
+    content = last.get("content") if isinstance(last.get("content"), dict) else {}
+    kind = ("features" if "features" in content else "instruction" if "user_instruction" in content
+            else "hypothesis" if "hypothesis" in content and "decision" not in content else "feedback" if "decision" in content else "other")
+    loops = set()
+    for m in task.messages:
+        try:
+            loops.add(normalize_loop_id(m.get("loop_id")))
+        except ValueError:
+            pass
+    return {"kind": kind, "since": last.get("timestamp"), "round": (max(loops) + 1) if loops else None}
+
+
+@studio.get("/attention")
+def attention():
+    """Runs waiting on the user right now (unanswered interaction requests of live processes), for the rail
+    badge, the banner and notifications. ``?region=`` scopes it like the other lists."""
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    root = Path(current_app.config["LOG_FOLDER_PATH"])
+    region = wanted_region()
+    items = []
+    for key, task in list(registry.items()):
+        if task is None:
+            continue
+        pending = pending_request(task)
+        if not pending:
+            continue
+        try:
+            trace_id = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            trace_id = key
+        market = run_market(trace_id)
+        if not in_region(market, region):
+            continue
+        items.append({"trace": trace_id, "market": market, **pending})
+    items.sort(key=lambda i: i.get("since") or "")
+    return jsonify(items)
+
+
+def _metric_ic(content) -> float | None:
+    """The IC from a feedback.metric event's result (a JSON string or dict), or None."""
+    result = content.get("result") if isinstance(content, dict) else None
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+        value = (data or {}).get("IC")
+        return float(value) if isinstance(value, (int, float)) else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+@studio.get("/recent")
+def recent():
+    """Notable happenings across runs after ``?since=`` (ISO time): a round finished (with its verdict, IC and
+    factor names) or a run ended. The UI turns these into toasts; ``?region=`` scopes like the other lists."""
+    since = str(request.args.get("since") or "")
+    region = wanted_region()
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    root = Path(current_app.config["LOG_FOLDER_PATH"])
+    items = []
+    for key, task in list(registry.items()):
+        if task is None:
+            continue
+        try:
+            trace_id = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            trace_id = key
+        market = run_market(trace_id)
+        if not in_region(market, region):
+            continue
+        metrics_by_loop: dict[str, dict] = {}
+        for m in task.messages:
+            if m.get("tag") == "feedback.metric":
+                metrics_by_loop[str(m.get("loop_id"))] = m.get("content") or {}
+        for m in task.messages:
+            stamp = str(m.get("timestamp") or "")
+            if not stamp or stamp <= since:
+                continue
+            tag = str(m.get("tag") or "")
+            if tag == "feedback.hypothesis_feedback":
+                content = m.get("content") if isinstance(m.get("content"), dict) else {}
+                metric = metrics_by_loop.get(str(m.get("loop_id")), {})
+                factors = [f.get("name") for f in ((metric.get("workspaces") or {}).get("factors") or []) if isinstance(f, dict) and f.get("name")]
+                try:
+                    round_no = normalize_loop_id(m.get("loop_id")) + 1
+                except ValueError:
+                    round_no = None
+                items.append({"kind": "round_done", "trace": trace_id, "market": market, "timestamp": stamp, "round": round_no,
+                              "decision": bool(content.get("decision")), "ic": _metric_ic(metric), "factors": factors})
+            elif tag.lower() == "end":
+                content = m.get("content") if isinstance(m.get("content"), dict) else {}
+                code = content.get("end_code")
+                items.append({"kind": "run_done", "trace": trace_id, "market": market, "timestamp": stamp,
+                              "status": "completed" if code == 0 else "stopped" if code == -1 else "failed"})
+    items.sort(key=lambda i: i["timestamp"])
+    return jsonify({"items": items[-20:], "now": datetime.now(timezone.utc).isoformat()})
 
 
 @studio.get("/experiments")

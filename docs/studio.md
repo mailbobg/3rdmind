@@ -88,6 +88,23 @@ server directly, since the React dev server has nothing at its root.
 For an authenticated backend, establish the backend's normal authentication session through the same origin.
 Do not place provider credentials in the frontend.
 
+## Following a run
+
+Each round's four steps (hypothesis, coding, Qlib evaluation, verdict) are read off the trace timestamps: step
+strips with durations on the round rows, a live line on the running experiment's row, and a status card above
+the round detail with the current step, iteration count, elapsed time, an estimate from earlier rounds, a
+quiet-too-long warning and a cleaned tail of the process log (`/studio/trace-tail`).
+
+Confirmations are served by the server, not the page. Every run carries a policy (`confirm_mode`: `all`,
+`hypothesis` (default) or `auto`; `confirm_timeout` minutes, 0 = wait forever); a watcher thread answers requests
+the policy does not need a human for, and any request left unanswered past the timeout, with the agent's own
+proposal, leaving a `user_interaction.auto` event that says so. Requests that do need a human appear in
+`/studio/attention`, which drives the badge on the AI 研究 menu item, the banner above every page, the `●` in
+the tab title and, when switched on in the banner, desktop notifications and a chime. The confirmation card is
+a form for the decision at hand (accept or rewrite a hypothesis, accept or flip a verdict, prune the feature
+list, write the instruction) with the raw JSON under 高级. Round and run completions (`/studio/recent`) become
+toasts; a finished run shows a summary card with backtest and continue actions.
+
 ## Other markets (US example)
 
 Markets are workspaces: the toggle at the top of the rail (A 股 | 美股) switches the whole Studio, like a

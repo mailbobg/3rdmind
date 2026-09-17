@@ -163,7 +163,7 @@ def test_experiments_summarise_loaded_traces(studio_client) -> None:
     ]
     rows = {r["id"]: r for r in studio_client.get("/studio/experiments").get_json()}
     assert rows["Finance Data Building/second"] == {
-        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1, "market": "csi300",
+        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1, "market": "csi300", "waiting": None,
         "status": "completed", "updated": "2026-09-02T11:00:00", "hypothesis": "second", "messages": 5,
     }
     # The demo trace has events but no END and no live process: it ended without reporting.
@@ -1349,3 +1349,106 @@ def test_trace_tail_returns_cleaned_last_lines(studio_client) -> None:
     assert payload["updated"] and payload["size"] > 0
     assert studio_client.get("/studio/trace-tail", query_string={"trace": "Finance Data Building/nothing"}).get_json()["lines"] == []
     assert studio_client.get("/studio/trace-tail", query_string={"trace": "../etc"}).status_code == 400
+
+
+@pytest.mark.offline
+def test_attention_lists_unanswered_requests_of_live_runs(studio_client) -> None:
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/waiting"))
+    task.messages = [
+        {"tag": "research.hypothesis", "loop_id": "0", "timestamp": "2026-09-17T01:00:00", "content": {"hypothesis": "h"}},
+        {"tag": "user_interaction.request", "timestamp": "2026-09-17T01:00:05", "content": {"hypothesis": "h", "reason": "r"}},
+    ]
+    # Not alive: nothing pending.
+    assert studio_client.get("/studio/attention").get_json() == []
+    task.is_alive = lambda: True  # type: ignore[method-assign]
+    task.process = object()  # type: ignore[assignment]
+    items = studio_client.get("/studio/attention").get_json()
+    assert items == [{"trace": "Finance Data Building/waiting", "market": "csi300", "kind": "hypothesis", "since": "2026-09-17T01:00:05", "round": 1}]
+    assert studio_client.get("/studio/attention?region=us").get_json() == []
+    summary = next(e for e in studio_client.get("/studio/experiments").get_json() if e["id"].endswith("waiting"))
+    assert summary["waiting"] == "hypothesis"
+    # Answering marks it done even before the process emits anything new.
+    task.user_response_q = type("Q", (), {"put": lambda self, *a, **k: None})()
+    assert studio_client.post("/user_interaction/submit", json={"id": "Finance Data Building/waiting", "payload": {"hypothesis": "h"}}).status_code == 200
+    assert studio_client.get("/studio/attention").get_json() == []
+    # A feedback request is classified as such.
+    task.messages.append({"tag": "user_interaction.request", "timestamp": "2026-09-17T01:20:00", "content": {"decision": True, "reason": "ok"}})
+    assert studio_client.get("/studio/attention").get_json()[0]["kind"] == "feedback"
+
+
+@pytest.mark.offline
+def test_confirm_policy_answers_requests_by_mode_and_timeout(studio_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/policy"))
+    replies = []
+    task.user_response_q = type("Q", (), {"put": lambda self, payload, **k: replies.append(payload)})()
+    task.is_alive = lambda: True  # type: ignore[method-assign]
+    task.process = object()  # type: ignore[assignment]
+    fresh = datetime.now(timezone.utc).isoformat()
+
+    def request(content, ts=fresh):
+        task.messages.append({"tag": "user_interaction.request", "timestamp": ts, "content": content})
+
+    # Default policy (hypothesis only): instruction, features and verdicts pass as proposed, a hypothesis waits.
+    task.confirm = server.parse_confirm(None, None, "focus on volume")
+    request({"user_instruction": None})
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"user_instruction": "focus on volume"} and task.messages[-1]["tag"] == "user_interaction.auto"
+    request({"features": {"A": "$close"}, "feature_validation_msg": ""})
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"A": "$close"}
+    request({"hypothesis": "h", "reason": "r"})
+    server.apply_confirm_policy(task)
+    assert len(replies) == 2 and task.messages[-1]["tag"] == "user_interaction.request"
+    assert studio_client.get("/studio/attention").get_json()[0]["kind"] == "hypothesis"
+    # ... until the timeout passes.
+    task.messages[-1]["timestamp"] = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat()
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"hypothesis": "h", "reason": "r"} and task.messages[-1]["content"] == {"kind": "hypothesis", "why": "timeout"}
+    assert studio_client.get("/studio/attention").get_json() == []
+    # "all" waits on everything and never times out with timeout 0; "auto" waits on nothing.
+    task.confirm = server.parse_confirm("all", 0)
+    request({"decision": True, "reason": "ok"}, (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat())
+    server.apply_confirm_policy(task)
+    assert len(replies) == 3
+    task.confirm = server.parse_confirm("auto", 0)
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"decision": True, "reason": "ok"}
+    with pytest.raises(ValueError):
+        server.parse_confirm("sometimes", 5)
+    with pytest.raises(ValueError):
+        server.parse_confirm("all", 5000)
+
+
+@pytest.mark.offline
+def test_upload_and_resume_carry_the_confirm_policy(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
+    monkeypatch.setattr(server, "universe_env", lambda market: {})
+    started = []
+    monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
+    response = studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "1", "all_duration": "1", "confirm_mode": "auto", "confirm_timeout": "0", "objective": "vol"})
+    assert response.status_code == 200, response.get_json()
+    assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "vol"}
+    assert studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "1", "confirm_mode": "never"}).status_code == 400
+
+
+@pytest.mark.offline
+def test_recent_lists_round_and_run_completions_after_a_cursor(studio_client) -> None:
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/recent"))
+    task.messages = [
+        {"tag": "feedback.metric", "loop_id": "0", "timestamp": "2026-09-17T02:00:00", "content": {"result": json.dumps({"IC": 0.031}), "workspaces": {"factors": [{"name": "F1"}, {"name": "F2"}]}}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "0", "timestamp": "2026-09-17T02:01:00", "content": {"decision": True}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "1", "timestamp": "2026-09-17T02:20:00", "content": {"decision": False}},
+        {"tag": "END", "timestamp": "2026-09-17T02:21:00", "content": {"end_code": 0}},
+    ]
+    everything = studio_client.get("/studio/recent").get_json()
+    kinds = [(i["kind"], i.get("round"), i.get("decision"), i.get("ic"), i.get("factors"), i.get("status")) for i in everything["items"] if i["trace"].endswith("recent")]
+    assert kinds == [("round_done", 1, True, 0.031, ["F1", "F2"], None), ("round_done", 2, False, None, [], None), ("run_done", None, None, None, None, "completed")]
+    later = studio_client.get("/studio/recent", query_string={"since": "2026-09-17T02:10:00"}).get_json()["items"]
+    assert [i["kind"] for i in later if i["trace"].endswith("recent")] == ["round_done", "run_done"]
+    assert everything["now"]
+    assert [i for i in studio_client.get("/studio/recent?region=us").get_json()["items"] if i["trace"].endswith("recent")] == []

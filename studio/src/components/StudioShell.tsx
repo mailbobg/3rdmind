@@ -14,6 +14,12 @@ import { useFactorBasket } from "../hooks/useFactorBasket";
 import { useLayoutState } from "../hooks/useLayoutState";
 import { DataSync } from "./DataSync";
 import { DataBuild } from "./DataBuild";
+import { AttentionBar } from "./AttentionBar";
+import { Toasts } from "./Toasts";
+import { useToasts } from "../hooks/useToasts";
+import { useAttention } from "../hooks/useAttention";
+import { useNow } from "./Progress";
+import type { AttentionItem } from "../api/studio";
 import { LlmSettings } from "./LlmSettings";
 import { Btn } from "./minimal";
 
@@ -86,6 +92,15 @@ export function StudioShell({ region }: { region: string }) {
     navigate(`${makeWorkspace(target).base}${rel}`);
   };
   const { env, load: reloadEnv } = useEnvironment();
+  // Runs blocked on a confirmation: badge on the menu, banner over the page, title dot, optional notifications.
+  const openAttention = useMemo(() => (item: AttentionItem) => navigate(`${workspace.base}/research?trace=${encodeURIComponent(item.trace)}`), [navigate, workspace.base]);
+  const attention = useAttention(!!current?.ready, openAttention);
+  const toasts = useToasts(!!current?.ready);
+  const now = useNow(15_000, attention.items.length > 0);
+  useEffect(() => {
+    const base = document.title.replace(/^● /, "");
+    document.title = attention.items.length ? `● ${base}` : base;
+  }, [attention.items.length]);
   const trace = useTrace();
   const backtests = useBacktests();
   const basket = useFactorBasket();
@@ -109,7 +124,9 @@ export function StudioShell({ region }: { region: string }) {
                 className={({ isActive }) => `flex items-start gap-2.5 rounded-[10px] px-2.5 py-3 text-left no-underline transition-colors ${isActive ? "bg-neutral-900 text-white" : "text-foreground hover:bg-surface-secondary"}`}>
                 <span className="w-[22px] text-[19px] leading-none">{item.symbol}</span>
                 <span className="min-w-0 text-[13px] font-medium">{item.title}<small className="mt-1 block text-[10px] font-normal leading-relaxed opacity-65">{item.desc}</small></span>
-                {counts[item.path] && <span className="ml-auto text-[11px] opacity-60">{counts[item.path]}</span>}
+                {item.path === "/research" && attention.items.length > 0
+                  ? <span className="ml-auto rounded-full bg-danger px-1.5 text-[10px] font-semibold leading-[16px] text-white" title="等待确认">{attention.items.length}</span>
+                  : counts[item.path] && <span className="ml-auto text-[11px] opacity-60">{counts[item.path]}</span>}
               </NavLink>
             ))}
           </nav>
@@ -129,14 +146,18 @@ export function StudioShell({ region }: { region: string }) {
             <a href={PLAYGROUND_URL} target="_blank" rel="noreferrer" className="text-muted">原生 Playground ↗</a>
           </div>
         </aside>
+        <div className="flex min-h-0 min-w-0 flex-col gap-2">
+        <AttentionBar items={attention.items} now={now} prefs={attention.prefs} setPrefs={attention.setPrefs} onOpen={openAttention} />
         {regions && current && !current.ready ? (
-          <section className="flex min-h-0 flex-col items-center justify-center gap-3 rounded-2xl text-center" style={{ background: "var(--mm-ground)" }}>
+          <section className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 rounded-2xl text-center" style={{ background: "var(--mm-ground)" }}>
             <div className="text-[15px] font-semibold">{workspace.label}数据还没构建</div>
             <p className="m-0 max-w-[420px] text-[12px] leading-relaxed text-muted">这个工作区的研究、因子库、回测和策略都要先有 Qlib 数据。{region === "us" ? "点下面从 Yahoo Finance 构建纳斯达克 100 的日线数据。" : "请先同步 Qlib 数据。"}</p>
             {region === "us" ? <DataBuild compact onBuilt={() => { reloadEnv(); loadRegions(); }} /> : <Btn onClick={() => loadRegions()}>重新检查</Btn>}
           </section>
         ) : <Outlet />}
+        </div>
       </div>
+      <Toasts toasts={toasts.toasts} onDismiss={toasts.dismiss} onOpen={(t) => { if (t.trace) navigate(`${workspace.base}/research?trace=${encodeURIComponent(t.trace)}`); }} />
     </StudioContext.Provider>
   );
 }
