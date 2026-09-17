@@ -117,6 +117,12 @@ class ModelFBWorkspace(FBWorkspace):
                     qtde = QTDockerEnv()
                 elif MODEL_COSTEER_SETTINGS.env_type == "conda":
                     qtde = QlibCondaEnv(conf=QlibCondaConf())
+                elif MODEL_COSTEER_SETTINGS.env_type == "venv":
+                    # The same local interpreter get_model_env() uses for the runner: the shape/forward check
+                    # of every candidate model runs here, so without this branch no model ever passes locally.
+                    from rdagent.components.coder.model_coder.conf import get_model_env
+
+                    qtde = get_model_env(enable_cache=False, running_timeout_period=600)
                 else:
                     raise ValueError(f"Unknown env_type: {MODEL_COSTEER_SETTINGS.env_type}")
             else:
