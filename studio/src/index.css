@@ -277,9 +277,22 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .summary__v { font-family: var(--mm-mono); font-size: 16px; font-variant-numeric: tabular-nums; }
 .summary__actions { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
 
-/* Failure variant of the banner. */
-.attn--bad { background: color-mix(in srgb, var(--mm-bad) 7%, #fff); border-color: color-mix(in srgb, var(--mm-bad) 35%, transparent); }
-.attn__dot--bad { background: var(--mm-bad); animation: none; box-shadow: none; }
+/* Failed jobs (AttentionBar.tsx › FailureList): a quiet card with a red accent, every failure on its own row. */
+.fails { border: 1px solid var(--mm-rule); border-left: 3px solid var(--mm-bad); border-radius: 12px; background: var(--mm-paper); font-size: 12px; color: var(--mm-ink); overflow: hidden; }
+.fails__head { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--mm-rule-soft); }
+.fails__title { font-weight: 600; color: var(--mm-bad); }
+.fails__hint { flex: 1; min-width: 0; font-size: 11px; color: var(--mm-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fails__list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.fails__row { display: flex; align-items: flex-start; gap: 12px; padding: 8px 14px; }
+.fails__row + .fails__row { border-top: 1px solid var(--mm-rule-soft); }
+.fails__kind { flex: none; margin-top: 1px; padding: 1px 7px; border-radius: 999px; background: var(--mm-ground); font-size: 10.5px; color: var(--mm-muted); white-space: nowrap; }
+.fails__main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.fails__label { font-weight: 500; }
+.fails__when { font-weight: 400; color: var(--mm-muted); }
+.fails__error { display: block; width: 100%; margin: 0; padding: 0; border: 0; background: transparent; font: inherit; font-family: var(--mm-mono); font-size: 11px; line-height: 1.5; color: var(--mm-bad);
+  text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fails__error--open { white-space: pre-wrap; word-break: break-word; }
+.fails__actions { flex: none; display: flex; align-items: center; gap: 4px; }
 
 /* Inline job progress (runs page). */
 .jobbar { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
