@@ -77,6 +77,7 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
             "close_cost": mbps.close_cost,
             "lgb_lambda_l1": mbps.lgb_lambda_l1,
             "lgb_lambda_l2": mbps.lgb_lambda_l2,
+            "n_jobs": mbps.n_jobs,
             "train_start": mbps.train_start,
             "train_end": mbps.train_end,
             "valid_start": mbps.valid_start,

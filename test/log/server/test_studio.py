@@ -605,7 +605,7 @@ def test_research_from_strategy_seeds_base_features(studio_client, tmp_path: Pat
     assert "STR_5" in payload["instruction"] and "回流测试" in payload["instruction"]
     task = started[0]
     assert task.target_name == "fin_factor" and task.kwargs["loop_n"] == 2 and task.kwargs["all_duration"] == "1.0h"
-    assert task.env == {"QLIB_FACTOR_MARKET": "csi300"}
+    assert {k: v for k, v in task.env.items() if not k.endswith("_N_JOBS")} == {"QLIB_FACTOR_MARKET": "csi300"}
     base = Path(task.kwargs["base_features_path"])
     assert (base / "STR_5.py").read_text() == "print('STR_5')"
     assert studio_client.post("/research/from-strategy", json={"strategy_id": "nope"}).status_code == 404
@@ -689,7 +689,7 @@ def test_upload_passes_the_universe_to_the_run(studio_client, tmp_path: Path, mo
     monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
     response = studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "2", "all_duration": "1", "market": "csi1000"})
     assert response.status_code == 200, response.get_json()
-    assert started[0].env == {"QLIB_FACTOR_MARKET": "csi1000", "FACTOR_COSTEER_DATA_FOLDER": "/data/csi1000"}
+    assert {k: v for k, v in started[0].env.items() if not k.endswith("_N_JOBS")} == {"QLIB_FACTOR_MARKET": "csi1000", "FACTOR_COSTEER_DATA_FOLDER": "/data/csi1000"}
     assert started[0].kwargs["loop_n"] == 2
 
 
@@ -1314,6 +1314,12 @@ def test_llm_settings_save_env_and_test(studio_client, tmp_path: Path, monkeypat
     # A new research task inherits it beneath its own variables.
     task = server.RDAgentTask("fin_factor", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False, env={"QLIB_FACTOR_MARKET": "csi500"})
     assert task.env["ANTHROPIC_API_KEY"] == "sk-ant-abcdefgh" and task.env["QLIB_FACTOR_MARKET"] == "csi500"
+    # macOS runs train in-process (forked DataLoader workers segfault there) unless the run says otherwise.
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    task = server.RDAgentTask("fin_factor", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False, env={"QLIB_MODEL_N_JOBS": "4"})
+    assert task.env["QLIB_MODEL_N_JOBS"] == "4" and task.env["QLIB_FACTOR_N_JOBS"] == "0"
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    assert "QLIB_FACTOR_N_JOBS" not in server.RDAgentTask("fin_factor", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False).env
     # Switching provider without a key keeps the other provider's key on file and reports no key for the new one.
     switched = studio_client.put("/studio/llm", json={"provider": "openai", "model": "gpt-5"}).get_json()["current"]
     assert switched["has_key"] is False and switched["saved_keys"] == {"anthropic": "…efgh"}

@@ -32,6 +32,10 @@ class ModelBasePropSetting(BasePropSetting):
     lgb_lambda_l2: str = "580.9768"
     """LightGBM leaf penalties of the factor-evaluation model. Tuned for CSI300; a smaller universe has fewer
     rows per leaf, so a penalty this size leaves no split and the model predicts a constant."""
+
+    n_jobs: str = "20"
+    """DataLoader worker processes of the PyTorch model (GeneralPTNN ``n_jobs``). 20 suits the Docker image;
+    on macOS the forked workers crash the training with a segmentation fault, so the Studio sets 0 there."""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.model_experiment.QlibModelScenario"
     """Scenario class for Qlib Model"""
@@ -100,6 +104,10 @@ class FactorBasePropSetting(BasePropSetting):
     lgb_lambda_l2: str = "580.9768"
     """LightGBM leaf penalties of the factor-evaluation model. Tuned for CSI300; a smaller universe has fewer
     rows per leaf, so a penalty this size leaves no split and the model predicts a constant."""
+
+    n_jobs: str = "20"
+    """DataLoader worker processes of the PyTorch model (GeneralPTNN ``n_jobs``). 20 suits the Docker image;
+    on macOS the forked workers crash the training with a segmentation fault, so the Studio sets 0 there."""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.factor_experiment.QlibFactorScenario"
     """Scenario class for Qlib Factor"""
@@ -184,6 +192,10 @@ class QuantBasePropSetting(BasePropSetting):
     lgb_lambda_l2: str = "580.9768"
     """LightGBM leaf penalties of the factor-evaluation model. Tuned for CSI300; a smaller universe has fewer
     rows per leaf, so a penalty this size leaves no split and the model predicts a constant."""
+
+    n_jobs: str = "20"
+    """DataLoader worker processes of the PyTorch model (GeneralPTNN ``n_jobs``). 20 suits the Docker image;
+    on macOS the forked workers crash the training with a segmentation fault, so the Studio sets 0 there."""
     # 1) override base settings
     scen: str = "rdagent.scenarios.qlib.experiment.quant_experiment.QlibQuantScenario"
     """Scenario class for Qlib Model"""

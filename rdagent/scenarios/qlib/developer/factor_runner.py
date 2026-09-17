@@ -88,6 +88,7 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
             "close_cost": fbps.close_cost,
             "lgb_lambda_l1": fbps.lgb_lambda_l1,
             "lgb_lambda_l2": fbps.lgb_lambda_l2,
+            "n_jobs": fbps.n_jobs,
             "train_start": fbps.train_start,
             "train_end": fbps.train_end,
             "valid_start": fbps.valid_start,

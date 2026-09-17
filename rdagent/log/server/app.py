@@ -114,6 +114,11 @@ class RDAgentTask:
         # child before any rdagent settings module is imported so pydantic-settings picks them up.
         # The Studio's saved LLM settings (studio_llm) sit beneath the run's own variables.
         self.env: dict[str, str] = {**studio_llm.env(), **(env or {})}
+        if sys.platform == "darwin":
+            # Qlib's PyTorch models spawn DataLoader workers (n_jobs 20 in the templates, sized for the Docker
+            # image); forked workers segfault on macOS, so local runs train in-process unless told otherwise.
+            for kind in ("FACTOR", "MODEL", "QUANT"):
+                self.env.setdefault(f"QLIB_{kind}_N_JOBS", "0")
         # How confirmations are handled while the run is unattended: mode "all" waits for the user on every
         # request, "hypothesis" only on hypotheses (instruction, features and verdicts pass as proposed),
         # "auto" never waits; timeout_min (0 = never) passes an unanswered request as proposed after that long.
