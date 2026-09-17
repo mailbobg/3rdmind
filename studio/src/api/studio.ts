@@ -99,7 +99,7 @@ export interface BacktestResult extends BacktestSummary {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) { super(message); }
+  constructor(message: string, public status: number, public payload?: any) { super(message); }
 }
 
 export async function api<T = any>(path: string, body?: unknown): Promise<T> {
@@ -126,7 +126,7 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
   } catch {
     throw new ApiError("服务未返回 JSON，请确认 RD-Agent 服务及 Vite 代理已启动。", response.status);
   }
-  if (!response.ok) throw new ApiError(value?.error || `HTTP ${response.status}`, response.status);
+  if (!response.ok) throw new ApiError(value?.error || `HTTP ${response.status}`, response.status, value);
   return value as T;
 }
 
@@ -159,7 +159,18 @@ export const startDataBuild = () =>
 export const universeLabel = (m: string) => UNIVERSE_LABELS[m] || m.toUpperCase();
 export const experiments = () => api<ExperimentSummary[]>(scoped("/studio/experiments"));
 export const traceSnapshot = (id: string) => api<TraceEvent[]>("/trace", { id, snapshot: true });
-export const startResearch = (form: FormData) => api<{ id: string }>("/upload", form);
+/** Start a research run; when the universe's data must be exported first (409 + job), wait for it and retry. */
+export async function startResearch(form: FormData, onWait?: (j: Job) => void): Promise<{ id: string }> {
+  try {
+    return await api<{ id: string }>("/upload", form);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409 && e.payload?.job) {
+      await waitJob(e.payload.job, onWait);
+      return api<{ id: string }>("/upload", form);
+    }
+    throw e;
+  }
+}
 export const stopResearch = (id: string) => api<{ status: string }>("/control", { id, action: "stop" });
 /** Continue a finished loop experiment for `loops` more rounds, appending to the same trace. */
 export const resumeResearch = (id: string, loops: number, confirm?: { mode: string; timeout: number }) =>
@@ -180,7 +191,11 @@ export const rounds = (trace: string) => api<Round[]>(`/studio/rounds?${new URLS
 export interface Coverage { start: string; end: string }
 export const predictionCoverage = (trace: string, loop_id: number) =>
   api<Coverage & { days: number; rows: number }>(`/studio/predictions/coverage?${new URLSearchParams({ trace, loop_id: String(loop_id) })}`);
-export const refreshFactor = (ref: FactorRef) => api<RefreshMeta>("/studio/factors/refresh", { trace: ref.trace, loop_id: ref.loop_id, name: ref.name });
+/** Recompute a factor on the latest data: starts a job and resolves with its meta once done. */
+export const refreshFactor = async (ref: FactorRef): Promise<RefreshMeta> => {
+  const { job: id } = await api<{ job: string }>("/studio/factors/refresh", { trace: ref.trace, loop_id: ref.loop_id, name: ref.name });
+  return waitJob<RefreshMeta>(id);
+};
 export const factorCoverage = (ref: FactorRef) =>
   api<Coverage & { days: number; rows: number }>(`/studio/factors/coverage?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name })}`);
 export const backtests = () => api<BacktestSummary[]>(scoped("/studio/backtests"));
@@ -229,8 +244,12 @@ export const strategySignalCsvUrl = (id: string) => `/studio/strategies/${id}/si
 /** Start a factor-research run whose base features are the strategy's members. */
 export const researchFromStrategy = (strategy_id: string, loops: number, all_duration: number) =>
   api<{ id: string; members: string[]; instruction: string }>("/research/from-strategy", { strategy_id, loops, all_duration });
-export const updateStrategy = (id: string, body: { start?: string; end?: string; refresh?: boolean } = {}) =>
-  api<{ backtest_id: string; refreshed: string[]; failures: string[]; start: string; end: string }>(`/studio/strategies/${id}/update`, body);
+export interface StrategyUpdateResult { backtest_id: string; refreshed: string[]; failures: string[]; start: string; end: string }
+/** 更新到最新 runs as a job; resolves once its tracking backtest has been launched. */
+export const updateStrategy = async (id: string, body: { start?: string; end?: string; refresh?: boolean } = {}): Promise<StrategyUpdateResult> => {
+  const { job: jobId } = await api<{ job: string }>(`/studio/strategies/${id}/update`, body);
+  return waitJob<StrategyUpdateResult>(jobId);
+};
 export interface SyncStatus {
   local: { release: string | null; downloaded_at: string | null; calendar_start: string | null; calendar_end: string | null; path: string };
   settings: { auto: boolean; hour: number; last_auto_check: string | null };
@@ -273,3 +292,22 @@ export type RecentItem =
   | { kind: "round_done"; trace: string; market: string; timestamp: string; round: number | null; decision: boolean; ic: number | null; factors: string[] }
   | { kind: "run_done"; trace: string; market: string; timestamp: string; status: "completed" | "stopped" | "failed" };
 export const recent = (since?: string) => api<{ items: RecentItem[]; now: string }>(scoped(`/studio/recent${since ? `?since=${encodeURIComponent(since)}` : ""}`));
+
+/** One entry of the background-work registry (/studio/jobs). */
+export interface Job {
+  id: string; kind: string; label: string; status: "queued" | "running" | "completed" | "failed";
+  progress: { done: number; total: number | null } | null; message: string; market: string | null;
+  link: Record<string, any> | null; started: string | null; finished: string | null; error: string | null; result: any;
+}
+export const jobs = (since?: string) => api<{ items: Job[]; now: string }>(scoped(`/studio/jobs${since ? `?since=${encodeURIComponent(since)}` : ""}`));
+export const job = (id: string) => api<Job>(`/studio/jobs/${encodeURIComponent(id)}`);
+/** Poll a job until it finishes; resolves with its result, rejects with its error. */
+export async function waitJob<T = any>(id: string, onProgress?: (j: Job) => void, intervalMs = 1500): Promise<T> {
+  for (;;) {
+    const j = await job(id);
+    onProgress?.(j);
+    if (j.status === "completed") return j.result as T;
+    if (j.status === "failed") throw new ApiError(j.error || `${j.label} 失败`, 500, j);
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}

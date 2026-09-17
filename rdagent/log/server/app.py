@@ -43,7 +43,7 @@ from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.ui.storage import WebStorage
 
 app = Flask(__name__, static_folder=str(Path(UI_SETTING.static_path).resolve()))
-from rdagent.log.server import studio_llm, studio_markets
+from rdagent.log.server import studio_jobs, studio_llm, studio_markets
 from rdagent.log.server.studio import studio
 
 app.register_blueprint(studio)
@@ -587,7 +587,37 @@ def available_universes() -> list[str]:
     return studio_markets.markets()
 
 
-def universe_env(market: str) -> dict[str, str]:
+class UniverseNotReady(Exception):
+    """The universe's factor input data has not been exported yet (or is stale); a build job is needed first."""
+
+    def __init__(self, market: str, job: dict):
+        super().__init__(f"{market} 的股票池数据还没准备好")
+        self.market, self.job = market, job
+
+
+def build_universe_data(record: dict, out: Path) -> None:
+    """Export the universe's daily OHLCV for factor code (studio_universe.py) into ``out``; raises on failure."""
+    start = os.environ.get("QLIB_FACTOR_TRAIN_START", "2023-01-01")
+    end = os.environ.get("QLIB_FACTOR_TEST_END", "2030-12-31")
+    # Factor code needs history before the training window for rolling features; give it a quarter.
+    from datetime import date
+
+    start = (date.fromisoformat(start) - timedelta(days=90)).isoformat()
+    completed = subprocess.run(
+        [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_universe.py")),
+         record["provider_uri"], record["market"], start, end, str(out), record["region"]],
+        capture_output=True, text=True, timeout=1800,
+    )
+    line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    try:
+        status = json.loads(line)
+    except ValueError:
+        raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "universe data build produced no output")
+    if status.get("status") != "completed":
+        raise RuntimeError(status.get("error") or "universe data build failed")
+
+
+def universe_env(market: str, build: bool = True) -> dict[str, str]:
     """Environment for a run on ``market``: universe, benchmark, region and data directory for RD-Agent's Qlib
     settings, plus a factor data folder built for it.
 
@@ -630,24 +660,14 @@ def universe_env(market: str) -> dict[str, str]:
             built_end = ""
     # (Re)build when missing, or when the Qlib data has moved past what was exported (after a data sync).
     if not (out / "full" / "daily_pv.h5").is_file() or (calendar_end and built_end and built_end < calendar_end):
-        start = os.environ.get("QLIB_FACTOR_TRAIN_START", "2023-01-01")
-        end = os.environ.get("QLIB_FACTOR_TEST_END", "2030-12-31")
-        # Factor code needs history before the training window for rolling features; give it a quarter.
-        from datetime import date, timedelta
-
-        start = (date.fromisoformat(start) - timedelta(days=90)).isoformat()
-        completed = subprocess.run(
-            [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_universe.py")),
-             record["provider_uri"], market, start, end, str(out), record["region"]],
-            capture_output=True, text=True, timeout=1800,
-        )
-        line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
-        try:
-            status = json.loads(line)
-        except ValueError:
-            raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "universe data build produced no output")
-        if status.get("status") != "completed":
-            raise RuntimeError(status.get("error") or "universe data build failed")
+        if build:
+            build_universe_data(record, out)
+        else:
+            # The caller wants to answer now: hand back the (new or already running) build job instead.
+            job = studio_jobs.find("universe", market=market) or studio_jobs.run(
+                "universe", f"准备 {studio_markets.universe(market)['label']} 数据", lambda job: build_universe_data(record, out),
+                market=market, link={"page": "research", "market": market})
+            raise UniverseNotReady(market, job)
     env["FACTOR_COSTEER_DATA_FOLDER"] = str(out / "full")
     env["FACTOR_COSTEER_DATA_FOLDER_DEBUG"] = str(out / "debug")
     return env
@@ -682,7 +702,10 @@ def upload_file():
     run_env: dict[str, str] = {}
     if scenario.startswith("Finance"):
         try:
-            run_env = universe_env(market)
+            run_env = universe_env(market, build=False)
+        except UniverseNotReady as pending:
+            # First research on this universe: the data export runs as a job; the client retries when it is done.
+            return jsonify({"error": str(pending), "job": pending.job["id"], "retry": True}), 409
         except ValueError as error:
             return jsonify({"error": str(error)}), 400
         except (RuntimeError, subprocess.TimeoutExpired) as error:
@@ -962,7 +985,9 @@ def research_from_strategy():
         return jsonify({"error": "策略里没有可作为基础特征的因子"}), 400
     kwargs = {"loop_n": loop_n, "all_duration": f"{all_duration}h", "base_features_path": str(trace_files_path)}
     try:
-        run_env = universe_env(str((strategy.get("params") or {}).get("market") or "csi300"))
+        run_env = universe_env(str((strategy.get("params") or {}).get("market") or "csi300"), build=False)
+    except UniverseNotReady as pending:
+        return jsonify({"error": str(pending), "job": pending.job["id"], "retry": True}), 409
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
     except (RuntimeError, subprocess.TimeoutExpired) as error:

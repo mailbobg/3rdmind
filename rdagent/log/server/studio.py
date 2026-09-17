@@ -12,7 +12,7 @@ from pathlib import Path
 from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
-from rdagent.log.server import studio_llm, studio_markets, studio_sync
+from rdagent.log.server import studio_jobs, studio_llm, studio_markets, studio_sync
 from rdagent.log.server.studio_worker import validate_config, write_json
 
 studio = Blueprint("studio", __name__, url_prefix="/studio")
@@ -672,13 +672,21 @@ def factors_refresh():
             code_path.parent.mkdir(parents=True, exist_ok=True)
             code_path.write_text(code)
         out = refresh_dir(trace, loop_id, name)
-        for stale in out.glob("studio_analysis.*.json"):
-            stale.unlink()
-        return jsonify(run_refresh(code_path, name, out, str(body.get("market") or run_market(trace))))
+        market = str(body.get("market") or run_market(trace))
     except (ValueError, TypeError, KeyError) as error:
         return jsonify({"error": str(error)}), 400
-    except (RuntimeError, subprocess.TimeoutExpired) as error:
-        return jsonify({"error": str(error)}), 500
+    existing = studio_jobs.find("refresh", trace=trace, loop_id=loop_id, name=name)
+    if existing:
+        return jsonify({"job": existing["id"]}), 202
+
+    def work(job):
+        for stale in out.glob("studio_analysis.*.json"):
+            stale.unlink()
+        studio_jobs.update(job["id"], message="在最新数据上重算")
+        return run_refresh(code_path, name, out, market)
+
+    job = studio_jobs.run("refresh", f"重算 {name}", in_app(work), market=market, link={"page": "factors", "trace": trace, "loop_id": loop_id, "name": name})
+    return jsonify({"job": job["id"]}), 202
 
 
 @studio.get("/factors/coverage")
@@ -766,6 +774,41 @@ def prepare_backtest_config(body):
     return config
 
 
+def in_app(fn):
+    """Run a job function inside this Flask app's context (jobs run on threads; route helpers read current_app)."""
+    app = current_app._get_current_object()
+
+    def wrapped(job):
+        with app.app_context():
+            return fn(job)
+    return wrapped
+
+
+def _result_poll(path, *, running_key=None, label_done=None):
+    """A poll callable for jobs whose worker writes ``{"status": ...}`` to ``path``."""
+    def poll():
+        if not path.is_file():
+            return {"status": "queued"}
+        try:
+            data = json.loads(path.read_text())
+        except ValueError:
+            return {"status": "running"}
+        status = data.get("status") or "running"
+        state = {"status": "completed" if status == "completed" else "failed" if status == "failed" else "running" if status == "running" else "queued",
+                 "error": data.get("error")}
+        if data.get("total"):
+            state["progress"] = {"done": int(data.get("done") or 0), "total": int(data["total"])}
+        if status == "completed" and label_done:
+            state["result"] = label_done(data)
+        # A worker that died without writing a final status shows as failed once its process is gone.
+        if state["status"] in ("queued", "running") and running_key is not None:
+            process = PROCESSES.get(running_key)
+            if process is not None and process.poll() is not None:
+                state = {"status": "failed", "error": data.get("error") or f"worker exited with code {process.returncode}"}
+        return state
+    return poll
+
+
 def launch_backtest(config):
     """Write a job folder and start the worker; returns the job id. Raises OSError when the worker cannot start."""
     ROOT.mkdir(parents=True, exist_ok=True)
@@ -784,6 +827,10 @@ def launch_backtest(config):
     except OSError as error:
         write_json(folder / "result.json", {"status": "failed", "error": str(error)})
         raise
+    names = [f["name"] for f in config.get("factors", [])]
+    studio_jobs.track("backtest", f"回测 {' + '.join(names[:2])}{f' +{len(names) - 2}' if len(names) > 2 else ''}",
+                      _result_poll(folder / "result.json", running_key=job_id, label_done=lambda d: {"total_return": (d.get("metrics") or {}).get("total_return")}),
+                      market=config.get("market"), link={"page": "backtest", "id": job_id}, job_id=job_id)
     return job_id
 
 
@@ -833,6 +880,9 @@ def searches():
     except OSError as error:
         write_json(folder / "result.json", {"status": "failed", "error": str(error)})
         return jsonify({"error": str(error)}), 500
+    studio_jobs.track("search", f"组合搜索 {len(config['factors'])} 个候选",
+                      _result_poll(folder / "result.json", running_key=f"search:{job_id}", label_done=lambda d: {"recommended": (d.get("recommended") or {}).get("members")}),
+                      market=config.get("market"), link={"page": "search", "id": job_id}, job_id=f"search:{job_id}")
     return jsonify({"id": job_id}), 202
 
 
@@ -927,6 +977,8 @@ def backtest_diagnose(job_id):
     except OSError as error:
         write_json(folder / "diagnosis.json", {"status": "failed", "error": str(error)})
         return jsonify({"error": str(error)}), 500
+    studio_jobs.track("diagnose", f"拆开回测 {job_id[:8]}", _result_poll(folder / "diagnosis.json", running_key=f"{job_id}:diagnose"),
+                      market=json.loads((folder / "config.json").read_text()).get("market"), link={"page": "backtest", "id": job_id}, job_id=f"{job_id}:diagnose")
     return jsonify({"status": "queued"}), 202
 
 
@@ -1055,17 +1107,23 @@ def strategy_item(strategy_id):
 @studio.post("/strategies/<strategy_id>/update")
 def strategy_update(strategy_id):
     """更新到最新: recompute every member factor on the latest data, then backtest the strategy from its evidence
-    start (or the given start) to the last day of market data, and append the run to its history."""
+    start (or the given start) to the last day of market data, and append the run to its history. Runs as a
+    job; the response names it and the job's result carries backtest_id, refreshed, failures, start, end."""
     try:
         strategy = load_strategy(strategy_id)
     except (ValueError, FileNotFoundError):
         return jsonify({"error": "Strategy not found"}), 404
     body = request.get_json() or {}
-    refreshed, failures = [], []
-    if body.get("refresh", True):
-        for f in strategy["factors"]:
-            if f.get("kind", "factor") != "factor":
-                continue
+    existing = studio_jobs.find("strategy_update", id=strategy_id)
+    if existing:
+        return jsonify({"job": existing["id"]}), 202
+    members = [f for f in strategy["factors"] if f.get("kind", "factor") == "factor"] if body.get("refresh", True) else []
+    market = str((strategy.get("params") or {}).get("market") or "csi300")
+
+    def work(job):
+        refreshed, failures = [], []
+        for i, f in enumerate(members):
+            studio_jobs.update(job["id"], done=i, total=len(members) + 1, message=f"重算 {f['name']}")
             try:
                 original = Path(resolve_factor_paths(f["trace"], f["loop_id"], [{"name": f["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
                 code_path = original / "factor.py"
@@ -1078,24 +1136,25 @@ def strategy_update(strategy_id):
                 refreshed.append(f["name"])
             except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                 failures.append(f"{f['name']}: {error}")
-    try:
+        studio_jobs.update(job["id"], done=len(members), total=len(members) + 1, message="启动跟踪回测")
         end = str(body.get("end") or "")
         if not end:
-            calendar = (Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser() / "calendars" / "day.txt")
+            calendar = Path(studio_markets.universe(market)["provider_uri"]) / "calendars" / "day.txt"
             end = calendar.read_text().strip().splitlines()[-1]
         start = str(body.get("start") or (strategy.get("evidence") or {}).get("start") or "")
         if not start:
             raise ValueError("No start date: pass one or save the strategy with its evidence window")
         request_body = {"factors": strategy["factors"], "model": strategy["model"], **strategy["params"], "start": start, "end": end}
         config = prepare_backtest_config(request_body)
-        job_id = launch_backtest(config)
-    except (ValueError, TypeError, KeyError) as error:
-        return jsonify({"error": str(error), "refreshed": refreshed, "failures": failures}), 400
-    except OSError as error:
-        return jsonify({"error": str(error), "refreshed": refreshed, "failures": failures}), 500
-    strategy.setdefault("runs", []).append({"backtest_id": job_id, "kind": "update"})
-    save_strategy(strategy)
-    return jsonify({"backtest_id": job_id, "refreshed": refreshed, "failures": failures, "start": start, "end": end}), 202
+        backtest_id = launch_backtest(config)
+        current = load_strategy(strategy_id)
+        current.setdefault("runs", []).append({"backtest_id": backtest_id, "kind": "update"})
+        save_strategy(current)
+        return {"backtest_id": backtest_id, "refreshed": refreshed, "failures": failures, "start": start, "end": end}
+
+    job = studio_jobs.run("strategy_update", f"更新策略 {strategy.get('name') or strategy_id[:8]}", in_app(work), market=market,
+                          link={"page": "strategies", "id": strategy_id}, total=len(members) + 1)
+    return jsonify({"job": job["id"]}), 202
 
 
 def signal_export(strategy):
@@ -1340,3 +1399,67 @@ def trace_tail():
         kept.append(line[:240])
     return jsonify({"lines": kept[-max(1, min(lines, 60)):], "size": size,
                     "updated": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()})
+
+
+# ---- Jobs: one list of everything running in the background --------------------------------------------
+
+def _research_jobs(registry, root, region):
+    """Live research runs as jobs (progress: rounds started), so the unified list covers them too."""
+    out = []
+    for key, task in list(registry.items()):
+        if task is None or getattr(task, "process", None) is None or not task.is_alive():
+            continue
+        try:
+            trace_id = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            trace_id = key
+        market = run_market(trace_id)
+        if not in_region(market, region):
+            continue
+        summary = summarize_task(trace_id, task)
+        loop_n = (getattr(task, "kwargs", {}) or {}).get("loop_n")
+        out.append({"id": f"research:{trace_id}", "kind": "research", "label": f"研究 {trace_id.split('/')[-1]}", "status": "running",
+                    "progress": {"done": summary["rounds"], "total": loop_n} if loop_n else None,
+                    "message": "等你确认" if summary.get("waiting") else f"第 {summary['rounds'] or 1} 轮", "market": market,
+                    "link": {"page": "research", "id": trace_id}, "started": None, "finished": None, "error": None, "result": None})
+    return out
+
+
+def _sync_job():
+    state = studio_sync.status().get("sync") or {}
+    if not state.get("running"):
+        return None
+    progress = state.get("progress")
+    return {"id": "sync:cn", "kind": "sync", "label": "同步 A 股数据", "status": "running",
+            "progress": {"done": int(progress * 100), "total": 100} if progress is not None else None,
+            "message": state.get("phase") or "", "market": "csi300", "link": {"page": "sync"}, "started": state.get("started_at"),
+            "finished": None, "error": None, "result": None}
+
+
+def _build_job():
+    process = PROCESSES.get("build:us")
+    if process is None or process.poll() is not None:
+        return None
+    return {"id": "build:us", "kind": "build", "label": "重建美股数据", "status": "running", "progress": None, "message": "",
+            "market": "nasdaq100", "link": {"page": "build"}, "started": None, "finished": None, "error": None, "result": None}
+
+
+@studio.get("/jobs")
+def jobs():
+    """Everything running in the background for this workspace, plus what finished after ``?since=``."""
+    region = wanted_region()
+    since = request.args.get("since") or None
+    items = [j for j in studio_jobs.list_jobs(since=since) if in_region(j.get("market"), region)]
+    items += _research_jobs(current_app.config["RDAGENT_PROCESSES"], Path(current_app.config["LOG_FOLDER_PATH"]), region)
+    for extra in (_sync_job(), _build_job()):
+        if extra and in_region(extra["market"], region):
+            items.append(extra)
+    return jsonify({"items": items, "now": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+
+
+@studio.get("/jobs/<job_id>")
+def job_detail(job_id):
+    job = studio_jobs.get(job_id)
+    if job is None:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(job)

@@ -146,8 +146,22 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(studio_module.studio_llm, "_settings_path", trace_folder / "studio_data" / "llm.json")
     monkeypatch.setattr(studio_module.subprocess, "Popen", lambda *a, **k: type("P", (), {"poll": lambda self: None})())
     server.rdagent_processes.clear()
+    studio_module.studio_jobs.reset()
     _task_with_metric(trace_folder, "Finance Data Building/demo", workspace_root)
     return server.app.test_client()
+
+
+def wait_job(client, job_id: str, timeout: float = 5.0) -> dict:
+    """Poll /studio/jobs/<id> until the job finishes (tests run the work on a thread with fakes)."""
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/studio/jobs/{job_id}").get_json()
+        if job["status"] in ("completed", "failed"):
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} did not finish: {job}")
 
 
 @pytest.mark.offline
@@ -219,8 +233,12 @@ def test_refresh_replaces_the_signal_source(studio_client, tmp_path: Path, monke
     monkeypatch.setattr(studio_module, "run_refresh", fake_refresh)
     ref = {"trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5"}
     response = studio_client.post("/studio/factors/refresh", json=ref)
-    assert response.status_code == 200, response.get_json()
-    assert response.get_json()["end"] == "2026-09-11"
+    assert response.status_code == 202, response.get_json()
+    job = wait_job(studio_client, response.get_json()["job"])
+    assert job["status"] == "completed" and job["kind"] == "refresh" and job["result"]["end"] == "2026-09-11"
+    # Listed among the jobs, with its market and where it belongs.
+    listed = next(j for j in studio_client.get("/studio/jobs").get_json()["items"] if j["id"] == job["id"])
+    assert listed["link"]["name"] == "STR_5" and listed["market"] == "csi300"
 
     entry = next(f for f in studio_client.get("/studio/factors").get_json() if f["name"] == "STR_5")
     assert entry["refreshed"]["end"] == "2026-09-11"
@@ -401,7 +419,9 @@ def test_strategies_are_saved_listed_updated_and_deleted(studio_client, tmp_path
     (tmp_path / "ws" / "f0" / "factor.py").write_text("print(1)")
     updated = studio_client.post(f"/studio/strategies/{strategy['id']}/update", json={"end": "2025-12-31"})
     assert updated.status_code == 202, updated.get_json()
-    payload = updated.get_json()
+    job = wait_job(studio_client, updated.get_json()["job"])
+    assert job["status"] == "completed", job
+    payload = job["result"]
     assert payload["start"] == "2025-01-02" and payload["end"] == "2025-12-31" and payload["failures"] and not payload["refreshed"]
     detail = studio_client.get(f"/studio/strategies/{strategy['id']}").get_json()
     assert [r["kind"] for r in detail["run_details"]] == ["evidence", "update"]
@@ -452,7 +472,7 @@ def test_strategy_signal_exports_holdings_and_scores(studio_client, tmp_path: Pa
 def test_research_from_strategy_seeds_base_features(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "ws" / "f0" / "factor.py").write_text("print('STR_5')")
     monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
-    monkeypatch.setattr(server, "universe_env", lambda market: {"QLIB_FACTOR_MARKET": market})
+    monkeypatch.setattr(server, "universe_env", lambda market, build=True: {"QLIB_FACTOR_MARKET": market})
     started = []
     monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
     body = {"name": "回流测试", "factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}],
@@ -517,7 +537,7 @@ def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, mo
 @pytest.mark.offline
 def test_upload_passes_the_universe_to_the_run(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
-    monkeypatch.setattr(server, "universe_env", lambda market: {"QLIB_FACTOR_MARKET": market, "FACTOR_COSTEER_DATA_FOLDER": "/data/" + market})
+    monkeypatch.setattr(server, "universe_env", lambda market, build=True: {"QLIB_FACTOR_MARKET": market, "FACTOR_COSTEER_DATA_FOLDER": "/data/" + market})
     started = []
     monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
     response = studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "2", "all_duration": "1", "market": "csi1000"})
@@ -1430,7 +1450,7 @@ def test_confirm_policy_answers_requests_by_mode_and_timeout(studio_client, monk
 @pytest.mark.offline
 def test_upload_and_resume_carry_the_confirm_policy(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
-    monkeypatch.setattr(server, "universe_env", lambda market: {})
+    monkeypatch.setattr(server, "universe_env", lambda market, build=True: {})
     started = []
     monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
     response = studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "1", "all_duration": "1", "confirm_mode": "auto", "confirm_timeout": "0", "objective": "vol"})
