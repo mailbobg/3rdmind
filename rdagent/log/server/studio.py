@@ -409,6 +409,7 @@ def environment():
     dates = calendar.read_text().splitlines() if calendar.is_file() else []
     llm = studio_llm.resolve()
     return jsonify({"chat_model": llm["model"] if llm else os.environ.get("LITELLM_CHAT_MODEL", os.environ.get("CHAT_MODEL", "")),
+                    "embedding_model": studio_llm.effective_embedding_model(),
                     "provider_uri": str(provider), "data_ready": bool(dates),
                     "start": dates[0] if dates else None, "end": dates[-1] if dates else None,
                     "python": os.environ.get("STUDIO_PYTHON", sys.executable)})
@@ -1331,6 +1332,20 @@ def llm_test():
 @studio.post("/llm/models")
 def llm_models():
     result = studio_llm.list_models(request.get_json() or {})
+    return jsonify(result), (200 if result.get("ok") else 502)
+
+
+@studio.route("/llm/embedding", methods=["PUT"])
+def llm_embedding_save():
+    try:
+        return jsonify(studio_llm.save_embedding(request.get_json() or {}))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.post("/llm/embedding/test")
+def llm_embedding_test():
+    result = studio_llm.test_embedding(request.get_json() or {})
     return jsonify(result), (200 if result.get("ok") else 502)
 
 

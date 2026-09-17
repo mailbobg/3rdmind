@@ -19,6 +19,8 @@ import { t } from "../i18n";
 
 interface Mode {
   name: string; desc: string; value: string; loops: boolean; duration: boolean; objective: boolean; input?: "reports" | "paper";
+  /** Uses RD-Agent's knowledge graph, whose nodes are embedded on insert: needs an embedding model. */
+  embeds?: boolean;
   /** What one round does, in order, and what the run leaves behind: shown in the results column while the form is open. */
   steps: string[]; output: string;
 }
@@ -27,16 +29,16 @@ const MODES: Mode[] = [
   { name: t("因子研发"), desc: t("假设 → 因子实现 → Qlib 评估"), value: "Finance Data Building", loops: true, duration: true, objective: true,
     steps: [t("Agent 根据研究方向和前几轮的反馈提出一个假设，并拆成几个因子任务"), t("为每个因子写 factor.py，在 daily_pv.h5 上计算出 result.h5，通不过检查就自己改"), t("把新因子和基础特征一起交给 Qlib：LightGBM 训练，TopkDropout 回测"), t("对照上一轮的指标写反馈，决定接受还是拒绝这个假设，进入下一轮")],
     output: t("每一轮的因子都进因子库，可以挑进组合篮回测；训练出的模型预测（pred.pkl）也能直接当信号回测。") },
-  { name: t("模型研发"), desc: t("模型实现与迭代验证"), value: "Finance Model Implementation", loops: true, duration: true, objective: true,
+  { name: t("模型研发"), desc: t("模型实现与迭代验证"), value: "Finance Model Implementation", loops: true, duration: true, objective: true, embeds: true,
     steps: [t("Agent 提出一个模型结构假设（网络、损失、训练方式）"), t("写出 PyTorch 模型代码并做形状与训练检查"), t("在 Qlib 的固定特征集上训练、回测"), t("对照上一轮写反馈，决定接受还是拒绝，进入下一轮")],
     output: t("每一轮的模型预测（pred.pkl）可以在组合回测里当信号使用。") },
-  { name: t("因子 × 模型联合"), desc: t("RD-Agent 原生联合研究循环"), value: "Finance Whole Pipeline", loops: true, duration: true, objective: true,
+  { name: t("因子 × 模型联合"), desc: t("RD-Agent 原生联合研究循环"), value: "Finance Whole Pipeline", loops: true, duration: true, objective: true, embeds: true,
     steps: [t("Agent 每轮自己决定这一轮改因子还是改模型"), t("按选择走因子研发或模型研发的实现与评估流程"), t("反馈同时看因子贡献和模型效果，进入下一轮")],
     output: t("因子进因子库，模型预测可当信号，两者都能回测。") },
   { name: t("研报因子提取"), desc: t("上传研报 PDF → 提取因子 → 实现与 Qlib 评估"), value: "Finance Data Building (Reports)", loops: false, duration: true, objective: false, input: "reports",
     steps: [t("读取上传的研报，抽出其中定义的因子（名称、公式、变量）"), t("逐个实现成 factor.py 并计算 result.h5"), t("交给 Qlib 评估")],
     output: t("抽出的因子进因子库。这个场景不迭代假设，跑完一遍就结束。") },
-  { name: t("论文模型实现"), desc: t("上传论文 PDF 或给链接 → 提取模型结构 → 实现"), value: "General Model Implementation", loops: false, duration: false, objective: false, input: "paper",
+  { name: t("论文模型实现"), desc: t("上传论文 PDF 或给链接 → 提取模型结构 → 实现"), value: "General Model Implementation", loops: false, duration: false, objective: false, input: "paper", embeds: true,
     steps: [t("读取论文，抽出模型结构与训练细节"), t("实现成可运行的模型代码并做检查")],
     output: t("产出是模型代码，没有 Qlib 评估，也不进因子库。") },
 ];
@@ -261,6 +263,7 @@ export function ResearchPage() {
           <Section title={t("会用到的环境")} note={env?.data_ready ? t("就绪") : t("未就绪")}>
             <MetricGrid columns={2} items={[
               { label: t("研究模型"), value: env?.chat_model?.replace("deepseek/", "") || t("未配置") },
+              ...(mode.embeds ? [{ label: t("嵌入模型"), value: env?.embedding_model || t("未配置") }] : []),
               { label: t("Qlib 数据"), value: env ? `${env.start || "—"} → ${env.end || "—"}` : t("后端未连接") },
               ...(form.scenario.startsWith("Finance") ? [{ label: t("股票池"), value: t("{0} · 基准 {1}", [universeLabel(form.market), chosenUniverse?.benchmark || "SH000300"]) }] : []),
               ...(mode.loops ? [{ label: t("轮数"), value: String(form.loops) }, { label: t("确认"), value: t("{0}{1}", [{ hypothesis: t("只确认假设"), all: t("全部确认"), auto: t("全自动") }[form.confirmMode] || form.confirmMode, form.confirmMode !== "auto" && form.confirmTimeout ? t(" · {0} 分钟无人则自动继续", [form.confirmTimeout]) : form.confirmMode !== "auto" ? t(" · 一直等") : ""]) }] : []),
@@ -338,6 +341,7 @@ export function ResearchPage() {
               </Field>
             )}
           </FieldGrid>
+          {mode.embeds && env && !env.embedding_model && <div style={{ marginTop: 12 }}><Note tone="warn">{t("这个场景要用 RD-Agent 的知识图谱，每条知识都要算向量嵌入，而当前没有可用的嵌入模型（DeepSeek 没有嵌入接口）。请先在左栏「模型设置」底部配置嵌入模型，否则运行会在第一步失败。")}</Note></div>}
           {chosenUniverse && !chosenUniverse.ready && <div style={{ marginTop: 12 }}><Note tone="info">{t("第一次在{0}上研究要先从 Qlib 导出这个池子的日线数据给因子代码用，中证1000 约半分钟，全市场约一两分钟；点开始后请等待，之后不用再等。", [universeLabel(form.market)])}</Note></div>}
           <div className="mm-row" style={{ marginTop: 16 }}>
             <Btn kind="primary" disabled={trace.busy} onClick={start}>{trace.busy ? t("启动中…") : t("开始研究")}</Btn>

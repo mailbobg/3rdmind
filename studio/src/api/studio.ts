@@ -16,7 +16,7 @@ export interface TraceEvent {
   auto?: string;
 }
 export interface Environment {
-  chat_model: string; provider_uri: string; data_ready: boolean;
+  chat_model: string; embedding_model: string; provider_uri: string; data_ready: boolean;
   start: string | null; end: string | null; python: string;
 }
 export interface Round { loop_id: number; factors: string[]; metrics: Record<string, number>; prediction: boolean }
@@ -270,13 +270,19 @@ export const saveDataSyncSettings = (values: { auto?: boolean; hour?: number }) 
     .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as SyncStatus["settings"]; });
 export const instrumentNames = () => api<{ source: string | null; names: Record<string, { name: string; industry?: string }> }>(scoped("/studio/instruments/names"));
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});
-export interface LlmProvider { id: string; label: string; prefix: string; key_env: string; base_env: string; models: string[]; needs_base?: boolean; site: string }
+export interface LlmProvider { id: string; label: string; prefix: string; key_env: string; base_env: string; models: string[]; embeddings: string[]; needs_base?: boolean; no_key?: boolean; site: string }
 export interface LlmCurrent {
   provider: string | null; model: string; base_url: string; key_hint: string; has_key: boolean; key_from_env?: boolean; max_retry: number;
   source: "studio" | "env"; updated: string | null; saved_keys: Record<string, string>;
 }
-export interface LlmStatus { current: LlmCurrent; providers: LlmProvider[]; path: string | null }
+/** The embedding record (RD-Agent's knowledge graph): provider null when nothing usable is configured. */
+export interface LlmEmbedding {
+  provider: string | null; model: string; base_url: string; key_hint: string; has_key: boolean; key_from_env?: boolean;
+  source: "studio" | "env"; updated: string | null;
+}
+export interface LlmStatus { current: LlmCurrent; embedding: LlmEmbedding; providers: LlmProvider[]; path: string | null }
 export interface LlmForm { provider: string; model: string; api_key?: string; base_url?: string; max_retry?: number; clear_key?: boolean }
+export interface EmbeddingForm { provider: string; model: string; api_key?: string; base_url?: string; clear_key?: boolean }
 export const llmSettings = () => api<LlmStatus>("/studio/llm");
 export const saveLlmSettings = (values: LlmForm) =>
   fetch("/studio/llm", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
@@ -284,9 +290,15 @@ export const saveLlmSettings = (values: LlmForm) =>
 export const testLlmSettings = (values: LlmForm) =>
   fetch("/studio/llm/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
     .then(async (r) => (await r.json()) as { ok: boolean; reply?: string; error?: string; seconds?: number; model?: string });
-export const listLlmModels = (values: Pick<LlmForm, "provider" | "api_key" | "base_url">) =>
+export const listLlmModels = (values: Pick<LlmForm, "provider" | "api_key" | "base_url"> & { kind?: "chat" | "embedding" }) =>
   fetch("/studio/llm/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
     .then(async (r) => (await r.json()) as { ok: boolean; models?: string[]; error?: string; source?: string });
+export const saveEmbeddingSettings = (values: EmbeddingForm) =>
+  fetch("/studio/llm/embedding", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
+    .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as LlmStatus; });
+export const testEmbeddingSettings = (values: EmbeddingForm) =>
+  fetch("/studio/llm/embedding/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
+    .then(async (r) => (await r.json()) as { ok: boolean; dims?: number; error?: string; seconds?: number; model?: string });
 export interface TraceTail { lines: string[]; updated: string | null; size: number }
 export const traceTail = (trace: string, lines = 12) => api<TraceTail>(`/studio/trace-tail?${new URLSearchParams({ trace, lines: String(lines) })}`);
 /** A live run blocked on the user: what it waits for and since when. */

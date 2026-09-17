@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import * as studio from "../api/studio";
-import type { LlmForm, LlmStatus } from "../api/studio";
+import type { EmbeddingForm, LlmForm, LlmProvider, LlmStatus } from "../api/studio";
 import { errorText } from "../hooks/studioContext";
 import { Btn, Field, SelectInput, TextInput } from "./minimal";
 import { t } from "../i18n";
@@ -161,11 +161,112 @@ export function LlmSettings({ onSaved }: { onSaved: () => void }) {
               <p className="m-0 border-t border-border pt-3 text-[11px] leading-relaxed text-muted">
                 {t("保存后对之后新启动的研究（含“继续研究”）生效，正在跑的不受影响；Key 只写进本机的 traces/studio_data/llm.json（权限 600），不会回传到页面。每个提供商的 Key 各自保存，切换提供商时可以留空沿用。回测与组合搜索不用大模型。")}
               </p>
+              {status && <EmbeddingSection status={status} chatProvider={current?.provider || ""} onStatus={(s) => { setStatus(s); onSaved(); }} />}
             </div>
           </div>
         </>,
         document.body,
       )}
+    </div>
+  );
+}
+
+const EMBED_CUSTOM = "__custom__";
+
+/**
+ * The embedding model, a record of its own: RD-Agent's knowledge graph embeds every node it stores, and the
+ * model-research scenarios do that from their first step. Chat-only providers cannot be picked here; a
+ * provider already used for chat reuses its key.
+ */
+function EmbeddingSection({ status, chatProvider, onStatus }: { status: LlmStatus; chatProvider: string; onStatus: (s: LlmStatus) => void }) {
+  const rec = status.embedding;
+  const providers = status.providers.filter((p) => p.embeddings.length > 0 || p.id === "openai_compatible");
+  const [form, setForm] = useState<EmbeddingForm>({ provider: rec.provider || "", model: rec.model, api_key: "", base_url: rec.base_url });
+  const [custom, setCustom] = useState(false);
+  const [remote, setRemote] = useState<Record<string, string[]>>({});
+  const [busy, setBusy] = useState<"" | "save" | "test" | "list">("");
+  const [message, setMessage] = useState<{ tone: "ok" | "bad" | "info"; text: string } | null>(null);
+  useEffect(() => { setForm({ provider: rec.provider || "", model: rec.model, api_key: "", base_url: rec.base_url }); }, [rec.provider, rec.model, rec.base_url]);
+
+  const spec: LlmProvider | undefined = providers.find((p) => p.id === form.provider);
+  const models = (form.provider && remote[form.provider]) || spec?.embeddings || [];
+  const live = !!(form.provider && remote[form.provider]);
+  const storedHint = form.provider ? (form.provider === rec.provider ? rec.key_hint : status.current.saved_keys[form.provider] || (form.provider === chatProvider ? status.current.key_hint : "")) : "";
+  const keyKnown = !!spec?.no_key || !!storedHint;
+  const canSubmit = !form.provider || (!!form.model.trim() && (!spec?.needs_base || !!form.base_url?.trim()) && (keyKnown || !!form.api_key?.trim()));
+
+  const pick = (id: string) => {
+    const p = providers.find((x) => x.id === id);
+    const known = remote[id] || p?.embeddings || [];
+    setForm({ provider: id, model: known.includes(form.model) ? form.model : known[0] ?? "", api_key: "", base_url: id === rec.provider ? rec.base_url : "" });
+    setCustom(known.length === 0); setMessage(null);
+  };
+  const fetchModels = async (quiet: boolean) => {
+    setBusy("list");
+    try {
+      const r = await studio.listLlmModels({ provider: form.provider, api_key: form.api_key, base_url: form.base_url, kind: "embedding" });
+      if (r.ok && r.models) { setRemote((m) => ({ ...m, [form.provider]: r.models! })); if (!quiet) setMessage({ tone: "info", text: t("已从 {0} 拉到 {1} 个模型", [r.source, r.models.length]) }); }
+      else if (!quiet) setMessage({ tone: "bad", text: t("拉取模型列表失败：{0}", [r.error]) });
+    } catch (e) { if (!quiet) setMessage({ tone: "bad", text: errorText(e) }); } finally { setBusy(""); }
+  };
+  useEffect(() => {
+    if (!form.provider || remote[form.provider] || (spec?.needs_base && !form.base_url?.trim()) || (!keyKnown && !form.api_key?.trim())) return;
+    fetchModels(true);
+  }, [form.provider, keyKnown]); // eslint-disable-line react-hooks/exhaustive-deps
+  const save = async () => {
+    setBusy("save"); setMessage(null);
+    try { onStatus(await studio.saveEmbeddingSettings(form)); setMessage({ tone: "ok", text: form.provider ? t("已保存嵌入模型设置。") : t("已清除嵌入模型设置。") }); }
+    catch (e) { setMessage({ tone: "bad", text: errorText(e) }); } finally { setBusy(""); }
+  };
+  const test = async () => {
+    setBusy("test"); setMessage({ tone: "info", text: t("正在调用嵌入模型…") });
+    try {
+      const r = await studio.testEmbeddingSettings(form);
+      setMessage(r.ok ? { tone: "ok", text: t("嵌入正常：{0} 在 {1}s 内返回 {2} 维向量", [r.model, r.seconds, r.dims]) } : { tone: "bad", text: t("嵌入失败：{0}", [r.error]) });
+    } catch (e) { setMessage({ tone: "bad", text: errorText(e) }); } finally { setBusy(""); }
+  };
+  const state = !rec.provider ? t("未配置") : !rec.has_key ? t("缺 API Key") : `${rec.provider === "openai_compatible" ? "" : (status.providers.find((p) => p.id === rec.provider)?.label || rec.provider) + " · "}${rec.model}`;
+
+  return (
+    <div className="flex flex-col gap-3 border-t border-border pt-3">
+      <div>
+        <div className="text-[13px] font-semibold">{t("嵌入模型")} <span className={`ml-1 text-[11px] font-normal ${rec.provider && rec.has_key ? "text-muted" : "text-warning"}`}>{state}</span></div>
+        <div className="text-[11px] text-muted">{t("模型研发、因子 × 模型联合和论文模型实现会用 RD-Agent 的知识图谱，图谱里每条知识都要算一次向量嵌入；因子研发不用。DeepSeek、Anthropic、Moonshot 没有嵌入接口，需要另配一家，或用本机的 Ollama。")}</div>
+      </div>
+      <div className="grid grid-cols-2 gap-3 [&>.mm-field--wide]:col-span-2">
+        <Field label={t("提供商")}>
+          <SelectInput value={form.provider} onChange={pick} options={[{ value: "", label: t("不配置") }, ...providers.map((p) => ({ value: p.id, label: p.label, hint: p.id === chatProvider ? t("沿用聊天模型的 Key") : undefined }))]} placeholder={t("选择提供商")} ariaLabel={t("嵌入提供商")} />
+        </Field>
+        {form.provider && (
+          <Field label={<>{t("模型")}{live ? <span className="text-success"> {t("· 实时列表")}</span> : models.length ? <span> {t("· 文档默认")}</span> : null}</>} wide={custom && models.length > 0}>
+            {models.length > 0 && !custom
+              ? <SelectInput value={models.includes(form.model) ? form.model : ""} onChange={(v) => { if (v === EMBED_CUSTOM) { setCustom(true); setForm({ ...form, model: "" }); } else { setCustom(false); setForm({ ...form, model: v }); } }} options={[...models.map((m) => ({ value: m, label: m })), { value: EMBED_CUSTOM, label: t("其他模型…") }]} placeholder={form.model || t("选择模型")} ariaLabel={t("嵌入模型")} />
+              : <div className="flex items-center gap-2">
+                  <TextInput className="flex-1" value={form.model} onChange={(v) => setForm({ ...form, model: v })} placeholder={spec?.id === "openai_compatible" ? t("接口上的模型名，如 BAAI/bge-m3") : t("模型名")} ariaLabel={t("嵌入模型名")} />
+                  {models.length > 0 && <Btn kind="text" onClick={() => { setCustom(false); setForm({ ...form, model: models[0] }); }}>{t("列表")}</Btn>}
+                </div>}
+          </Field>
+        )}
+        {form.provider && !spec?.no_key && (
+          <Field label="API Key" wide hint={spec ? t("保存为环境变量 {0}", [spec.key_env]) : undefined}>
+            <input type="password" className="mm-control w-full" value={form.api_key ?? ""} autoComplete="off" spellCheck={false} aria-label={t("嵌入 API Key")}
+              placeholder={storedHint ? t("{0} {1}，留空则沿用", [form.provider === chatProvider ? t("聊天模型的 Key") : t("已保存"), storedHint]) : t("粘贴 API Key")}
+              onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
+          </Field>
+        )}
+        {form.provider && (spec?.needs_base || spec?.no_key || spec?.id === "ollama") && (
+          <Field label={spec?.needs_base ? "Base URL" : t("Base URL（可选）")} wide hint={spec ? t("保存为环境变量 {0}", [spec.base_env]) : undefined}>
+            <TextInput value={form.base_url ?? ""} onChange={(v) => setForm({ ...form, base_url: v })} placeholder={spec?.needs_base ? "https://api.siliconflow.cn/v1" : "http://localhost:11434"} ariaLabel={t("嵌入 Base URL")} />
+          </Field>
+        )}
+      </div>
+      {message && <div className={message.tone === "bad" ? "text-danger" : message.tone === "ok" ? "text-success" : "text-muted"}>{message.text}</div>}
+      <div className="flex flex-wrap items-center gap-2">
+        <Btn kind="primary" disabled={!canSubmit || !!busy} onClick={save}>{busy === "save" ? t("保存中…") : form.provider ? t("保存嵌入设置") : t("清除嵌入设置")}</Btn>
+        {form.provider && <Btn disabled={!canSubmit || !!busy} onClick={test}>{busy === "test" ? t("测试中…") : t("测试嵌入")}</Btn>}
+        {form.provider && <Btn kind="text" disabled={!!busy || (!keyKnown && !form.api_key?.trim()) || (!!spec?.needs_base && !form.base_url?.trim())} onClick={() => fetchModels(false)}>{busy === "list" ? t("拉取中…") : live ? t("重新拉取模型列表") : t("拉取模型列表")}</Btn>}
+        {spec?.site && <a className="mm-link ml-auto" href={spec.site} target="_blank" rel="noreferrer">{spec.id === "ollama" ? t("安装 Ollama ↗") : t("去 {0} 拿 Key ↗", [spec.label])}</a>}
+      </div>
     </div>
   );
 }

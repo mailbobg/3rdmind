@@ -1218,6 +1218,81 @@ def test_llm_settings_save_env_and_test(studio_client, tmp_path: Path, monkeypat
 
 
 @pytest.mark.offline
+def test_embedding_settings_share_keys_and_reach_the_run(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import sys
+    import types
+    from rdagent.log.server import studio_llm
+
+    monkeypatch.setattr(studio_llm, "_settings_path", tmp_path / "llm.json")
+    for var in ("OPENAI_API_KEY", "EMBEDDING_MODEL", "LITELLM_EMBEDDING_MODEL", "DASHSCOPE_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    # DeepSeek chat saved; nothing embeds yet: the UI sees an unconfigured embedding and the run gets no model.
+    studio_client.put("/studio/llm", json={"provider": "deepseek", "model": "deepseek-flash", "api_key": "sk-ds-12345678"})
+    status = studio_client.get("/studio/llm").get_json()
+    assert status["embedding"]["provider"] is None and not status["embedding"]["has_key"]
+    assert [p["id"] for p in status["providers"] if p["embeddings"]] == ["openai", "gemini", "dashscope", "ollama"]
+    assert studio_client.get("/studio/environment").get_json()["embedding_model"] == ""
+    assert "EMBEDDING_MODEL" not in studio_llm.env()
+    # Chat-only providers are refused; a provider with embeddings is saved with its own key.
+    assert "没有嵌入接口" in studio_client.put("/studio/llm/embedding", json={"provider": "deepseek", "model": "x"}).get_json()["error"]
+    saved = studio_client.put("/studio/llm/embedding", json={"provider": "dashscope", "model": "text-embedding-v4", "api_key": "sk-ali-abcdefgh"}).get_json()
+    assert saved["embedding"] == {**saved["embedding"], "provider": "dashscope", "model": "text-embedding-v4", "key_hint": "…efgh", "has_key": True, "source": "studio"}
+    assert saved["current"]["provider"] == "deepseek" and saved["current"]["saved_keys"] == {"deepseek": "…5678", "dashscope": "…efgh"}
+    env = studio_llm.env()
+    assert env["EMBEDDING_MODEL"] == env["LITELLM_EMBEDDING_MODEL"] == "dashscope/text-embedding-v4"
+    assert env["DASHSCOPE_API_KEY"] == "sk-ali-abcdefgh" and env["DEEPSEEK_API_KEY"] == "sk-ds-12345678"
+    assert studio_client.get("/studio/environment").get_json()["embedding_model"] == "dashscope/text-embedding-v4"
+    # Switching chat to OpenAI reuses the OpenAI key for embeddings without a second entry.
+    studio_client.put("/studio/llm", json={"provider": "openai", "model": "gpt-6-astra", "api_key": "sk-oa-11112222"})
+    e = studio_client.put("/studio/llm/embedding", json={"provider": "openai", "model": "text-embedding-3-small"}).get_json()["embedding"]
+    assert e["has_key"] and e["key_hint"] == "…2222"
+    # A compatible endpoint for embeddings while chat is OpenAI would fight over OPENAI_API_BASE: refused.
+    clash = studio_client.put("/studio/llm/embedding", json={"provider": "openai_compatible", "model": "BAAI/bge-m3", "base_url": "https://api.siliconflow.cn/v1", "api_key": "sf"})
+    assert clash.status_code == 400 and "OPENAI_API_KEY" in clash.get_json()["error"]
+    # Ollama needs no key; the model gets the provider prefix even when it carries a slash of its own.
+    e = studio_client.put("/studio/llm/embedding", json={"provider": "ollama", "model": "nomic-embed-text"}).get_json()["embedding"]
+    assert e["has_key"] and e["key_hint"] == ""
+    assert studio_llm.env()["EMBEDDING_MODEL"] == "ollama/nomic-embed-text"
+    studio_client.put("/studio/llm", json={"provider": "openai_compatible", "model": "qwen-plus", "base_url": "https://api.siliconflow.cn/v1", "api_key": "sf-1234567890"})
+    e = studio_client.put("/studio/llm/embedding", json={"provider": "openai_compatible", "model": "BAAI/bge-m3", "base_url": "https://api.siliconflow.cn/v1"}).get_json()["embedding"]
+    assert e["has_key"] and studio_llm.env()["EMBEDDING_MODEL"] == "openai/BAAI/bge-m3"
+    # The embedding test calls litellm.embedding with the form's key and reports the vector size.
+    calls = []
+
+    def fake_embedding(**kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(data=[{"embedding": [0.1, 0.2, 0.3]}])
+
+    monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(embedding=fake_embedding))
+    result = studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001", "api_key": "g1"}).get_json()
+    assert result["ok"] and result["dims"] == 3 and result["model"] == "gemini/gemini-embedding-001" and calls[0]["api_key"] == "g1"
+    assert studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001"}).status_code == 502
+    # Clearing the record removes it and leaves the keys alone.
+    cleared = studio_client.put("/studio/llm/embedding", json={"provider": ""}).get_json()
+    assert cleared["embedding"]["provider"] is None and "dashscope" in cleared["current"]["saved_keys"]
+    # Listing embedding models keeps the embedding ids (and, for Gemini, the embedContent models).
+    class FakeResponse(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=20):
+        if "googleapis" in req.full_url:
+            body = {"models": [{"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                               {"name": "models/gemini-embedding-001", "supportedGenerationMethods": ["embedContent"]}]}
+        elif "11434" in req.full_url:
+            body = {"models": [{"name": "nomic-embed-text:latest"}, {"name": "qwen3:8b"}]}
+        else:
+            body = {"data": [{"id": "gpt-6-astra"}, {"id": "text-embedding-3-large"}, {"id": "text-embedding-3-small"}]}
+        return FakeResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr(studio_llm.urllib.request, "urlopen", fake_urlopen)
+    assert studio_client.post("/studio/llm/models", json={"provider": "openai", "api_key": "k", "kind": "embedding"}).get_json()["models"] == ["text-embedding-3-small", "text-embedding-3-large"]
+    assert studio_client.post("/studio/llm/models", json={"provider": "gemini", "api_key": "g", "kind": "embedding"}).get_json()["models"] == ["gemini-embedding-001"]
+    assert studio_client.post("/studio/llm/models", json={"provider": "ollama", "kind": "embedding"}).get_json()["models"] == ["nomic-embed-text:latest"]
+
+
+@pytest.mark.offline
 def test_llm_model_listing_filters_chat_models(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import io
     from rdagent.log.server import studio_llm
