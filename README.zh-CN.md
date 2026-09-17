@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.png">
-    <img src="docs/images/logo-light.png" alt="3rdmind" width="420">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/3rdmind-logo-dark.png">
+    <img src="docs/images/3rdmind-logo-light.png" alt="3rdmind" width="420">
   </picture>
 </p>
 
