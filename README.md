@@ -151,6 +151,14 @@ The agent owns the inner loop; the studio owns everything outside it. Each `conf
 - About 1 GB of disk for the A-share Qlib snapshot.
 - An API key for one of the supported LLM providers. Research runs call the model many times per round; a fast, inexpensive model such as DeepSeek's is a reasonable default.
 - Optional: a checkout of [microsoft/qlib](https://github.com/microsoft/qlib) placed next to this repository. The worker prefers it over the installed package, and the US data build uses its `scripts/dump_bin.py`.
+- For model research (model, factor × model, paper scenarios): PyTorch (`pip install torch`) and an embedding model (see [Configuration](#configuration)). On macOS the pip wheels of PyTorch and LightGBM each bring their own OpenMP runtime and crash Qlib's training when both are loaded; point PyTorch at the Homebrew one so a single runtime is used:
+
+  ```bash
+  brew install libomp
+  cd .venv/lib/python3.*/site-packages/torch/lib && mv libomp.dylib libomp.dylib.bundled && ln -s /opt/homebrew/opt/libomp/lib/libomp.dylib libomp.dylib
+  ```
+
+  Reinstalling PyTorch restores the bundled copy; repeat the link afterwards.
 
 ### Install
 
@@ -215,6 +223,9 @@ Open <http://127.0.0.1:19899/app/>. Then, in the studio:
 | `STUDIO_PORT` | `19899` | Backend port; the front end is served at `/app/`. |
 | `UI_LOAD_LEGACY_PICKLE_TRACES` | unset | `true` loads finished experiments from the trace folder at start-up. |
 | `GITHUB_TOKEN` / `GH_TOKEN` | unset | Raises the GitHub API rate limit for the data-sync release check. |
+| `QLIB_{FACTOR,MODEL,QUANT}_N_JOBS` | `20` (`0` on macOS runs started by the studio) | DataLoader worker processes of Qlib's PyTorch models; forked workers crash on macOS. |
+
+The embedding model for RD-Agent's knowledge graph is set in the same panel as the chat model (LLM in the rail, bottom section): OpenAI, Gemini, DashScope, any OpenAI-compatible endpoint (SiliconFlow's `BAAI/bge-m3` is free) or a local Ollama. It reaches runs as `EMBEDDING_MODEL`; chat-only providers such as DeepSeek cannot be used for it.
 
 Studio state is written under the RD-Agent trace folder: `studio_backtests/<id>/`, `studio_searches/`, `studio_strategies/`, `studio_refresh/`, and `studio_data/` (LLM settings, sync settings, per-universe factor input data, instrument names). LLM keys are stored with mode 600 and are never echoed back beyond their last four characters.
 

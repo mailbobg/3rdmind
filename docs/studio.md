@@ -153,6 +153,16 @@ normalize_data --region US` and `scripts/dump_bin.py dump_all` produce the binar
 delisted or acquired are no longer on Yahoo (74 of 274 names), so the history carries survivorship bias
 before roughly 2020; the current 101 members are complete. There is no automatic update for this data yet.
 
+## Model research on macOS
+
+The model, factor × model and paper scenarios need PyTorch and an embedding model (the knowledge graph embeds
+every node; DeepSeek has no embeddings endpoint, so the LLM panel's embedding section points at another
+provider or a local Ollama). Two things bite on macOS: Qlib's PyTorch models fork DataLoader workers
+(`n_jobs: 20` in the templates), which crash there, so the server sets `QLIB_*_N_JOBS=0` for runs it starts;
+and the pip wheels of PyTorch and LightGBM each ship an OpenMP runtime, and `qrun` loads both, which
+segfaults at the first training batch. Replace `torch/lib/libomp.dylib` in the virtualenv with a symlink to
+Homebrew's `libomp` so one runtime serves both (see the README); reinstalling PyTorch undoes it.
+
 ## Qlib environment
 
 The default daily data directory is `~/.qlib/qlib_data/cn_data`. `QLIB_PROVIDER_URI` must be set before starting the

@@ -151,6 +151,14 @@ Agent 负责内环，工作台负责内环之外的一切。每个"确认?"由�
 - 约 1 GB 磁盘空间存放 A 股 Qlib 快照。
 - 一个受支持的 LLM 服务商的 API key。研究运行每轮会调用模型很多次，DeepSeek 这类快而便宜的模型是合理的默认选择。
 - 可选：把 [microsoft/qlib](https://github.com/microsoft/qlib) 的源码检出放在本仓库旁边。worker 会优先使用它而不是已安装的包，美股数据构建也用到它的 `scripts/dump_bin.py`。
+- 模型研发类场景（模型研发、因子 × 模型联合、论文模型实现）另需 PyTorch（`pip install torch`）和一个嵌入模型（见[配置](#配置)）。macOS 上 pip 装的 PyTorch 和 LightGBM 各自带一份 OpenMP 运行时，两份同时加载会让 Qlib 训练段错误；把 PyTorch 指向 Homebrew 那份，整个进程只用一份：
+
+  ```bash
+  brew install libomp
+  cd .venv/lib/python3.*/site-packages/torch/lib && mv libomp.dylib libomp.dylib.bundled && ln -s /opt/homebrew/opt/libomp/lib/libomp.dylib libomp.dylib
+  ```
+
+  重装 PyTorch 会把自带的那份放回来，之后再做一次软链接。
 
 ### 安装
 
@@ -215,6 +223,9 @@ STUDIO_ENV_FILE=git_ignore_folder/studio.env UI_LOAD_LEGACY_PICKLE_TRACES=true s
 | `STUDIO_PORT` | `19899` | 后端端口；前端在 `/app/` 下。 |
 | `UI_LOAD_LEGACY_PICKLE_TRACES` | 未设置 | `true` 时启动即从 trace 目录加载已结束的实验。 |
 | `GITHUB_TOKEN` / `GH_TOKEN` | 未设置 | 提高数据同步检查 release 时的 GitHub API 限额。 |
+| `QLIB_{FACTOR,MODEL,QUANT}_N_JOBS` | `20`（工作台在 macOS 上启动的运行为 `0`） | Qlib PyTorch 模型的 DataLoader 子进程数；macOS 上 fork 的子进程会崩。 |
+
+RD-Agent 知识图谱用的嵌入模型和聊天模型在同一个面板里设置（左栏"模型设置"底部）：OpenAI、Gemini、阿里云百炼、任何 OpenAI 兼容接口（硅基流动的 `BAAI/bge-m3` 免费）或本机 Ollama。它以 `EMBEDDING_MODEL` 传给研究进程；DeepSeek 这类只有聊天接口的服务商不能用在这里。
 
 工作台的状态写在 RD-Agent 的 trace 目录下：`studio_backtests/<id>/`、`studio_searches/`、`studio_strategies/`、`studio_refresh/` 和 `studio_data/`（模型设置、同步设置、各股票池的因子输入数据、股票名称）。LLM 密钥以 600 权限保存，回显时只给最后四位。
 
