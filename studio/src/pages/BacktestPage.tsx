@@ -12,7 +12,7 @@ import { BacktestResultView } from "../components/BacktestResultView";
 import { SearchResultView } from "../components/SearchResultView";
 import { useSearches } from "../hooks/useSearches";
 import { shortTime } from "../hooks/experiments";
-import { DUPLICATE_CORR, pickByCorrelation, rankCandidates } from "../hooks/autoPick";
+import { pickByCorrelation, rankCandidates } from "../hooks/autoPick";
 import type { SearchObjective } from "../api/studio";
 import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { Hint } from "../components/widgets";
@@ -66,9 +66,63 @@ export function BacktestPage() {
   useEffect(() => { searches.load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (tab === "search" && searches.jobs.length && !searches.selectedId) searches.select(searches.jobs[0].id); }, [tab, searches.jobs]); // eslint-disable-line react-hooks/exhaustive-deps
   const candidates = basket.items.filter((f) => (f.kind || "factor") === "factor");
-  const startSearch = async () => {
-    const accepted = await searches.run({ factors: candidates.map((f) => ({ ...f, weight: Number(f.weight) })), model: { method: "rank" }, ...params, search: { objective } });
-    if (accepted) layout.openResults();
+  // 智能搜索，一步走完：先展示不花钱的预筛（单因子指标 + 两两相关），勾选确认后再跑回测。
+  interface PreviewRow { name: string; trace: string; loop_id: number; kind: "factor"; weight: number; reason: string; checked: boolean; flipped: boolean }
+  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState<PreviewRow[] | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const previewSearch = async () => {
+    setPreviewing(true); setPreview(null); setPageError("");
+    try {
+      if (candidates.length >= 2) {
+        const data = await studio.previewSearch(candidates.map((f) => ({ trace: f.trace, loop_id: f.loop_id, name: f.name })));
+        const flippedReason = Object.fromEntries(data.flipped.map((f) => [f.name, f.reason]));
+        const basketWeight = Object.fromEntries(candidates.map((f) => [key(f), Number(f.weight)]));
+        setPreview([
+          ...data.kept.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: f.weight, reason: flippedReason[f.name] || "", checked: true, flipped: Boolean(flippedReason[f.name]) })),
+          ...data.excluded.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: basketWeight[key(f)] ?? 1, reason: f.reason, checked: false, flipped: false })),
+        ]);
+      } else {
+        // 篮子不够两个：从整个因子库按同样标准推荐一批，同样先预览再确认。
+        const all = Object.values(library);
+        const { ranked, noise, unanalyzed } = rankCandidates(all);
+        if (ranked.length < 2) { setPageError(t("因子库里只有 {0} 个因子有可用信号（{1} 个是噪声，{2} 个还没算指标），不够搜索。先在因子库点\"分析全部\"。", [ranked.length, noise.length, unanalyzed.length])); return; }
+        const shortlist = ranked.slice(0, 12);
+        const corr = await studio.factorCorrelation(shortlist.map((r) => ({ trace: r.factor.trace, loop_id: r.factor.loop_id, name: r.factor.name })));
+        const { picked, duplicates } = pickByCorrelation(shortlist, corr, 8);
+        const pickedNames = new Set(picked.map((p) => p.name));
+        const dupReason = Object.fromEntries(duplicates.map((d) => [d.name, t("与 {0} 相关 {1}：两个基本是同一个信号，只留强的那个", [d.of, d.rho.toFixed(2)])]));
+        const noiseNames = new Set(noise.map((f) => f.name));
+        const unanalyzedNames = new Set(unanalyzed.map((f) => f.name));
+        const byName = new Map(all.map((f) => [f.name, f]));
+        const rows: PreviewRow[] = [];
+        for (const r of shortlist) {
+          if (pickedNames.has(r.factor.name)) {
+            const p = picked.find((x) => x.name === r.factor.name)!;
+            rows.push({ name: p.name, trace: p.trace, loop_id: p.loop_id, kind: "factor", weight: p.weight, reason: p.weight < 0 ? t("方向为负，已反向") : "", checked: true, flipped: p.weight < 0 });
+          } else {
+            rows.push({ name: r.factor.name, trace: r.factor.trace, loop_id: r.factor.loop_id, kind: "factor", weight: r.rankIc < 0 ? -1 : 1, reason: dupReason[r.factor.name] || "", checked: false, flipped: false });
+          }
+        }
+        for (const f of [...noise, ...unanalyzed]) {
+          if (rows.some((r) => r.name === f.name)) continue;
+          const lib = byName.get(f.name);
+          if (!lib) continue;
+          rows.push({ name: f.name, trace: lib.trace, loop_id: lib.loop_id, kind: "factor", weight: 1, reason: noiseNames.has(f.name) ? t("单因子指标太弱，先在因子库看分析") : t("还没算单因子指标"), checked: false, flipped: false });
+        }
+        setPreview(rows);
+      }
+    } catch (e) { setPageError(t("预筛预览失败：{0}", [errorText(e)])); } finally { setPreviewing(false); }
+  };
+  const confirmSearch = async () => {
+    const chosen = (preview || []).filter((r) => r.checked);
+    if (chosen.length < 2) { setPageError(t("至少勾选两个因子再开始搜索。")); return; }
+    setConfirming(true);
+    try {
+      basket.replace(chosen.map((r) => ({ name: r.name, trace: r.trace, loop_id: r.loop_id, kind: r.kind, weight: r.weight })));
+      const accepted = await searches.run({ factors: chosen.map((r) => ({ name: r.name, trace: r.trace, loop_id: r.loop_id, kind: r.kind, weight: Number(r.weight) })), model: { method: "rank" }, ...params, search: { objective, prefilter: false } });
+      if (accepted) { setPreview(null); layout.openResults(); }
+    } finally { setConfirming(false); }
   };
   // 保存为策略: the completed backtest (or the search recommendation) becomes a named, tracked portfolio.
   const [savingFrom, setSavingFrom] = useState<"backtest" | "search" | "">("");
@@ -104,39 +158,6 @@ export function BacktestPage() {
 
   // The recommendation is rebuilt from the search job's own factor references, so it works even when the
   // basket has changed since (or the result belongs to an earlier search).
-  // 自动挑候选: rank the library by |ICIR|, drop noise, keep one of each near-duplicate pair, sign by Rank IC.
-  const [picking, setPicking] = useState(false);
-  const [pickNote, setPickNote] = useState("");
-  const [pendingAnalysis, setPendingAnalysis] = useState<LibraryFactor[]>([]);
-  const [analyzeProgress, setAnalyzeProgress] = useState("");
-  // Analyses are Qlib subprocesses, so they run one at a time; then the library is re-read and the pick redone.
-  const analyzeThenPick = async () => {
-    setPicking(true);
-    try {
-      for (let i = 0; i < pendingAnalysis.length; i++) {
-        setAnalyzeProgress(t("计算指标 {0}/{1}：{2}", [i + 1, pendingAnalysis.length, pendingAnalysis[i].name]));
-        try { await studio.factorAnalysis(pendingAnalysis[i]); } catch (e) { setPageError(`${pendingAnalysis[i].name}：${errorText(e)}`); }
-      }
-      const list = await studio.factorLibrary();
-      const fresh = Object.fromEntries(list.map((f) => [key(f), f]));
-      setLibrary(fresh);
-      await autoPick(Object.values(fresh));
-    } finally { setAnalyzeProgress(""); setPicking(false); }
-  };
-  const autoPick = async (pool: LibraryFactor[] = Object.values(library)) => {
-    setPicking(true); setPickNote("");
-    try {
-      const all = pool;
-      const { ranked, noise, unanalyzed } = rankCandidates(all);
-      setPendingAnalysis(unanalyzed);
-      if (ranked.length < 2) { setPickNote(t("因子库里只有 {0} 个因子有可用信号（{1} 个是噪声，{2} 个还没算指标），不够搜索。先在因子库点\"分析全部\"。", [ranked.length, noise.length, unanalyzed.length])); return; }
-      const shortlist = ranked.slice(0, 12);
-      const corr = await studio.factorCorrelation(shortlist.map((r) => ({ trace: r.factor.trace, loop_id: r.factor.loop_id, name: r.factor.name })));
-      const { picked, duplicates } = pickByCorrelation(shortlist, corr, 8);
-      basket.replace(picked);
-      setPickNote(t("看了 {0} 个因子：{1} 个没有可测信号被排除{2}；按 |ICIR| 取前 {3} 个算两两相关，{4}留下 {5} 个：{6}。可以手动增减，然后开始搜索。", [all.length, noise.length, unanalyzed.length ? t("，{0} 个还没算指标未参与", [unanalyzed.length]) : "t(", shortlist.length, duplicates.length ? t("去掉重复的 {0}，", [duplicates.map((d) => `${d.name}（与 ${d.of} 相关 ${d.rho.toFixed(2)}）`).join(")、")]) : "", picked.length, picked.map((p) => `${p.name}${p.weight < 0 ? t("（反向）") : ""}`).join("、")]));
-    } catch (e) { setPageError(t("自动挑候选失败：{0}", [errorText(e)])); } finally { setPicking(false); }
-  };
   const adoptRecommendation = (members: string[], weights: Record<string, number>) => {
     const source = searches.result?.config.factors || [];
     const picked = source.filter((f) => members.includes(f.name)).map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: f.kind || "factor", weight: weights[f.name] ?? f.weight ?? 1 }));
@@ -348,7 +369,7 @@ export function BacktestPage() {
     <PageFrame
       tabs={<TextTabs label={t("工作区视图")} value={tab} onChange={setTab} items={[{ key: "params", label: t("参数设置") }, { key: "search", label: t("组合搜索") }, { key: "history", label: t("历史回测"), count: backtests.jobs.length || undefined }, { key: "source", label: t("策略源码") }]} />}
       actions={tab === "search"
-        ? <Btn kind="primary" disabled={searches.busy || !env?.data_ready || candidates.length < 2 || blocked} title={blocked ? t("先处理参数设置里标红的日期问题") : candidates.length < 2 ? t("至少两个因子信号") : undefined} onClick={startSearch}>{searches.busy ? t("提交中…") : t("开始搜索")}</Btn>
+        ? <Btn kind="primary" disabled={searches.busy || previewing || confirming || !env?.data_ready || blocked} title={blocked ? t("先处理参数设置里标红的日期问题") : undefined} onClick={previewSearch}>{previewing ? t("预筛中…") : t("智能搜索")}</Btn>
         : <Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length || blocked} title={blocked ? t("先处理下面标红的日期问题") : undefined} onClick={submit}>{backtests.busy ? t("运行中…") : blocked ? t("日期有问题，无法运行") : t("运行回测")}</Btn>}
       resultsTitle={tab === "search" ? (searches.result ? t("组合搜索 {0}", [searches.result.id.slice(0, 8)]) : t("搜索结果")) : result ? t("回测 {0}", [result.id.slice(0, 8)]) : t("回测结果")}
       resultsActions={tab === "search" ? (
@@ -481,16 +502,26 @@ export function BacktestPage() {
               <Field label={t("区间划分")}><span className="text-xs" style={{ lineHeight: "28px" }}>{t("前 2/3 搜索 · 后 1/3 验证")}</span></Field>
               <Field label={t("信号合成")}><span className="text-xs" style={{ lineHeight: "28px" }}>{t("排名加权（按篮内权重）")}</span></Field>
             </FieldGrid>
-            <P>{t("候选是信号篮里的因子（模型预测不参与）。先每个单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。{0} 个候选最多约 {1} 次回测。", [candidates.length, candidates.length + (candidates.length * (candidates.length - 1)) / 2 + candidates.length + 3])}</P>
+            <P>{t("点智能搜索，先看不花钱的预筛（单因子指标和两两相关），勾选确认后再跑回测：每个候选单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。")}</P>
           </Block>
-          <Block title={t("候选信号")} count={candidates.length} note={<><Link href={workspace.href("/factors?return=search")}>{t("去因子库增减")}</Link>{candidates.length < 2 ? t(" · 至少两个") : ""}</>}>
+          <Block title={t("候选信号")} count={candidates.length} note={<><Link href={workspace.href("/factors?return=search")}>{t("去因子库增减")}</Link>{candidates.length < 2 ? t(" · 篮子不够两个会从全库推荐") : ""}</>}>
             <div className="mm-row" style={{ marginBottom: 12 }}>
-              <Btn disabled={picking} onClick={() => autoPick()}>{picking ? (analyzeProgress || t("挑选中…")) : t("自动挑候选")}</Btn>
-              <span className="mm-dim" style={{ fontSize: 12 }}>{t("从整个因子库按 |ICIR| 排序，排除噪声，两两相关 ≥ {0} 只留一个，最多 8 个，IC 为负的自动反向；会替换当前篮子。", [DUPLICATE_CORR])}</span>
+              <Btn kind="primary" disabled={previewing || confirming} onClick={previewSearch}>{previewing ? t("预筛中…") : t("智能搜索")}</Btn>
+              <span className="mm-dim" style={{ fontSize: 12 }}>{t("先看预筛，勾选确认后再跑回测；确认结果会同步到信号篮。")}</span>
             </div>
-            {pickNote && (
+            {preview && (
               <div style={{ marginBottom: 12 }}>
-                <Note tone="info" actions={pendingAnalysis.length > 0 ? <Btn disabled={picking} onClick={analyzeThenPick}>{t("先算这 {0} 个指标再挑（约 {1} 分钟）", [pendingAnalysis.length, Math.ceil(pendingAnalysis.length / 6)])}</Btn> : undefined}>{pickNote}</Note>
+                <Table label={t("预筛确认")} columns={[{ label: "", width: 30 }, { label: t("信号") }, { label: t("结论"), width: "55%" }]}
+                  rows={preview.map((r) => ({ key: r.name, cells: [
+                    <input key="c" type="checkbox" className="mm-check" aria-label={r.name} checked={r.checked} onChange={() => setPreview((rows) => (rows || []).map((x) => x.name === r.name ? { ...x, checked: !x.checked } : x))} />,
+                    <span key="n" className="mm-mono mm-name">{r.name}{r.weight < 0 ? t("（反向）") : ""}</span>,
+                    <span key="r" className="text-[11px]">{r.checked ? (r.reason || t("进入搜索")) : r.reason}</span>,
+                  ] }))} />
+                <div className="mm-row" style={{ marginTop: 8 }}>
+                  <Btn kind="primary" disabled={confirming} onClick={confirmSearch}>{confirming ? t("启动中…") : t("确认并开始搜索（{0} 个）", [preview.filter((r) => r.checked).length])}</Btn>
+                  <Btn kind="text" onClick={() => setPreview(null)}>{t("取消")}</Btn>
+                </div>
+                <Hint>{t("这是软淘汰：这次没勾的不代表以后没用，换一批队友或换个窗口可以再试。")}</Hint>
               </div>
             )}
             {candidates.length ? (

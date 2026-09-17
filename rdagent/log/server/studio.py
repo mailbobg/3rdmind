@@ -29,6 +29,14 @@ LATEST_DATA = TRACE_ROOT / "studio_data" / "daily_pv_latest.h5"
 INSTRUMENT_NAMES = TRACE_ROOT / "studio_data" / "instrument_names.json"
 WORKSPACE_ROOT = Path(RD_AGENT_SETTINGS.workspace_path).resolve()
 
+# Cheap pre-search filter ("预筛"): same cutoffs as the Studio's 自动挑候选 button, so a search
+# launched from any client skips the obviously useless candidates before any backtest runs.
+# Factors without a cached single-factor analysis are never excluded for weakness (their indicators
+# simply have not been computed yet); they only lose to a near-duplicate with a known stronger ICIR.
+PREFILTER_NOISE_RANK_IC = 0.005
+PREFILTER_NOISE_ICIR = 0.05
+PREFILTER_DUPLICATE_CORR = 0.7
+
 
 def job_folder(job_id):
     uuid.UUID(job_id)
@@ -342,6 +350,71 @@ def factor_correlation(workspaces):
     names = [name for name, _ in workspaces]
     matrix = matrix.loc[names, names]
     return {"names": names, "matrix": [[float(v) for v in row] for row in matrix.values], "days": int(len(days))}
+
+
+def apply_search_prefilter(resolved):
+    """Cheap pre-search filter over resolved factors (no backtest, no LLM call).
+
+    ``resolved`` are the factor dicts from resolve_factor_paths (each carries name, weight,
+    path, trace, loop_id). Returns ``(kept, excluded)`` where ``kept`` keeps the input
+    shape (weights possibly sign-flipped to each factor's Rank IC) and ``excluded`` holds
+    ``{name, reason}`` entries for the page to display. Factors without a cached analysis
+    are kept; only near-duplicates (|rho| >= PREFILTER_DUPLICATE_CORR) of a stronger kept
+    factor are dropped.
+    """
+    scored = []
+    for factor in resolved:
+        market = run_market(factor.get("trace") or "")
+        analysis = cached_analysis(Path(factor["path"]), market)
+        rank_ic = (analysis.get("rank_ic") or {}).get("mean") if analysis else None
+        icir = (analysis.get("rank_ic") or {}).get("ir") if analysis else None
+        scored.append({"factor": factor, "rank_ic": rank_ic, "icir": 0.0 if icir is None else abs(icir),
+                       "analyzed": analysis is not None})
+    # Weak-signal test first, so the reason names the real problem even for a factor that
+    # would also duplicate a stronger one.
+    candidates, excluded = [], []
+
+    def ref(factor):
+        return {"name": factor["name"], "trace": factor.get("trace"), "loop_id": factor.get("loop_id"),
+                "kind": factor.get("kind", "factor")}
+
+    for entry in scored:
+        if not entry["analyzed"]:
+            candidates.append(entry)
+            continue
+        if abs(entry["rank_ic"] or 0) < PREFILTER_NOISE_RANK_IC or entry["icir"] < PREFILTER_NOISE_ICIR:
+            excluded.append({**ref(entry["factor"]),
+                             "reason": f"信号太弱（Rank IC {entry['rank_ic']:.4f}，ICIR {entry['icir']:.3f}）：先在因子库看单因子分析，达标再参与搜索"})
+            continue
+        candidates.append(entry)
+    # Strongest first, so a duplicate always loses to the better factor.
+    candidates.sort(key=lambda e: (-e["icir"], e["factor"]["name"]))
+    try:
+        corr = factor_correlation([(e["factor"]["name"], Path(e["factor"]["path"])) for e in candidates])
+    except Exception:  # noqa: BLE001 -- unreadable workspaces just skip the duplicate check
+        corr = None
+    index = {name: i for i, name in enumerate(corr["names"])} if corr else {}
+    kept, flipped = [], []
+    for entry in candidates:
+        clash = None
+        if corr is not None:
+            i = index.get(entry["factor"]["name"])
+            for done in kept:
+                j = index.get(done["name"])
+                if i is not None and j is not None and abs(corr["matrix"][i][j]) >= PREFILTER_DUPLICATE_CORR:
+                    clash = (done["name"], corr["matrix"][i][j])
+                    break
+        if clash is not None:
+            excluded.append({**ref(entry["factor"]),
+                             "reason": f"与 {clash[0]} 相关 {clash[1]:.2f}：两个基本是同一个信号，只留 ICIR 更高的那个"})
+            continue
+        factor = dict(entry["factor"])
+        if entry["rank_ic"] is not None and entry["rank_ic"] != 0 and (factor.get("weight", 1) > 0) != (entry["rank_ic"] > 0):
+            factor["weight"] = -abs(factor.get("weight", 1)) if entry["rank_ic"] < 0 else abs(factor.get("weight", 1))
+            flipped.append({"name": factor["name"],
+                            "reason": f"方向为负（Rank IC {entry['rank_ic']:.4f}）：权重已反向，不算淘汰"})
+        kept.append(factor)
+    return kept, excluded, flipped
 
 
 def resolve_factor_paths(default_trace, default_loop_id, factors, prefer_refreshed=True):
@@ -851,9 +924,32 @@ def search_folder(job_id):
     return SEARCH_ROOT / job_id
 
 
+@studio.post("/searches/preview")
+def search_preview():
+    """Dry-run of the pre-search screen: which candidates would enter the search, and why not for the rest.
+
+    Same factor shape as a search request, but launches nothing. The page shows this first so the user
+    ticks the final list and confirms; the confirmed search then runs with ``prefilter: false``.
+    """
+    body = request.get_json() or {}
+    try:
+        if not body.get("factors"):
+            raise ValueError("Preview needs at least one candidate factor")
+        resolved = resolve_factor_paths(str(body.get("trace") or "") or None, body.get("loop_id"),
+                                        body.get("factors") or [])
+        kept, excluded, flipped = apply_search_prefilter(resolved)
+        public = [{k: f[k] for k in ("name", "kind", "weight", "trace", "loop_id") if k in f} for f in kept]
+        return jsonify({"kept": public, "excluded": excluded, "flipped": flipped,
+                        "thresholds": {"noise_rank_ic": PREFILTER_NOISE_RANK_IC,
+                                       "noise_icir": PREFILTER_NOISE_ICIR,
+                                       "duplicate_corr": PREFILTER_DUPLICATE_CORR}})
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
 @studio.route("/searches", methods=["GET", "POST"])
 def searches():
-    """Greedy portfolio searches: same request shape as a backtest plus a `search` block (objective, split)."""
+    """Greedy portfolio searches: same request shape as a backtest plus a `search` block (objective, split, prefilter)."""
     SEARCH_ROOT.mkdir(parents=True, exist_ok=True)
     if request.method == "GET":
         region = wanted_region()
@@ -872,9 +968,24 @@ def searches():
     body = request.get_json() or {}
     try:
         body.setdefault("search", {})
+        prefilter = body["search"].get("prefilter", True)
         config = prepare_backtest_config(body)
         if len(config["factors"]) < 2:
             raise ValueError("Search needs at least two candidate signals")
+        if prefilter:
+            kept, excluded, flipped = apply_search_prefilter(config["factors"])
+            config["search"]["prefilter"] = {"enabled": True, "excluded": excluded, "flipped": flipped,
+                                             "requested": [f["name"] for f in config["factors"]],
+                                             "thresholds": {"noise_rank_ic": PREFILTER_NOISE_RANK_IC,
+                                                            "noise_icir": PREFILTER_NOISE_ICIR,
+                                                            "duplicate_corr": PREFILTER_DUPLICATE_CORR}}
+            config["factors"] = kept
+            if len(kept) < 2:
+                details = "；".join(f"{e['name']}：{e['reason']}" for e in excluded) or "候选不足两个"
+                return jsonify({"error": f"预筛后候选不足两个，搜索未启动：{details}",
+                                "prefilter": config["search"]["prefilter"]}), 400
+        else:
+            config["search"]["prefilter"] = {"enabled": False, "excluded": [], "flipped": []}
     except (ValueError, TypeError, KeyError) as error:
         return jsonify({"error": str(error)}), 400
     job_id = str(uuid.uuid4())

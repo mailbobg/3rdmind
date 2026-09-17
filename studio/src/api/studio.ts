@@ -206,7 +206,16 @@ export const backtests = () => api<BacktestSummary[]>(scoped("/studio/backtests"
 export const backtest = (id: string) => api<BacktestResult>(`/studio/backtests/${id}`);
 export const runBacktest = (config: BacktestRequest) => api<{ id: string }>("/studio/backtests", config);
 export type SearchObjective = "sharpe" | "total_return";
-export interface SearchRequest extends BacktestRequest { search: { objective: SearchObjective; split?: number } }
+export interface SearchRequest extends BacktestRequest {
+  search: { objective: SearchObjective; split?: number; prefilter?: boolean };
+}
+/** The cheap pre-search screen: who was dropped before any backtest, and why. Soft-screen only. */
+export interface PrefilterItem { name: string; reason: string }
+export interface PrefilterInfo {
+  enabled: boolean; excluded: PrefilterItem[]; flipped: PrefilterItem[];
+  requested?: string[];
+  thresholds?: { noise_rank_ic: number; noise_icir: number; duplicate_corr: number };
+}
 export interface SearchStep { step: number; kind: "single" | "start" | "add" | "drop"; tried: string | null; members: string[]; accepted: boolean | null; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; days?: number | null; error?: string }
 export interface SearchPortfolio { members: string[]; weights?: Record<string, number>; search: VariantMetrics; validation: VariantMetrics }
 export interface SearchSummary { id: string; status: string; created: string; config: SearchRequest; recommended?: string[] | null; validation_return?: number | null }
@@ -214,8 +223,17 @@ export interface SearchResult extends SearchSummary {
   error?: string; log?: string; done?: number; total?: number; steps?: SearchStep[];
   objective?: SearchObjective; windows?: { search: [string, string]; validation: [string, string] };
   candidates?: string[]; recommended_portfolio?: SearchPortfolio; everything?: SearchPortfolio;
+  prefilter?: PrefilterInfo | null;
 }
 export const searches = () => api<SearchSummary[]>(scoped("/studio/searches"));
+/** Dry-run of the pre-search screen over these candidates; launches nothing. */
+export interface PrefilterPreview {
+  kept: FactorWeight[]; excluded: (FactorRef & { kind?: SignalKind; reason: string })[];
+  flipped: PrefilterItem[];
+  thresholds: { noise_rank_ic: number; noise_icir: number; duplicate_corr: number };
+}
+export const previewSearch = (factors: FactorRef[], market?: string) =>
+  api<PrefilterPreview>("/studio/searches/preview", { factors, ...(market ? { market } : {}) });
 export const search = async (id: string): Promise<SearchResult> => {
   // The worker's "recommended" is the portfolio; the list's "recommended" is just its member names.
   const raw = await api<Record<string, unknown>>(`/studio/searches/${id}`);

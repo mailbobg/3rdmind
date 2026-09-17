@@ -394,6 +394,126 @@ def test_search_routes_start_and_list_jobs(studio_client, tmp_path: Path, monkey
 
 
 @pytest.mark.offline
+def test_search_prefilter_is_on_by_default_and_reports_exclusions(
+    studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+
+    monkeypatch.setattr(studio_module, "SEARCH_ROOT", tmp_path / "traces" / "studio_searches")
+    days = pd.bdate_range("2025-01-01", periods=5)
+    stocks = ["A", "B", "C", "D"]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    rng = np.random.RandomState(0)
+    series = {
+        "F_A": pd.Series(np.arange(len(index), dtype=float), index=index),
+        "F_B": pd.Series(rng.randn(len(index)), index=index),
+        "F_DUP": pd.Series(np.arange(len(index), dtype=float) * 2.0, index=index),
+        "F_WEAK": pd.Series(rng.randn(len(index)), index=index),
+    }
+    ws = tmp_path / "ws"
+    for name, values in series.items():
+        folder = ws / name.lower()
+        folder.mkdir(parents=True)
+        values.to_frame("x").to_hdf(folder / "result.h5", key="data")
+
+    def cache(name, rank_ic, icir):
+        folder = ws / name.lower()
+        (folder / "studio_analysis.csi300.json").write_text(json.dumps({
+            "status": "completed", "source_mtime": (folder / "result.h5").stat().st_mtime,
+            "rank_ic": {"mean": rank_ic, "std": 0.1, "ir": icir, "positive_ratio": 0.6}}))
+
+    cache("F_A", 0.03, 0.5)
+    cache("F_B", 0.025, 0.45)
+    cache("F_DUP", 0.02, 0.4)
+    cache("F_WEAK", 0.001, 0.01)
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages[1]["content"]["workspaces"]["factors"].extend(
+        {"name": name, "path": str(ws / name.lower())} for name in series
+    )
+
+    def body(names, **search):
+        return {"factors": [{"name": n, "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0} for n in names],
+                "start": "2025-01-01", "end": "2025-06-30", "market": "csi300", "benchmark": "SH000300",
+                "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+                "search": {"objective": "sharpe", **search}}
+
+    # Default: prefilter on. F_WEAK is too weak, F_DUP duplicates F_A; F_A and F_B survive.
+    response = studio_client.post("/studio/searches", json=body(["F_A", "F_B", "F_DUP", "F_WEAK"]))
+    assert response.status_code == 202, response.get_json()
+    detail = studio_client.get(f"/studio/searches/{response.get_json()['id']}").get_json()
+    assert sorted(f["name"] for f in detail["config"]["factors"]) == ["F_A", "F_B"]
+    prefilter = detail["config"]["search"]["prefilter"]
+    assert prefilter["enabled"] is True
+    assert sorted(e["name"] for e in prefilter["excluded"]) == ["F_DUP", "F_WEAK"]
+    assert any("F_A" in e["reason"] for e in prefilter["excluded"] if e["name"] == "F_DUP")
+
+    # Opt-out: everything is kept.
+    response = studio_client.post("/studio/searches", json=body(["F_A", "F_B", "F_DUP", "F_WEAK"], prefilter=False))
+    assert response.status_code == 202, response.get_json()
+    detail = studio_client.get(f"/studio/searches/{response.get_json()['id']}").get_json()
+    assert len(detail["config"]["factors"]) == 4
+    assert detail["config"]["search"]["prefilter"] == {"enabled": False, "excluded": [], "flipped": []}
+
+    # Screening down to fewer than two candidates refuses to start, with reasons.
+    response = studio_client.post("/studio/searches", json=body(["F_A", "F_DUP", "F_WEAK"]))
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "F_WEAK" in payload["error"] and [e["name"] for e in payload["prefilter"]["excluded"]]
+
+
+@pytest.mark.offline
+def test_search_preview_reports_kept_and_excluded_without_starting(
+    studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+
+    monkeypatch.setattr(studio_module, "SEARCH_ROOT", tmp_path / "traces" / "studio_searches")
+    days = pd.bdate_range("2025-01-01", periods=5)
+    stocks = ["A", "B", "C", "D"]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    rng = np.random.RandomState(1)
+    series = {
+        "F_A": pd.Series(rng.randn(len(index)), index=index),
+        "F_WEAK": pd.Series(rng.randn(len(index)), index=index),
+    }
+    ws = tmp_path / "ws"
+    for name, values in series.items():
+        folder = ws / name.lower()
+        folder.mkdir(parents=True)
+        values.to_frame("x").to_hdf(folder / "result.h5", key="data")
+
+    def cache(name, rank_ic, icir):
+        folder = ws / name.lower()
+        (folder / "studio_analysis.csi300.json").write_text(json.dumps({
+            "status": "completed", "source_mtime": (folder / "result.h5").stat().st_mtime,
+            "rank_ic": {"mean": rank_ic, "std": 0.1, "ir": icir, "positive_ratio": 0.6}}))
+
+    cache("F_A", 0.03, 0.5)
+    cache("F_WEAK", 0.001, 0.01)
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages[1]["content"]["workspaces"]["factors"].extend(
+        {"name": name, "path": str(ws / name.lower())} for name in series
+    )
+    response = studio_client.post("/studio/searches/preview", json={
+        "factors": [{"name": n, "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0} for n in series]})
+    assert response.status_code == 200, response.get_json()
+    data = response.get_json()
+    assert [f["name"] for f in data["kept"]] == ["F_A"]
+    assert [e["name"] for e in data["excluded"]] == ["F_WEAK"]
+    assert data["excluded"][0]["trace"] == "Finance Data Building/demo"
+    # Nothing was launched: no job folder appeared.
+    assert list((tmp_path / "traces" / "studio_searches").glob("*/config.json")) == []
+    assert studio_client.post("/studio/searches/preview", json={"factors": []}).status_code == 400
+
+
+@pytest.mark.offline
+def test_validate_config_keeps_the_search_prefilter_block() -> None:
+    prefilter = {"enabled": True, "excluded": [{"name": "F_WEAK", "reason": "too weak"}], "flipped": []}
+    out = validate_config(_config(search={"prefilter": prefilter}))
+    assert out["search"]["prefilter"] == prefilter
+
+
+@pytest.mark.offline
 def test_strategies_are_saved_listed_updated_and_deleted(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Evidence backtest the strategy points at.
     job = studio_module.ROOT / "22222222-2222-2222-2222-222222222222"
@@ -1268,6 +1388,11 @@ def test_embedding_settings_share_keys_and_reach_the_run(studio_client, tmp_path
     result = studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001", "api_key": "g1"}).get_json()
     assert result["ok"] and result["dims"] == 3 and result["model"] == "gemini/gemini-embedding-001" and calls[0]["api_key"] == "g1"
     assert studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001"}).status_code == 502
+    # A key with stray non-ASCII characters (a pasted hint, full-width letters) is named instead of a codec error.
+    bad = studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001", "api_key": "sk-abc 已保存…"}).get_json()
+    assert not bad["ok"] and "非 ASCII" in bad["error"] and "第 8 位" in bad["error"]
+    assert "非 ASCII" in studio_client.put("/studio/llm/embedding", json={"provider": "gemini", "model": "x", "api_key": "ｓｋ-full-width"}).get_json()["error"]
+    assert "非 ASCII" in studio_client.put("/studio/llm", json={"provider": "openai", "model": "x", "base_url": "https://中转.example/v1"}).get_json()["error"]
     # Clearing the record removes it and leaves the keys alone.
     cleared = studio_client.put("/studio/llm/embedding", json={"provider": ""}).get_json()
     assert cleared["embedding"]["provider"] is None and "dashscope" in cleared["current"]["saved_keys"]
@@ -1343,11 +1468,6 @@ def test_sync_remote_check_falls_back_when_the_api_is_rate_limited(monkeypatch: 
     # Both routes down: the cached answer is served; with no cache the error names the rate limit.
     monkeypatch.setattr(studio_sync, "_latest_tag_by_redirect", lambda timeout=20: (_ for _ in ()).throw(RuntimeError("offline")))
     assert studio_sync.check_remote(max_age=0)["release"] == "2026-09-15"
-    # A key with stray non-ASCII characters (a pasted hint, full-width letters) is named instead of a codec error.
-    bad = studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001", "api_key": "sk-abc 已保存…"}).get_json()
-    assert not bad["ok"] and "非 ASCII" in bad["error"] and "第 8 位" in bad["error"]
-    assert "非 ASCII" in studio_client.put("/studio/llm/embedding", json={"provider": "gemini", "model": "x", "api_key": "ｓｋ-full-width"}).get_json()["error"]
-    assert "非 ASCII" in studio_client.put("/studio/llm", json={"provider": "openai", "model": "x", "base_url": "https://中转.example/v1"}).get_json()["error"]
     monkeypatch.setattr(studio_sync, "_remote_cache", {"checked_at": 0.0, "release": None})
     with pytest.raises(RuntimeError, match="限流"):
         studio_sync.check_remote(max_age=0)

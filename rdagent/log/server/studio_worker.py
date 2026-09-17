@@ -48,6 +48,9 @@ def validate_config(config):
         if not 0.4 <= split <= 0.85:
             raise ValueError("Search split must be between 0.4 and 0.85")
         result["search"] = {"objective": objective, "split": split}
+        # The server's pre-search filter rides along so the result shows what was screened out.
+        if isinstance(search.get("prefilter"), dict):
+            result["search"]["prefilter"] = search["prefilter"]
     factors = result.get("factors", [])
     if not isinstance(factors, list) or not 1 <= len(factors) <= 20:
         raise ValueError("Select 1 to 20 factors")
@@ -669,6 +672,7 @@ def search(config, progress=lambda *_: None):
         everything["validation"] = {"error": str(error)}
     done[0] += 1; progress(done[0], total[0], steps)
     return clean({"objective": objective, "windows": {"search": search_win, "validation": valid_win}, "candidates": names,
+                  "prefilter": (config.get("search") or {}).get("prefilter"),
                   "steps": steps, "recommended": recommended, "everything": everything, "config": config})
 
 

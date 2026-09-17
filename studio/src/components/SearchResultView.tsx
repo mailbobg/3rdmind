@@ -47,7 +47,9 @@ export function SearchResultView({ result, onAdopt }: { result: SearchResult; on
     <div className="flex flex-col gap-3">
       <Section title={t("组合搜索 {0}", [result.id.slice(0, 8)])} note={<StatusChip status={result.status === "completed" ? t("已完成") : result.status === "failed" ? t("失败") : t("运行中")} />}>
         <Hint>
-          {t("目标")} {objective} · {t("候选 {0} 个", [result.config.factors.length])} · {result.config.start} → {result.config.end} · {result.config.market}
+          {t("目标")} {objective} · {result.prefilter?.enabled && (result.prefilter.requested?.length ?? 0) > result.config.factors.length
+            ? t("候选 {0} 个，预筛后 {1} 个", [result.prefilter.requested?.length ?? 0, result.config.factors.length])
+            : t("候选 {0} 个", [result.config.factors.length])} · {result.config.start} → {result.config.end} · {result.config.market}
           {result.windows && <> · {t("搜索区间")} {result.windows.search[0]} → {result.windows.search[1]} · {t("验证区间")} {result.windows.validation[0]} → {result.windows.validation[1]}</>}
         </Hint>
         {running && <Hint>搜索中{result.done != null && result.total ? t(" {0}/{1} 次回测", [result.done, result.total]) : ""}…路径会随进度出现在下面。</Hint>}
@@ -75,6 +77,24 @@ export function SearchResultView({ result, onAdopt }: { result: SearchResult; on
           </>
         )}
       </Section>
+      {result.prefilter?.enabled && ((result.prefilter.excluded?.length ?? 0) > 0 || (result.prefilter.flipped?.length ?? 0) > 0) && (
+        <Section title={t("预筛")} note={t("回测前的不花钱检查：只看单因子指标和两两相关，没跑回测")}>
+          {(result.prefilter.excluded?.length ?? 0) > 0 && (
+            <DataTable label={t("预筛淘汰")} head={[[t("因子")], [t("原因")]]}
+              rows={result.prefilter.excluded.map((e) => ({
+                key: e.name,
+                cells: [
+                  <span key="n" className="mm-mono mm-name">{e.name}</span>,
+                  <span key="r" className="text-[11px]">{e.reason}</span>,
+                ],
+              }))} />
+          )}
+          {(result.prefilter.flipped?.length ?? 0) > 0 && (
+            <Hint>{result.prefilter.flipped.map((f) => `${f.name}：${f.reason}`).join("；")}</Hint>
+          )}
+          <Hint>{t("这是软淘汰：这次没进搜索不代表以后没用，换一批队友或换个窗口可以再试。")}</Hint>
+        </Section>
+      )}
       {result.steps && result.steps.length > 0 && (
         <Section title={t("搜索路径")} note={t("{0} 次回测 · 搜索区间", [result.steps.length])}>
           <DataTable label={t("搜索路径")} head={[["#"], [t("动作")], [t("组合")], [t("收益"), "end"], [t("夏普"), "end"], [t("回撤"), "end"], [t("结果")]]}
