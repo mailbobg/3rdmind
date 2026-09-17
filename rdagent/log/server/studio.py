@@ -315,13 +315,24 @@ def factor_correlation(workspaces):
 
     frames = []
     for name, workspace in workspaces:
-        frame = pd.read_hdf(Path(workspace) / "result.h5")
+        path = Path(workspace) / "result.h5"
+        if not path.is_file():
+            raise ValueError(f"{name} 没有 result.h5（它的研究可能没跑完）")
+        frame = pd.read_hdf(path)
         if isinstance(frame, pd.Series):
             frame = frame.to_frame()
         frames.append(frame.iloc[:, 0].rename(name))
     joined = pd.concat(frames, axis=1).dropna()
     if joined.empty:
-        raise ValueError("The selected factors share no observations")
+        # Say what each factor covers, so the user can see which one does not belong (another market, a
+        # window that never overlaps) instead of a bare "no overlap".
+        spans = []
+        for series in frames:
+            dates = series.dropna().index.get_level_values("datetime")
+            codes = series.dropna().index.get_level_values("instrument")
+            sample = str(codes[0]) if len(codes) else "?"
+            spans.append(f"{series.name} {dates.min().date() if len(dates) else '?'}→{dates.max().date() if len(dates) else '?'}（如 {sample}）")
+        raise ValueError("这些因子没有共同的观测，无法算相关性：" + "；".join(spans) + "。把它们重算到同一份最新数据，或移除不同市场 / 不同区间的因子。")
     ranks = joined.groupby(level="datetime").rank(pct=True)
     days = ranks.index.get_level_values("datetime").unique()
     # Averaging per-day correlation matrices is O(days); sampling every k-th day keeps large baskets responsive.

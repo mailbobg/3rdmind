@@ -1486,3 +1486,23 @@ def test_recent_lists_round_and_run_completions_after_a_cursor(studio_client) ->
     assert [i["kind"] for i in later if i["trace"].endswith("recent")] == ["round_done", "run_done"]
     assert everything["now"]
     assert [i for i in studio_client.get("/studio/recent?region=us").get_json()["items"] if i["trace"].endswith("recent")] == []
+
+
+@pytest.mark.offline
+def test_correlation_names_the_factors_that_do_not_overlap(tmp_path: Path) -> None:
+    import pandas as pd
+    from rdagent.log.server.studio import factor_correlation
+
+    def write(folder: Path, name: str, dates: list[str], codes: list[str]):
+        folder.mkdir(parents=True, exist_ok=True)
+        index = pd.MultiIndex.from_product([pd.to_datetime(dates), codes], names=["datetime", "instrument"])
+        pd.DataFrame({name: range(len(index))}, index=index, dtype="float64").to_hdf(folder / "result.h5", key="data", mode="w")
+
+    write(tmp_path / "a", "A", ["2025-01-02", "2025-01-03"], ["SH600000", "SZ000001"])
+    write(tmp_path / "b", "B", ["2026-09-14", "2026-09-15"], ["AAPL", "MSFT"])
+    with pytest.raises(ValueError) as error:
+        factor_correlation([("A", tmp_path / "a"), ("B", tmp_path / "b")])
+    message = str(error.value)
+    assert "A 2025-01-02→2025-01-03（如 SH600000）" in message and "B 2026-09-14→2026-09-15（如 AAPL）" in message
+    with pytest.raises(ValueError, match="没有 result.h5"):
+        factor_correlation([("A", tmp_path / "a"), ("C", tmp_path / "c")])

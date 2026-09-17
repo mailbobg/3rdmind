@@ -9,10 +9,10 @@ import type { ChangeEvent, MouseEvent, ReactNode } from "react";
  * reads as ink on paper rather than as a stack of widgets.
  */
 
-export function TextTabs({ value, onChange, items, label }: { value: string; onChange: (v: string) => void; items: { key: string; label: ReactNode }[]; label: string }) {
+export function TextTabs({ value, onChange, items, label }: { value: string; onChange: (v: string) => void; items: { key: string; label: ReactNode; count?: number }[]; label: string }) {
   return (
     <div role="tablist" aria-label={label} className="mm-tabs">
-      {items.map((t) => <button key={t.key} role="tab" type="button" aria-selected={t.key === value} className="mm-tab" onClick={() => onChange(t.key)}>{t.label}</button>)}
+      {items.map((t) => <button key={t.key} role="tab" type="button" aria-selected={t.key === value} className="mm-tab" onClick={() => onChange(t.key)}>{t.label}{t.count ? <span className="mm-count mm-mono mm-dim" style={{ marginLeft: 5, fontSize: 11 }}>{t.count}</span> : null}</button>)}
     </div>
   );
 }

@@ -46,6 +46,14 @@ export function useBacktests() {
       schedule();
     }, 3000);
   }, [fetchSelected]);
+  /** Forget the selection (the backtest page starts empty). */
+  const clear = useCallback(() => {
+    clearTimeout(timer.current);
+    selectedRef.current = "";
+    setSelectedId("");
+    setResult(null);
+    resultRef.current = null;
+  }, []);
   const select = useCallback(async (id: string) => {
     selectedRef.current = id;
     setSelectedId(id);
@@ -84,6 +92,6 @@ export function useBacktests() {
     });
   }, [guarded, fetchSelected, schedule]);
 
-  return { jobs, selectedId, result, error, setError, busy, load, select, run, diagnose };
+  return { jobs, clear, selectedId, result, error, setError, busy, load, select, run, diagnose };
 }
 export type BacktestStore = ReturnType<typeof useBacktests>;

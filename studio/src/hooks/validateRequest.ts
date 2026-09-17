@@ -13,7 +13,7 @@ export function validateRequest(c: BacktestRequest): string | null {
     if (te >= vs) return "验证区间必须在训练区间之后。";
     if (ve >= c.start) return "回测必须在验证区间之后开始。";
   }
-  if (!["csi300", "csi500", "all"].includes(c.market)) return "不支持的股票池。";
+  if (!/^[a-z][a-z0-9_]{1,30}$/.test(c.market)) return "股票池名称无效，请在下拉里重新选择。";
   if (!c.benchmark || !c.benchmark.trim()) return "请填写基准指数代码。";
   if (!Number.isInteger(c.topk) || c.topk < 1 || c.topk > 500) return "topk 应为 1–500 的整数。";
   if (!Number.isInteger(c.n_drop) || c.n_drop < 0 || c.n_drop > c.topk) return "n_drop 应为 0–topk 的整数。";

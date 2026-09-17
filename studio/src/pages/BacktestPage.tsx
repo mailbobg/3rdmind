@@ -53,6 +53,9 @@ export function BacktestPage() {
     if (wanted) {
       if (searchParams.get("tab") === "search") searches.select(wanted); else backtests.select(wanted);
       layout.openResults();
+    } else {
+      // The page starts with an empty results column; earlier runs live under 历史回测.
+      backtests.clear();
     }
     if (searchParams.get("tab") || wanted) setSearchParams({}, { replace: true });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -184,11 +187,17 @@ export function BacktestPage() {
         setFetched((m) => { const next = { ...m }; delete next[key(f)]; return next; });
       }
       await loadLibrary();
-      // With longer signals the untouched window may grow back to the market's end; the clamp trims any excess.
-      if (!datesTouched && env?.end) { setParams((p) => ({ ...p, end: env.end! })); setAutoNote(""); }
+      // The user asked for newer signals, so the window follows: end moves to the earliest of the recomputed
+      // factors' new last day and the market's last day; start only moves if it would no longer precede it.
+      const ends = await Promise.all(targets.map((f) => studio.factorCoverage(f).then((c) => c.end).catch(() => null)));
+      const newEnd = [env?.end, ...ends].filter((d): d is string => !!d).sort()[0];
+      if (newEnd) {
+        setParams((p) => ({ ...p, end: newEnd, start: p.start && p.start < newEnd ? p.start : shiftYears(newEnd, -1) }));
+        setDatesTouched(true);
+        setAutoNote(`重算完成，回测结束日已推到 ${newEnd}。`);
+      }
     } catch (e) { setPageError(`重算失败：${errorText(e)}`); } finally { setRefreshing(false); }
   };
-  useEffect(() => { if (backtests.jobs.length && !backtests.selectedId) backtests.select(backtests.jobs[0].id); }, [backtests.jobs]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (tab === "source" && !source) studio.strategySource().then((r) => setSource(r.code)).catch((e) => setPageError(errorText(e))); }, [tab, source]);
 
   // Pairwise correlation of the factor signals in the basket (predictions excluded), debounced.
@@ -330,13 +339,13 @@ export function BacktestPage() {
 
   const statusLine = [
     coverage ? `覆盖 ${coverage.start} → ${coverage.end}` : "",
-    factorRefs.length >= 2 ? (correlation ? `最高相关 ${maxCorr.toFixed(2)}${maxCorr >= 0.7 ? "（有信号重复）" : ""}` : correlationError ? "相关性计算失败" : "计算相关性…") : "",
+    factorRefs.length >= 2 ? (correlation ? `最高相关 ${maxCorr.toFixed(2)}${maxCorr >= 0.7 ? "（有信号重复）" : ""}` : correlationError ? `相关性计算失败：${correlationError}` : "计算相关性…") : "",
   ].filter(Boolean).join(" · ");
   const lgbmKeys = ["learning_rate", "num_leaves", "max_depth", "n_estimators", "early_stopping_rounds"] as const;
 
   return (
     <PageFrame
-      tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "params", label: "参数设置" }, { key: "search", label: "组合搜索" }, { key: "source", label: "策略源码" }]} />}
+      tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "params", label: "参数设置" }, { key: "search", label: "组合搜索" }, { key: "history", label: "历史回测", count: backtests.jobs.length || undefined }, { key: "source", label: "策略源码" }]} />}
       actions={tab === "search"
         ? <Btn kind="primary" disabled={searches.busy || !env?.data_ready || candidates.length < 2 || blocked} title={blocked ? "先处理参数设置里标红的日期问题" : candidates.length < 2 ? "至少两个因子信号" : undefined} onClick={startSearch}>{searches.busy ? "提交中…" : "开始搜索"}</Btn>
         : <Btn kind="primary" disabled={backtests.busy || !env?.data_ready || !basket.items.length || blocked} title={blocked ? "先处理下面标红的日期问题" : undefined} onClick={submit}>{backtests.busy ? "运行中…" : blocked ? "日期有问题，无法运行" : "运行回测"}</Btn>}
@@ -444,6 +453,24 @@ export function BacktestPage() {
             )}
           </Block>
         </>
+      ) : tab === "history" ? (
+        <Block title="历史回测" count={backtests.jobs.length} note="点一行在右栏查看结果">
+          {backtests.jobs.length ? (
+            <Table label="历史回测" columns={[{ label: "", width: 18 }, { label: "信号", width: "34%" }, { label: "区间" }, { label: "合成", width: 80, optional: true }, { label: "收益", num: true, width: 72 }, { label: "状态", width: 72 }, { label: "时间", width: 96, optional: true }]}
+              rows={backtests.jobs.map((j) => ({
+                key: j.id, selected: j.id === backtests.selectedId, onClick: () => { backtests.select(j.id); layout.openResults(); },
+                cells: [
+                  statusDot(j.status),
+                  <span key="n" className="mm-mono block truncate" title={(j.config.factors || []).map((f) => f.name).join(", ")}>{signalNames(j.config.factors)}</span>,
+                  <span key="w" className="mm-mono mm-dim">{j.config.start} → {j.config.end}</span>,
+                  <span key="m" className="mm-dim">{j.config.model?.method === "lgbm" ? "LightGBM" : "排名加权"}</span>,
+                  j.total_return == null ? <span key="r" className="mm-dim">—</span> : <Num key="r" value={j.total_return} format={(v) => `${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%`} />,
+                  <StatusTag key="s" status={backtestStatusLabel(j.status)} />,
+                  <span key="t" className="mm-mono mm-dim">{j.created ? shortTime(j.created) : ""}</span>,
+                ],
+              }))} />
+          ) : <Empty>还没有回测。</Empty>}
+        </Block>
       ) : tab === "search" ? (
         <>
           {searches.error && <Note tone="bad" actions={<Btn kind="text" onClick={() => searches.setError("")}>关闭</Btn>}>{searches.error}</Note>}
