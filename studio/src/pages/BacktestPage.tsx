@@ -47,7 +47,15 @@ export function BacktestPage() {
     const u = universes[0];
     setParams((p) => ({ ...p, market: u.market, benchmark: u.benchmark, open_cost: u.open_cost, close_cost: u.close_cost }));
   }, [universes]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (searchParams.get("tab")) setSearchParams({}, { replace: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // ?job= (from the runs page, a toast or the failure banner) opens that backtest or search on arrival.
+  useEffect(() => {
+    const wanted = searchParams.get("job");
+    if (wanted) {
+      if (searchParams.get("tab") === "search") searches.select(wanted); else backtests.select(wanted);
+      layout.openResults();
+    }
+    if (searchParams.get("tab") || wanted) setSearchParams({}, { replace: true });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Portfolio search: the basket's factor signals are the candidates, the backtest parameters the setting.
   const searches = useSearches();
   const [objective, setObjective] = useState<SearchObjective>("sharpe");

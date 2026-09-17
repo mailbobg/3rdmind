@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
 import type { BacktestResult, SignalExport, Strategy, StrategyRun } from "../api/studio";
 import { shortTime } from "../hooks/experiments";
@@ -22,7 +22,10 @@ export function StrategiesPage() {
   const { basket, layout, env, backtests, trace, workspace } = useStudio();
   const navigate = useNavigate();
   const [items, setItems] = useState<Strategy[]>([]);
-  const [selectedId, setSelectedId] = useState("");
+  const [search, setSearch] = useSearchParams();
+  const [selectedId, setSelectedId] = useState(search.get("id") || "");
+  // ?id= (from the runs page, a toast or the failure banner) opens that strategy on arrival.
+  useEffect(() => { if (search.get("id")) { layout.openResults(); setSearch({}, { replace: true }); } }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [detail, setDetail] = useState<Strategy | null>(null);
   const [latestRun, setLatestRun] = useState<BacktestResult | null>(null);
   const [signal, setSignal] = useState<SignalExport | null>(null);

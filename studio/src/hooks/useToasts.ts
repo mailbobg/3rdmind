@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as studio from "../api/studio";
 import type { RecentItem } from "../api/studio";
 
-export interface Toast { id: string; title: string; body?: string; tone: "ok" | "bad" | "info"; trace?: string; at: number }
+import type { Job } from "../api/studio";
+export interface Toast { id: string; title: string; body?: string; tone: "ok" | "bad" | "info"; trace?: string; job?: Job; at: number }
 
 /**
  * Completion toasts: polls /studio/recent with a moving cursor (seeded on the first poll, so nothing that already

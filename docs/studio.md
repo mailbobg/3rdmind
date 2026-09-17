@@ -105,6 +105,17 @@ a form for the decision at hand (accept or rewrite a hypothesis, accept or flip 
 list, write the instruction) with the raw JSON under 高级. Round and run completions (`/studio/recent`) become
 toasts; a finished run shows a summary card with backtest and continue actions.
 
+## Background jobs
+
+Every long task is a job in one registry (`studio_jobs.py`, `/studio/jobs`): backtests, portfolio searches and
+take-apart diagnoses (tracked from their result files), 重算到最新, 更新到最新 and the first export of a
+universe's factor data (run on server threads; the last two used to block their HTTP request for up to half an
+hour), plus live research runs, the data sync and the US data build. A job carries kind, label, status,
+progress, market and a link to the page it belongs to. The rail's 运行记录 item shows how many are running, the
+runs page lists them all with progress (live first), completions become toasts (and desktop notifications when
+switched on), and failures sit in the banner until dismissed. Starting research on a universe whose data is not
+exported yet answers 409 with the export job; the client waits for it and retries.
+
 ## Other markets (US example)
 
 Markets are workspaces: the toggle at the top of the rail (A 股 | 美股) switches the whole Studio, like a

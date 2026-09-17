@@ -17,6 +17,8 @@ import { DataBuild } from "./DataBuild";
 import { AttentionBar } from "./AttentionBar";
 import { Toasts } from "./Toasts";
 import { useToasts } from "../hooks/useToasts";
+import { useJobs } from "../hooks/useJobs";
+import type { Job } from "../api/studio";
 import { useAttention } from "../hooks/useAttention";
 import { useNow } from "./Progress";
 import type { AttentionItem } from "../api/studio";
@@ -97,6 +99,17 @@ export function StudioShell({ region }: { region: string }) {
   const attention = useAttention(!!current?.ready, openAttention);
   const openTrace = useMemo(() => (trace: string) => navigate(`${workspace.base}/research?trace=${encodeURIComponent(trace)}`), [navigate, workspace.base]);
   const toasts = useToasts(!!current?.ready, attention.prefs.desktop, openTrace);
+  // Where a finished or failed job opens: the page its link names, inside this workspace.
+  const openJob = useMemo(() => (j: Job) => {
+    const link = j.link || {};
+    if (link.page === "research" && link.id) navigate(`${workspace.base}/research?trace=${encodeURIComponent(link.id)}`);
+    else if (link.page === "backtest") navigate(`${workspace.base}/backtest${link.id ? `?job=${encodeURIComponent(link.id)}` : ""}`);
+    else if (link.page === "search") navigate(`${workspace.base}/backtest?tab=search${link.id ? `&job=${encodeURIComponent(link.id)}` : ""}`);
+    else if (link.page === "strategies") navigate(`${workspace.base}/strategies${link.id ? `?id=${encodeURIComponent(link.id)}` : ""}`);
+    else if (link.page === "factors") navigate(`${workspace.base}/factors`);
+    else navigate(`${workspace.base}/runs`);
+  }, [navigate, workspace.base]);
+  const jobs = useJobs(!!current?.ready, toasts.push, attention.prefs.desktop, openJob);
   const now = useNow(15_000, attention.items.length > 0);
   useEffect(() => {
     const base = document.title.replace(/^● /, "");
@@ -127,6 +140,8 @@ export function StudioShell({ region }: { region: string }) {
                 <span className="min-w-0 text-[13px] font-medium">{item.title}<small className="mt-1 block text-[10px] font-normal leading-relaxed opacity-65">{item.desc}</small></span>
                 {item.path === "/research" && attention.items.length > 0
                   ? <span className="ml-auto rounded-full bg-danger px-1.5 text-[10px] font-semibold leading-[16px] text-white" title="等待确认">{attention.items.length}</span>
+                  : item.path === "/runs" && jobs.active.length > 0
+                  ? <span className="ml-auto inline-flex items-center gap-1.5 text-[11px]" title={`${jobs.active.length} 个任务在跑`}><i className="live__dot" aria-hidden />{jobs.active.length}</span>
                   : counts[item.path] && <span className="ml-auto text-[11px] opacity-60">{counts[item.path]}</span>}
               </NavLink>
             ))}
@@ -148,7 +163,8 @@ export function StudioShell({ region }: { region: string }) {
           </div>
         </aside>
         <div className="flex min-h-0 min-w-0 flex-col gap-2">
-        <AttentionBar items={attention.items} now={now} prefs={attention.prefs} setPrefs={attention.setPrefs} onOpen={openAttention} />
+        <AttentionBar items={attention.items} now={now} prefs={attention.prefs} setPrefs={attention.setPrefs} onOpen={openAttention}
+          failures={jobs.failures} onOpenJob={openJob} onDismissFailure={jobs.dismissFailure} />
         {regions && current && !current.ready ? (
           <section className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 rounded-2xl text-center" style={{ background: "var(--mm-ground)" }}>
             <div className="text-[15px] font-semibold">{workspace.label}数据还没构建</div>
@@ -158,7 +174,7 @@ export function StudioShell({ region }: { region: string }) {
         ) : <Outlet />}
         </div>
       </div>
-      <Toasts toasts={toasts.toasts} onDismiss={toasts.dismiss} onOpen={(t) => { if (t.trace) openTrace(t.trace); }} />
+      <Toasts toasts={toasts.toasts} onDismiss={toasts.dismiss} onOpen={(t) => { if (t.trace) openTrace(t.trace); else if (t.job) openJob(t.job); }} />
     </StudioContext.Provider>
   );
 }
