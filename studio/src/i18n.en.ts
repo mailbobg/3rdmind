@@ -338,7 +338,7 @@ export const EN: Record<string, string> = {
   "已结束": "Ended",
   "已结束的实验需要后端以 UI_LOAD_LEGACY_PICKLE_TRACES=true 启动才可回看。": "Finished experiments can be reviewed only when the backend was started with UI_LOAD_LEGACY_PICKLE_TRACES=true.",
   "已自动放行 {0} 个确认": "{0} confirmation(s) passed automatically",
-  "已跟踪": "tracked",
+  "已跟踪": "Tracked",
   "已选 {0} 个文件：{1}": "{0} file(s) selected: {1}",
   "已重算 · {0} UTC": "Recomputed · {0} UTC",
   "市值": "Value",
