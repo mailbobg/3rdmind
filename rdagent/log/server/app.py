@@ -298,12 +298,20 @@ def auto_answer(task: RDAgentTask, message: dict, why: str) -> None:
                           "loop_id": message.get("loop_id"), "content": {"kind": request_kind(message.get("content")), "why": why}})
 
 
+def latest_request(task: RDAgentTask) -> dict | None:
+    """The most recent user_interaction.request message of a task (later log events may follow it)."""
+    for message in reversed(task.messages):
+        if message.get("tag") == "user_interaction.request":
+            return message
+    return None
+
+
 def apply_confirm_policy(task: RDAgentTask) -> None:
     """Answer the task's pending request when its policy says so (mode) or it has waited too long (timeout)."""
     if not task.messages or not task.is_alive():
         return
-    last = task.messages[-1]
-    if last.get("tag") != "user_interaction.request" or last.get("answered"):
+    last = latest_request(task)
+    if last is None or last.get("answered"):
         return
     kind = request_kind(last.get("content"))
     mode = task.confirm.get("mode", "hypothesis")
@@ -486,8 +494,10 @@ def update_trace():
 
     task = _get_or_create_task(trace_id)
 
-    # Make sure any pending user-interaction requests are visible to the frontend.
+    # Make sure any pending user-interaction requests are visible to the frontend, and answer at once those
+    # the run's confirmation policy does not need a human for, so the page never shows them as pending.
     _drain_user_requests_into_messages(task)
+    apply_confirm_policy(task)
 
     if task.process is not None and not task.is_alive():
         if not task.messages or task.messages[-1].get("tag") != "END":
@@ -803,17 +813,19 @@ def submit_user_interaction_response():
 
     trace_id = str(log_folder_path / trace_id)
     task = _get_or_create_task(trace_id)
+    _drain_user_requests_into_messages(task)
+    pending = latest_request(task)
+    if pending is None or pending.get("answered"):
+        # A stale card (already answered by the policy, a timeout or another tab) must not push a second payload,
+        # which the loop would take as the answer to its next question.
+        return jsonify({"error": "这个确认已经处理过了", "answered": True}), 409
 
     try:
         task.user_response_q.put(payload, block=False)
     except Exception:
         app.logger.exception("Failed to enqueue a user response")
         return jsonify({"error": "Failed to enqueue user response"}), 500
-    # Mark the request answered so the Studio's attention list stops showing it.
-    for message in reversed(task.messages):
-        if message.get("tag") == "user_interaction.request":
-            message["answered"] = True
-            break
+    pending["answered"] = True  # the attention list stops showing it
 
     return jsonify({"status": "success"}), 200
 

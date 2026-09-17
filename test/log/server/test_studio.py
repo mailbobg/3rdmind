@@ -163,7 +163,7 @@ def test_experiments_summarise_loaded_traces(studio_client) -> None:
     ]
     rows = {r["id"]: r for r in studio_client.get("/studio/experiments").get_json()}
     assert rows["Finance Data Building/second"] == {
-        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1, "market": "csi300", "waiting": None,
+        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1, "market": "csi300", "waiting": None, "confirm": {"mode": "hypothesis", "timeout_min": 30, "instruction": ""}, "auto_answered": 0,
         "status": "completed", "updated": "2026-09-02T11:00:00", "hypothesis": "second", "messages": 5,
     }
     # The demo trace has events but no END and no live process: it ended without reporting.
@@ -1372,9 +1372,13 @@ def test_attention_lists_unanswered_requests_of_live_runs(studio_client) -> None
     task.user_response_q = type("Q", (), {"put": lambda self, *a, **k: None})()
     assert studio_client.post("/user_interaction/submit", json={"id": "Finance Data Building/waiting", "payload": {"hypothesis": "h"}}).status_code == 200
     assert studio_client.get("/studio/attention").get_json() == []
-    # A feedback request is classified as such.
+    # A feedback request is classified as such, and stays pending even when log events arrive after it.
     task.messages.append({"tag": "user_interaction.request", "timestamp": "2026-09-17T01:20:00", "content": {"decision": True, "reason": "ok"}})
+    task.messages.append({"tag": "research.hypothesis", "loop_id": "1", "timestamp": "2026-09-17T01:20:01", "content": {"hypothesis": "late"}})
     assert studio_client.get("/studio/attention").get_json()[0]["kind"] == "feedback"
+    # Submitting twice: the second is refused instead of queueing a stray payload.
+    assert studio_client.post("/user_interaction/submit", json={"id": "Finance Data Building/waiting", "payload": {"decision": True}}).status_code == 200
+    assert studio_client.post("/user_interaction/submit", json={"id": "Finance Data Building/waiting", "payload": {"decision": True}}).status_code == 409
 
 
 @pytest.mark.offline

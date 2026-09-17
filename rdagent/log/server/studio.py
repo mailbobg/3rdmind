@@ -462,6 +462,8 @@ def summarize_task(trace_id, task):
         "id": trace_id, "scenario": trace_id.split("/")[0], "rounds": len(loops), "accepted": accepted, "market": run_market(trace_id),
         "status": status, "updated": updated or ended_at or None, "hypothesis": hypothesis, "messages": len(task.messages),
         "waiting": pending["kind"] if pending else None,
+        "confirm": getattr(task, "confirm", None),
+        "auto_answered": sum(1 for m in task.messages if m.get("tag") == "user_interaction.auto"),
     }
 
 
@@ -470,8 +472,8 @@ def pending_request(task):
     process = getattr(task, "process", None)
     if process is None or not task.is_alive():
         return None
-    last = task.messages[-1] if task.messages else None
-    if not last or last.get("tag") != "user_interaction.request" or last.get("answered"):
+    last = next((m for m in reversed(task.messages) if m.get("tag") == "user_interaction.request"), None)
+    if not last or last.get("answered"):
         return None
     content = last.get("content") if isinstance(last.get("content"), dict) else {}
     kind = ("features" if "features" in content else "instruction" if "user_instruction" in content

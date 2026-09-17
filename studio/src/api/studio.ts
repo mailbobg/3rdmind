@@ -135,6 +135,9 @@ export interface ExperimentSummary {
   market: string;
   /** Set while the run is blocked on a confirmation: what kind. */
   waiting?: string | null;
+  /** The run's confirmation policy and how many requests it has answered on the user's behalf. */
+  confirm?: { mode: string; timeout_min: number; instruction: string } | null;
+  auto_answered?: number;
   id: string; scenario: string; rounds: number; accepted: number; status: ExperimentStatus;
   updated: string | null; hypothesis: string | null; messages: number;
 }

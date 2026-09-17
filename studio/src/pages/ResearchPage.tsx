@@ -282,7 +282,8 @@ export function ResearchPage() {
                 navigate(workspace.path("/backtest"));
               }} />
           )}
-          {trace.traceId && (progress.length > 0 || trace.active) && <LiveStatus traceId={trace.traceId} events={trace.events} running={trace.active} waiting={!!trace.interaction} roundId={activeRound?.id ?? null} />}
+          {trace.traceId && (progress.length > 0 || trace.active) && <LiveStatus traceId={trace.traceId} events={trace.events} running={trace.active} waiting={!!trace.interaction} roundId={activeRound?.id ?? null}
+            confirm={summaries.find((x) => x.id === trace.traceId)?.confirm} autoAnswered={summaries.find((x) => x.id === trace.traceId)?.auto_answered} />}
           {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} /> : <Hint>在左侧展开一个实验，点一轮查看假设、评估与代码。</Hint>}
         </div>
       )}

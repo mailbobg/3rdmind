@@ -102,14 +102,20 @@ export function useTrace() {
     const current = interaction;
     if (!current) return;
     await guarded(async () => {
-      await studio.submitInteraction(traceIdRef.current, payload);
+      try {
+        await studio.submitInteraction(traceIdRef.current, payload);
+      } catch (e) {
+        // Already answered elsewhere (policy, timeout, another tab): just drop the card.
+        if (!(e instanceof studio.ApiError && e.status === 409)) throw e;
+      }
+      await refresh();
       setAcknowledged((list) => {
         const next = [...list, interactionKey(current)].slice(-50);
         persistStudioState({ acknowledged: next });
         return next;
       });
     });
-  }, [guarded, interaction, interactionKey]);
+  }, [guarded, interaction, interactionKey, refresh]);
   const registerLaunched = useCallback((id: string) => setTraceIds((list) => [id, ...list.filter((t) => t !== id)]), []);
 
   return { traceId, traceIds, events, rounds, status, active, interaction, error, setError, busy, setBusy,

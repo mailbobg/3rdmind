@@ -40,7 +40,19 @@ export function StepStrip({ round, now, compact }: { round: RoundProgress; now: 
  * The live status card at the top of a running round: step strip with durations, the estimate from earlier
  * rounds, a "may be stuck" note when the process has gone quiet, and a collapsible tail of the process log.
  */
-export function LiveStatus({ traceId, events, running, waiting, roundId }: { traceId: string; events: TraceEvent[]; running: boolean; waiting: boolean; roundId: string | null }) {
+const POLICY_LABELS: Record<string, string> = { hypothesis: "只确认假设", all: "全部确认", auto: "全自动" };
+/** "只确认假设 · 30 分钟无人则自动继续 · 已自动放行 3 个" for the status card. */
+function policyLine(confirm: { mode: string; timeout_min: number } | null | undefined, autoAnswered?: number): string {
+  if (!confirm) return "";
+  const parts = [POLICY_LABELS[confirm.mode] || confirm.mode];
+  if (confirm.mode !== "auto") parts.push(confirm.timeout_min ? `${confirm.timeout_min} 分钟无人则自动继续` : "一直等");
+  if (autoAnswered) parts.push(`已自动放行 ${autoAnswered} 个确认`);
+  return parts.join(" · ");
+}
+
+export function LiveStatus({ traceId, events, running, waiting, roundId, confirm, autoAnswered }: {
+  traceId: string; events: TraceEvent[]; running: boolean; waiting: boolean; roundId: string | null;
+  confirm?: { mode: string; timeout_min: number; instruction: string } | null; autoAnswered?: number }) {
   const now = useNow(1000, running);
   const rounds = roundProgress(events, running, now);
   const round = rounds.find((r) => r.id === roundId) ?? rounds[rounds.length - 1];
@@ -65,6 +77,7 @@ export function LiveStatus({ traceId, events, running, waiting, roundId }: { tra
           <span className="live__title"><i className="live__dot" aria-hidden />{waiting ? "等你确认后开始" : "正在初始化，等待第一轮假设"}</span>
           <span className="live__meta">首轮通常 8–15 分钟</span>
         </div>
+        {policyLine(confirm, autoAnswered) && <div className="mm-dim" style={{ fontSize: 11 }}>确认：{policyLine(confirm, autoAnswered)}</div>}
         <div className="live__foot">
           <span className="mm-dim">{lastOutput ? `上次输出 ${fmtDuration(now - lastOutput)}前` : ""}</span>
           <Btn kind="text" onClick={() => setShowLog((v) => !v)}>{showLog ? "收起日志" : "实时日志"}</Btn>
@@ -95,6 +108,7 @@ export function LiveStatus({ traceId, events, running, waiting, roundId }: { tra
         </span>
       </div>
       <StepStrip round={round} now={now} />
+      {isLive && policyLine(confirm, autoAnswered) && <div className="mm-dim" style={{ fontSize: 11 }}>确认：{policyLine(confirm, autoAnswered)}</div>}
       {isLive && (
         <div className="live__foot">
           <span className="mm-dim">
