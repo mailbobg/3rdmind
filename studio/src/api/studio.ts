@@ -10,6 +10,9 @@ export interface TraceEvent {
   loop_id?: number | string | null;
   evo_id?: number;
   content: any;
+  /** Set by the server once a user_interaction.request was answered (by the user or by the confirm policy). */
+  answered?: boolean;
+  auto?: string;
 }
 export interface Environment {
   chat_model: string; provider_uri: string; data_ready: boolean;

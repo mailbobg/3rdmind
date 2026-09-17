@@ -95,7 +95,8 @@ export function StudioShell({ region }: { region: string }) {
   // Runs blocked on a confirmation: badge on the menu, banner over the page, title dot, optional notifications.
   const openAttention = useMemo(() => (item: AttentionItem) => navigate(`${workspace.base}/research?trace=${encodeURIComponent(item.trace)}`), [navigate, workspace.base]);
   const attention = useAttention(!!current?.ready, openAttention);
-  const toasts = useToasts(!!current?.ready);
+  const openTrace = useMemo(() => (trace: string) => navigate(`${workspace.base}/research?trace=${encodeURIComponent(trace)}`), [navigate, workspace.base]);
+  const toasts = useToasts(!!current?.ready, attention.prefs.desktop, openTrace);
   const now = useNow(15_000, attention.items.length > 0);
   useEffect(() => {
     const base = document.title.replace(/^● /, "");
@@ -157,7 +158,7 @@ export function StudioShell({ region }: { region: string }) {
         ) : <Outlet />}
         </div>
       </div>
-      <Toasts toasts={toasts.toasts} onDismiss={toasts.dismiss} onOpen={(t) => { if (t.trace) navigate(`${workspace.base}/research?trace=${encodeURIComponent(t.trace)}`); }} />
+      <Toasts toasts={toasts.toasts} onDismiss={toasts.dismiss} onOpen={(t) => { if (t.trace) openTrace(t.trace); }} />
     </StudioContext.Provider>
   );
 }

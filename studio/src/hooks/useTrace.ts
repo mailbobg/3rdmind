@@ -39,7 +39,8 @@ export function useTrace() {
 
   const interactionKey = useCallback((e: TraceEvent) => `${traceIdRef.current}:${e.timestamp}:${JSON.stringify(e.content)}`, []);
   const interaction = useMemo(
-    () => (active ? events.find((e) => e.tag === "user_interaction.request" && !acknowledged.includes(interactionKey(e))) || null : null),
+    // A request answered elsewhere (another tab, or the server's confirm policy / timeout) carries `answered`.
+    () => (active ? events.find((e) => e.tag === "user_interaction.request" && !e.answered && !acknowledged.includes(interactionKey(e))) || null : null),
     [active, events, acknowledged, interactionKey],
   );
 
