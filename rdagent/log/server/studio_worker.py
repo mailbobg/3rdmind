@@ -578,6 +578,7 @@ def search(config, progress=lambda *_: None):
     variant would need a refit. ``progress`` receives (done, total estimate, steps so far) after each backtest.
     """
     prepared = prepare(config)
+    config = prepared["config"]  # possibly with the end day clamped; see prepare()
     factors, model = prepared["factors"], prepared["model"]
     if model["method"] != "rank":
         raise ValueError("Portfolio search works with the rank blend; switch 信号合成 to 排名加权")
