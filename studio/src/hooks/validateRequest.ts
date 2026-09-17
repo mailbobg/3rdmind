@@ -5,6 +5,9 @@ export function validateRequest(c: BacktestRequest): string | null {
   if (!c.factors.every((f) => f.trace && Number.isInteger(f.loop_id))) return "每个因子都要来自某个实验轮次。";
   if (!c.factors.every((f) => Number.isFinite(f.weight))) return "因子权重必须是数字。";
   if (c.factors.reduce((s, f) => s + Math.abs(f.weight), 0) === 0) return "至少一个因子的权重不为 0。";
+  const names = c.factors.map((f) => f.name);
+  const dup = names.find((n, i) => names.indexOf(n) !== i);
+  if (dup) return `篮子里有两个同名因子 ${dup}（来自不同轮次），请只保留一个。`;
   if (!c.start || !c.end || c.start >= c.end) return "开始日期必须早于结束日期。";
   if (c.model?.method === "lgbm") {
     const [ts, te] = c.model.train, [vs, ve] = c.model.valid;

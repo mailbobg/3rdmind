@@ -861,6 +861,8 @@ def test_factor_library_lists_factors_with_code(studio_client, tmp_path: Path) -
 
 @pytest.mark.offline
 def test_validate_config_checks_benchmark() -> None:
+    with pytest.raises(ValueError, match="同名因子 STR_5"):
+        validate_config(_config(factors=[{"name": "STR_5", "path": "/tmp/a", "weight": 1}, {"name": "STR_5", "path": "/tmp/b", "weight": 1}]))
     assert validate_config(_config())["benchmark"] == "SH000300"
     assert validate_config(_config(benchmark=" SH000905 "))["benchmark"] == "SH000905"
     with pytest.raises(ValueError, match="benchmark"):

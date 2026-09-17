@@ -84,6 +84,8 @@ export interface Breakdown {
 }
 export interface BacktestResult extends BacktestSummary {
   error?: string; log?: string; method?: string; rows?: BacktestRow[];
+  /** Adjustments the worker made (e.g. the end day moved before the calendar's last day). */
+  notes?: string[];
   diagnosis?: { signals: SignalDiagnosis[]; correlation: CorrelationMatrix } | null;
   breakdown?: Breakdown | null;
   trades?: Trade[]; holdings?: { positions: Holding[]; cash: number | null; total: number | null }; instruments?: InstrumentSummary[];

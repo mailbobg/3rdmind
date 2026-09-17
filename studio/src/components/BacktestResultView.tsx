@@ -41,6 +41,7 @@ export function BacktestResultView({ result, onDiagnose }: { result: BacktestRes
           {" · "}{result.config.model?.method === "lgbm" ? `LightGBM（训练 ${result.config.model.train.join("→")}，验证 ${result.config.model.valid.join("→")}）` : "排名加权"}
         </Hint>
         {result.error && <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{result.error}</Alert.Title></Alert.Content></Alert>}
+        {result.notes?.map((n, i) => <Alert key={i} status="accent"><Alert.Indicator /><Alert.Content><Alert.Title>{n}</Alert.Title></Alert.Content></Alert>)}
         {m && (
           <>
             <MetricGrid items={[

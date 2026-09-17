@@ -51,6 +51,10 @@ def validate_config(config):
     factors = result.get("factors", [])
     if not isinstance(factors, list) or not 1 <= len(factors) <= 20:
         raise ValueError("Select 1 to 20 factors")
+    names = [f.get("name") for f in factors if isinstance(f, dict)]
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    if duplicates:
+        raise ValueError(f"篮子里有同名因子 {', '.join(map(str, duplicates))}（来自不同轮次），请只保留一个")
     total = 0
     for factor in factors:
         for key in ("name", "path"):
@@ -349,6 +353,15 @@ def prepare(config):
     calendar = D.calendar(freq="day")
     if pd.Timestamp(config["end"]) > calendar[-1] or pd.Timestamp(config["start"]) < calendar[0]:
         raise ValueError(f"Requested dates outside data coverage: {calendar[0]} to {calendar[-1]}")
+    notes = []
+    # Qlib's TopkDropoutStrategy looks up the trading day after each step, so a backtest cannot end on the
+    # calendar's very last day; end one day earlier and say so.
+    if pd.Timestamp(config["end"]) >= calendar[-1]:
+        clamped = str(pd.Timestamp(calendar[-2]).date())
+        notes.append(f"结束日 {config['end']} 是数据的最后一个交易日，回测需要再往后一天的数据，已改为 {clamped}")
+        config = {**config, "end": clamped}
+        if pd.Timestamp(config["start"]) >= pd.Timestamp(config["end"]):
+            raise ValueError("Start date must be earlier than the last usable backtest day " + clamped)
     # TopkDropoutStrategy reads the previous trading day's prediction.
     prior = calendar[calendar < pd.Timestamp(config["start"])]
     if not len(prior):
@@ -374,7 +387,7 @@ def prepare(config):
     if label_raw.index.names[0] == "instrument":  # Qlib returns (instrument, datetime); signals are (datetime, instrument)
         label_raw = label_raw.swaplevel(0, 1)
     label = cross_sectional_zscore(label_raw.sort_index())
-    return {"calendar": calendar, "prior_day": prior[-1], "end_day": trading_day_on_or_before(calendar, config["end"]),
+    return {"calendar": calendar, "prior_day": prior[-1], "end_day": trading_day_on_or_before(calendar, config["end"]), "config": config, "notes": notes,
             "factors": factors, "model": model, "ranks": ranks, "label": label}
 
 
@@ -486,6 +499,7 @@ def latest_scores(score, topk):
 
 def run(config):
     prepared = prepare(config)
+    config = prepared["config"]  # possibly with the end day clamped; see prepare()
     factors, model = prepared["factors"], prepared["model"]
     score, model_report = combine(prepared, [f["name"] for f in factors], [f["weight"] for f in factors], model)
     test_ic, test_rank_ic = information_coefficient(score, prepared["label"])
@@ -501,6 +515,7 @@ def run(config):
                   "rows": rows, "config": config,
                   "trades": trades, "holdings": holdings, "instruments": instruments, "latest_signal": signal,
                   "diagnosis": signal_diagnosis(prepared, score) if len(factors) > 1 else None,
+                  "notes": prepared["notes"],
                   "method": "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})
 
 
@@ -512,6 +527,7 @@ def diagnose(config, progress=lambda *_: None):
     with (done, total) after each variant.
     """
     prepared = prepare(config)
+    config = prepared["config"]
     factors, model = prepared["factors"], prepared["model"]
     if len(factors) < 2:
         raise ValueError("Diagnosis needs at least two signals")
