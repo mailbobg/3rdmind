@@ -1343,6 +1343,11 @@ def test_sync_remote_check_falls_back_when_the_api_is_rate_limited(monkeypatch: 
     # Both routes down: the cached answer is served; with no cache the error names the rate limit.
     monkeypatch.setattr(studio_sync, "_latest_tag_by_redirect", lambda timeout=20: (_ for _ in ()).throw(RuntimeError("offline")))
     assert studio_sync.check_remote(max_age=0)["release"] == "2026-09-15"
+    # A key with stray non-ASCII characters (a pasted hint, full-width letters) is named instead of a codec error.
+    bad = studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001", "api_key": "sk-abc 已保存…"}).get_json()
+    assert not bad["ok"] and "非 ASCII" in bad["error"] and "第 8 位" in bad["error"]
+    assert "非 ASCII" in studio_client.put("/studio/llm/embedding", json={"provider": "gemini", "model": "x", "api_key": "ｓｋ-full-width"}).get_json()["error"]
+    assert "非 ASCII" in studio_client.put("/studio/llm", json={"provider": "openai", "model": "x", "base_url": "https://中转.example/v1"}).get_json()["error"]
     monkeypatch.setattr(studio_sync, "_remote_cache", {"checked_at": 0.0, "release": None})
     with pytest.raises(RuntimeError, match="限流"):
         studio_sync.check_remote(max_age=0)

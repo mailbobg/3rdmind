@@ -84,6 +84,15 @@ def _hint(key: str | None) -> str:
     return f"…{key[-4:]}" if len(key) >= 8 else ("已设置" if key else "")
 
 
+def _ascii(name: str, value: str) -> str:
+    """Keys and URLs travel in HTTP headers, which only carry ASCII; a stray Chinese character, full-width
+    letter or ellipsis pasted along with a key makes the client fail with an unhelpful codec error."""
+    bad = next((i for i, ch in enumerate(value) if ord(ch) > 126), None)
+    if bad is not None:
+        raise ValueError(f"{name} 第 {bad + 1} 位起含有非 ASCII 字符（{value[bad:bad + 6]!r}），可能混入了中文、全角字符或省略号，请重新粘贴")
+    return value
+
+
 def _provider_from_model(model: str) -> str | None:
     for p in PROVIDERS:
         if p["id"] != "openai_compatible" and model.startswith(p["prefix"]):
@@ -170,7 +179,8 @@ def save(values: dict) -> dict:
         raise ValueError("最大重试次数应在 1–50 之间")
     data = _load()
     keys = dict(data.get("keys") or {})
-    api_key = str(values.get("api_key") or "").strip()
+    api_key = _ascii("API Key", str(values.get("api_key") or "").strip())
+    _ascii("Base URL", base_url)
     if api_key:
         keys[provider] = api_key
     elif values.get("clear_key"):
@@ -200,7 +210,8 @@ def save_embedding(values: dict) -> dict:
     if spec.get("needs_base") and not base_url:
         raise ValueError("OpenAI 兼容接口需要填写 Base URL")
     keys = dict(data.get("keys") or {})
-    api_key = str(values.get("api_key") or "").strip()
+    api_key = _ascii("API Key", str(values.get("api_key") or "").strip())
+    _ascii("Base URL", base_url)
     if api_key:
         keys[provider] = api_key
     elif values.get("clear_key"):
@@ -233,8 +244,8 @@ def resolve_embedding(values: dict | None = None) -> dict | None:
     # LiteLLM provider prefix unless it is already there.
     if not model.startswith(spec["prefix"]):
         model = spec["prefix"] + model
-    api_key = str(source.get("api_key") or "") or keys.get(provider, "") or os.environ.get(spec["key_env"], "")
-    return {"provider": provider, "model": model, "api_key": api_key, "base_url": str(source.get("base_url") or ""),
+    api_key = _ascii("API Key", str(source.get("api_key") or "").strip()) or keys.get(provider, "") or os.environ.get(spec["key_env"], "")
+    return {"provider": provider, "model": model, "api_key": api_key, "base_url": _ascii("Base URL", str(source.get("base_url") or "").strip()),
             "key_env": spec["key_env"], "base_env": spec["base_env"], "no_key": bool(spec.get("no_key"))}
 
 
@@ -264,8 +275,8 @@ def resolve(values: dict | None = None) -> dict | None:
         model = spec["prefix"] + model
     elif spec["id"] == "openai_compatible" and "/" not in model:
         model = spec["prefix"] + model
-    api_key = str(source.get("api_key") or "") or keys.get(provider, "") or os.environ.get(spec["key_env"], "")
-    return {"provider": provider, "model": model, "api_key": api_key, "base_url": str(source.get("base_url") or ""),
+    api_key = _ascii("API Key", str(source.get("api_key") or "").strip()) or keys.get(provider, "") or os.environ.get(spec["key_env"], "")
+    return {"provider": provider, "model": model, "api_key": api_key, "base_url": _ascii("Base URL", str(source.get("base_url") or "").strip()),
             "key_env": spec["key_env"], "base_env": spec["base_env"], "max_retry": int(source.get("max_retry") or saved.get("max_retry") or 10)}
 
 
@@ -294,7 +305,10 @@ def env() -> dict[str, str]:
 
 def test_embedding(values: dict) -> dict:
     """Embed one short string with the given (or saved) embedding settings; returns {ok, dims|error, seconds, model}."""
-    r = resolve_embedding(values)
+    try:
+        r = resolve_embedding(values)
+    except ValueError as error:
+        return {"ok": False, "error": str(error)}
     if r is None:
         return {"ok": False, "error": "请先选择嵌入模型的提供商并填写模型名"}
     if not r["api_key"] and not r["no_key"]:
@@ -317,7 +331,10 @@ def test_embedding(values: dict) -> dict:
 
 def test_connection(values: dict) -> dict:
     """One tiny completion with the given (or saved) settings; returns {ok, reply|error, seconds, model}."""
-    r = resolve(values)
+    try:
+        r = resolve(values)
+    except ValueError as error:
+        return {"ok": False, "error": str(error)}
     if r is None:
         return {"ok": False, "error": "请先选择提供商并填写模型名"}
     if not r["api_key"] and not PROVIDER_BY_ID[r["provider"]].get("no_key"):
@@ -349,7 +366,10 @@ def list_models(values: dict) -> dict:
     """The provider's own model list, fetched with the given (or stored) key: {ok, models|error, source}.
     ``kind`` = "embedding" keeps the embedding models instead of the chat models."""
     kind = values.get("kind") or "chat"
-    r = resolve({**values, "model": values.get("model") or "x"})
+    try:
+        r = resolve({**values, "model": values.get("model") or "x"})
+    except ValueError as error:
+        return {"ok": False, "error": str(error)}
     if r is None:
         return {"ok": False, "error": "请先选择提供商"}
     spec = PROVIDER_BY_ID[r["provider"]]
