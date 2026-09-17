@@ -139,13 +139,13 @@ export function ResearchPage() {
     setResuming(true);
     try {
       const id = trace.traceId;
-      await studio.resumeResearch(id, moreLoops);
+      await studio.resumeResearch(id, moreLoops, { mode: form.confirmMode, timeout: form.confirmMode === "auto" ? 0 : form.confirmTimeout });
       setRoundId("");
       await trace.select(id, true);
       loadSummaries();
       layout.openResults();
     } catch (e) { trace.setError(errorText(e)); } finally { setResuming(false); }
-  }, [canContinue, moreLoops, trace, loadSummaries, layout]);
+  }, [canContinue, moreLoops, form.confirmMode, form.confirmTimeout, trace, loadSummaries, layout]);
 
   const sendToBacktest = (round: RoundView) => { basket.addRound(trace.traceId, Number(round.id), round.factors); navigate(workspace.path("/backtest")); };
   const sendPrediction = (round: RoundView) => { basket.addPrediction(trace.traceId, Number(round.id)); navigate(workspace.path("/backtest")); };
@@ -174,7 +174,17 @@ export function ResearchPage() {
         <div className="mm-row" style={{ marginTop: 10 }}>
           <span className="mm-dim" style={{ fontSize: 12 }}>继续研究</span>
           <NumberInput ariaLabel="继续的轮数" value={moreLoops} onChange={setMoreLoops} min={1} max={30} className="mm-weight" />
-          <span className="mm-dim" style={{ fontSize: 12 }}>轮</span>
+          <span className="mm-dim" style={{ fontSize: 12 }}>轮，</span>
+          <SelectInput ariaLabel="确认方式" className="w-32" value={form.confirmMode} onChange={(v) => setForm((f) => ({ ...f, confirmMode: v }))} options={[
+            { value: "hypothesis", label: "只确认假设" }, { value: "all", label: "全部确认" }, { value: "auto", label: "全自动" },
+          ]} />
+          {form.confirmMode !== "auto" && (
+            <>
+              <span className="mm-dim" style={{ fontSize: 12 }}>无人处理</span>
+              <NumberInput ariaLabel="无人处理超时（分钟）" value={form.confirmTimeout} onChange={(v) => setForm((f) => ({ ...f, confirmTimeout: v }))} min={0} max={1440} className="mm-weight" />
+              <span className="mm-dim" style={{ fontSize: 12 }}>分钟后自动继续{form.confirmTimeout === 0 ? "（0 = 一直等）" : ""}</span>
+            </>
+          )}
           <Btn kind="primary" disabled={resuming} onClick={continueResearch}>{resuming ? "启动中…" : `继续研究 ${moreLoops} 轮`}</Btn>
           <span className="mm-dim" style={{ fontSize: 12 }}>从最后一个快照接着跑，Agent 记得前面每一轮的假设和反馈；新轮次追加到这个实验里。</span>
         </div>

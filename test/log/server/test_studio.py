@@ -1433,6 +1433,16 @@ def test_upload_and_resume_carry_the_confirm_policy(studio_client, tmp_path: Pat
     assert response.status_code == 200, response.get_json()
     assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "vol"}
     assert studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "1", "confirm_mode": "never"}).status_code == 400
+    # Resume: the previous run's policy is inherited unless the request names a new one.
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    (trace_folder / "Finance Data Building" / "demo" / "__session__").mkdir(parents=True, exist_ok=True)
+    previous = server._get_or_create_task(str(trace_folder / "Finance Data Building/demo"))
+    previous.confirm = {"mode": "all", "timeout_min": 0, "instruction": "old"}
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1}).status_code == 200
+    assert started[-1].confirm == {"mode": "all", "timeout_min": 0, "instruction": "old"}
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1, "confirm_mode": "auto", "confirm_timeout": 0}).status_code == 200
+    assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "old"}
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1, "confirm_mode": "never"}).status_code == 400
 
 
 @pytest.mark.offline

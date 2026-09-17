@@ -159,7 +159,8 @@ export const traceSnapshot = (id: string) => api<TraceEvent[]>("/trace", { id, s
 export const startResearch = (form: FormData) => api<{ id: string }>("/upload", form);
 export const stopResearch = (id: string) => api<{ status: string }>("/control", { id, action: "stop" });
 /** Continue a finished loop experiment for `loops` more rounds, appending to the same trace. */
-export const resumeResearch = (id: string, loops: number) => api<{ id: string; loops: number; loop_n: number }>("/resume", { id, loops });
+export const resumeResearch = (id: string, loops: number, confirm?: { mode: string; timeout: number }) =>
+  api<{ id: string; loops: number; loop_n: number }>("/resume", { id, loops, ...(confirm ? { confirm_mode: confirm.mode, confirm_timeout: confirm.timeout } : {}) });
 export const submitInteraction = (id: string, payload: unknown) =>
   api<{ status: string }>("/user_interaction/submit", { id, payload });
 export const stdoutUrl = (id: string) => `/stdout?${new URLSearchParams({ id })}`;
