@@ -255,3 +255,5 @@ export const testLlmSettings = (values: LlmForm) =>
 export const listLlmModels = (values: Pick<LlmForm, "provider" | "api_key" | "base_url">) =>
   fetch("/studio/llm/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
     .then(async (r) => (await r.json()) as { ok: boolean; models?: string[]; error?: string; source?: string });
+export interface TraceTail { lines: string[]; updated: string | null; size: number }
+export const traceTail = (trace: string, lines = 12) => api<TraceTail>(`/studio/trace-tail?${new URLSearchParams({ trace, lines: String(lines) })}`);

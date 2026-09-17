@@ -1195,3 +1195,40 @@ def data_build_start():
     except OSError as error:
         return jsonify({"started": False, "reason": str(error)}), 500
     return jsonify({"started": True}), 202
+
+
+# ---- Live log tail of a research run: what the process printed last, and when ------------------------------
+
+_LOG_NOISE = re.compile(r"mlflow\.agent\.hint|instrumenting-with-mlflow-tracing|MLFLOW_DISABLE_AGENT_HINT|^\s*$|Workflow Progress|it/s\]|ModuleNotFoundError\. .* skipped|fitz. API is deprecated|Load the$|before writing any tracing|ow/assistant/skills|^`instrumenting|^any tracing code")
+
+
+@studio.get("/trace-tail")
+def trace_tail():
+    """The last lines of a run's stdout (noise such as progress bars and mlflow hints dropped) plus the file's
+    last-modified time, so the UI can show what the agent is doing and how long it has been quiet."""
+    trace = request.args.get("trace", "")
+    if not trace or ".." in trace.split("/"):
+        return jsonify({"error": "trace required"}), 400
+    path = (TRACE_ROOT / trace).with_suffix(".log")
+    if not path.is_file():
+        return jsonify({"lines": [], "updated": None, "size": 0})
+    try:
+        lines = int(request.args.get("lines") or 12)
+    except ValueError:
+        lines = 12
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - 64 * 1024))
+        chunk = handle.read().decode("utf-8", "replace")
+    kept = []
+    for raw in chunk.splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", raw).rstrip()
+        # Loguru lines: keep the time and the message, drop the module path in between.
+        m = re.match(r"^\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+ \| (\w+)\s+\| [^-]+ - (.*)$", line)
+        if m:
+            line = f"{m.group(1)} {m.group(3)}"
+        if _LOG_NOISE.search(line):
+            continue
+        kept.append(line[:240])
+    return jsonify({"lines": kept[-max(1, min(lines, 60)):], "size": size,
+                    "updated": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()})

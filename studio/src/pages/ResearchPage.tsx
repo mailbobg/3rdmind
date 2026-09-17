@@ -13,6 +13,8 @@ import { Block, Btn, Empty, Field, FieldGrid, Note, NumberInput, P, SelectInput,
 import type { Row } from "../components/minimal";
 import { Section } from "../components/Section";
 import { Hint, MetricGrid } from "../components/widgets";
+import { LiveStatus, StepStrip, useNow } from "../components/Progress";
+import { fmtDuration, progressLine, roundProgress } from "../hooks/progress";
 
 interface Mode {
   name: string; desc: string; value: string; loops: boolean; duration: boolean; objective: boolean; input?: "reports" | "paper";
@@ -36,13 +38,6 @@ const MODES: Mode[] = [
   { name: "论文模型实现", desc: "上传论文 PDF 或给链接 → 提取模型结构 → 实现", value: "General Model Implementation", loops: false, duration: false, objective: false, input: "paper",
     steps: ["读取论文，抽出模型结构与训练细节", "实现成可运行的模型代码并做检查"],
     output: "产出是模型代码，没有 Qlib 评估，也不进因子库。" },
-];
-
-const stagesOf = (round: RoundView) => [
-  { name: "假设", done: !!round.hypothesis.hypothesis },
-  { name: "代码", done: round.files.length > 0 },
-  { name: "评估", done: !!round.metrics },
-  { name: "反馈", done: !!round.feedback },
 ];
 
 export function ResearchPage() {
@@ -96,6 +91,10 @@ export function ResearchPage() {
 
   const status = trace.busy && !trace.events.length ? "加载中" : trace.status;
   const activeRound: RoundView | null = trace.rounds.find((r) => r.id === roundId) || trace.rounds[trace.rounds.length - 1] || null;
+  // Step timelines of the selected experiment's rounds; the clock only ticks while it runs.
+  const now = useNow(1000, trace.active);
+  const progress = useMemo(() => roundProgress(trace.events, trace.active, now), [trace.events, trace.active, now]);
+  const progressOf = (id: string) => progress.find((p) => p.id === id);
   const hasPrediction = (round: RoundView) => predictionLoops.has(Number(round.id));
 
   const pick = useCallback(async (id: string) => {
@@ -162,7 +161,7 @@ export function ResearchPage() {
           cells: [
             <span key="n" className="mm-mono mm-dim">{Number(round.id) + 1}</span>,
             <span key="h" className="block truncate" title={round.hypothesis.hypothesis}>{round.hypothesis.hypothesis || <span className="mm-dim">（无假设文本）</span>}</span>,
-            <span key="s" className="mm-tag">{stagesOf(round).map((st) => <span key={st.name} className={st.done ? "mm-pos" : "mm-dim"} style={{ marginRight: 8 }}>{st.done ? "●" : "○"} {st.name}</span>)}</span>,
+            <span key="s" className="flex items-center gap-2.5">{progressOf(round.id) && <StepStrip round={progressOf(round.id)!} now={now} compact />}<span className="mm-mono mm-dim" style={{ fontSize: 11 }}>{progressOf(round.id)?.elapsed != null ? fmtDuration(progressOf(round.id)!.elapsed) : ""}</span></span>,
             round.factors.length ? String(round.factors.length) : <span key="f" className="mm-dim">—</span>,
             <StatusTag key="st" status={round.status} />,
           ],
@@ -189,7 +188,9 @@ export function ResearchPage() {
         <span key="sc" className="mm-dim">{scenarioName(e.id)}{e.market && e.market !== "csi300" ? ` · ${universeLabel(e.market)}` : ""}</span>,
         e.rounds == null ? <span key="r" className="mm-dim">—</span> : String(e.rounds),
         e.accepted == null ? <span key="a" className="mm-dim">—</span> : String(e.accepted),
-        <StatusTag key="st" status={open && trace.events.length ? status : EXPERIMENT_STATUS_LABELS[e.status]} />,
+        open && trace.active && progress.length
+          ? <span key="st" className="flex items-center gap-2 text-[11px]" title={progressLine(progress, now)}><i className="live__dot" aria-hidden /><span className="truncate">{progressLine(progress, now)}</span></span>
+          : <StatusTag key="st" status={open && trace.events.length ? status : EXPERIMENT_STATUS_LABELS[e.status]} />,
         <span key="u" className="mm-mono mm-dim">{shortTime(e.updated)}</span>,
       ],
     };
@@ -244,6 +245,7 @@ export function ResearchPage() {
       ) : (
         <div className="flex flex-col gap-3">
           {trace.interaction && <InteractionPanel event={trace.interaction} busy={trace.busy} defaultInstruction={form.objective} onSubmit={trace.answer} />}
+          {trace.traceId && (progress.length > 0 || trace.active) && <LiveStatus traceId={trace.traceId} events={trace.events} running={trace.active} waiting={!!trace.interaction} roundId={activeRound?.id ?? null} />}
           {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} /> : <Hint>在左侧展开一个实验，点一轮查看假设、评估与代码。</Hint>}
         </div>
       )}

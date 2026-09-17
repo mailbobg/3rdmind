@@ -1330,3 +1330,22 @@ def test_trace_ids_are_scoped_by_region(studio_client, tmp_path: Path, monkeypat
     assert studio_client.get("/traces?region=us").get_json() == ["Finance Data Building/us-run"]
     cn_ids = set(studio_client.get("/traces?region=cn").get_json())
     assert "Finance Data Building/us-run" not in cn_ids and {"Finance Data Building/cn-run", "Finance Data Building/old-run"} <= cn_ids
+
+
+@pytest.mark.offline
+def test_trace_tail_returns_cleaned_last_lines(studio_client) -> None:
+    root = server.app.config["LOG_FOLDER_PATH"]
+    (root / "Finance Data Building").mkdir(parents=True, exist_ok=True)
+    log = root / "Finance Data Building" / "demo.log"
+    log.write_text(
+        "2026-09-16 22:33:08.455 | INFO     | rdagent.utils.workflow.loop:_run_step:216 - Start Loop 0, Step 3: feedback\n"
+        "2026/09/16 22:32:54 INFO mlflow.agent.hint: Load the \n"
+        "Workflow Progress:  60%|██████    | 3/5 [03:12<02:08, 64.21s/step]\n"
+        "\x1b[32mUsing chat model\x1b[0m deepseek/deepseek-flash\n"
+        "Training until validation scores don't improve for 50 rounds\n"
+    )
+    payload = studio_client.get("/studio/trace-tail", query_string={"trace": "Finance Data Building/demo", "lines": 3}).get_json()
+    assert payload["lines"] == ["22:33:08 Start Loop 0, Step 3: feedback", "Using chat model deepseek/deepseek-flash", "Training until validation scores don't improve for 50 rounds"]
+    assert payload["updated"] and payload["size"] > 0
+    assert studio_client.get("/studio/trace-tail", query_string={"trace": "Finance Data Building/nothing"}).get_json()["lines"] == []
+    assert studio_client.get("/studio/trace-tail", query_string={"trace": "../etc"}).status_code == 400

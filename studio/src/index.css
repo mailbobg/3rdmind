@@ -209,3 +209,30 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .mkt-switch__code { font-family: var(--mm-mono); font-size: 9px; letter-spacing: 0.08em; padding: 2px 4px; border-radius: 4px; background: rgba(255, 255, 255, 0.12); color: inherit; transition: background 200ms ease; }
 .mkt-switch__item[aria-selected="true"] .mkt-switch__code { background: #1b1b19; color: #fff; }
 .mkt-switch__label { font-weight: 500; }
+
+/* Round progress: four step segments (Progress.tsx). */
+.steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.steps__item { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.steps__bar { display: block; height: 4px; border-radius: 2px; background: var(--mm-rule-soft); }
+.steps__item[data-state="done"] .steps__bar { background: var(--mm-ink); }
+.steps__item[data-state="current"] .steps__bar { background: linear-gradient(90deg, var(--mm-accent) 0 60%, color-mix(in srgb, var(--mm-accent) 35%, transparent)); animation: steps-pulse 1.4s ease-in-out infinite; }
+@keyframes steps-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.steps__meta { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; line-height: 1.3; }
+.steps__label { color: var(--mm-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.steps__label small { font-size: 10px; }
+.steps__item[data-state="current"] .steps__label { color: var(--mm-accent); font-weight: 500; }
+.steps__item[data-state="done"] .steps__label { color: var(--mm-ink); }
+.steps__time { color: var(--mm-muted); font-family: var(--mm-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.steps--compact { gap: 3px; width: 72px; }
+.steps--compact .steps__bar { height: 3px; }
+
+/* Live status card above a round's detail. */
+.live { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--mm-rule); border-radius: 8px; background: var(--mm-paper); }
+.live--on { border-color: color-mix(in srgb, var(--mm-accent) 40%, var(--mm-rule)); }
+.live__head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.live__title { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.live__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mm-accent); box-shadow: 0 0 0 0 color-mix(in srgb, var(--mm-accent) 45%, transparent); animation: live-ping 1.6s ease-out infinite; }
+@keyframes live-ping { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--mm-accent) 45%, transparent); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.live__meta { font-size: 11px; color: var(--mm-muted); }
+.live__foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 11px; }
+.live__log { margin: 0; max-height: 180px; overflow: auto; padding: 8px 10px; border-radius: 6px; background: var(--mm-ground); font-family: var(--mm-mono); font-size: 11px; line-height: 1.6; color: var(--mm-muted); white-space: pre-wrap; word-break: break-all; }
