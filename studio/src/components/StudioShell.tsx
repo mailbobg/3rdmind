@@ -25,7 +25,7 @@ import type { AttentionItem } from "../api/studio";
 import { LlmSettings } from "./LlmSettings";
 import { Btn } from "./minimal";
 import { t } from "../i18n";
-import { LanguageSelect } from "./LanguageSelect";
+import { LanguageTabs } from "./LanguageTabs";
 
 /** The market workspaces, in toggle order. Each has its own experiments, factors, backtests and strategies. */
 export const WORKSPACES: { region: string; label: string; base: string }[] = [
@@ -161,7 +161,7 @@ export function StudioShell({ region }: { region: string }) {
             ) : (
               <small className="mb-4 mt-1.5 block text-muted">{t("运行")} <code>scripts/start-backend.sh</code> {t("后")} <button className="text-accent underline" onClick={() => reloadEnv()}>{t("重试")}</button></small>
             )}
-            <div className="mb-3"><LanguageSelect /></div>
+            <div className="mb-3"><LanguageTabs /></div>
             <a href={PLAYGROUND_URL} target="_blank" rel="noreferrer" className="text-muted">{t("原生 Playground ↗")}</a>
           </div>
         </aside>
