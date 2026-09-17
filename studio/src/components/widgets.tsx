@@ -8,8 +8,10 @@ import { t } from "../i18n";
 
 export const percent = (v?: number | null, digits = 2) => (typeof v === "number" && Number.isFinite(v) ? (v * 100).toFixed(digits) + "%" : "—");
 export const fixed = (v?: number | null, digits = 4) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—");
-export const money = (v?: number | null) =>
-  typeof v === "number" && Number.isFinite(v) ? "¥" + v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
+/** Currency symbol of a market region: A-shares in yuan, US in dollars. */
+export const currency = (region?: string | null) => (region === "us" ? "$" : "¥");
+export const money = (v?: number | null, region?: string | null) =>
+  typeof v === "number" && Number.isFinite(v) ? currency(region) + v.toLocaleString(region === "us" ? "en-US" : "zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
 
 /** Signed number in green/red; neutral when not a number. */
 export function Signed({ value, format = fixed }: { value?: number | null; format?: (v?: number | null) => string }) {

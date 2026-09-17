@@ -174,8 +174,8 @@ export function StrategiesPage() {
               <Hint>{t("目标持仓是策略在最新一次回测结束时的持仓，即进入下一个交易日的仓位；评分是最后一个信号日的排名，下一次调仓按它买前 {0} 名、每天最多换出 {1} 只。交易系统直接读 CSV：type 列为 holding 的是持仓（权重、数量、价格），为 score 的是排名。", [signal.topk, signal.n_drop])}</Hint>
               <MetricGrid columns={3} items={[
                 { label: t("持仓数"), value: String(signal.rows.filter((r) => r.type === "holding").length) },
-                { label: t("持仓市值"), value: money(signal.rows.filter((r) => r.type === "holding").reduce((a, r) => a + (r.value || 0), 0)) },
-                { label: t("现金"), value: money(signal.cash) },
+                { label: t("持仓市值"), value: money(signal.rows.filter((r) => r.type === "holding").reduce((a, r) => a + (r.value || 0), 0), workspace.region) },
+                { label: t("现金"), value: money(signal.cash, workspace.region) },
               ]} />
               <DataTable label={t("目标持仓")} head={[[t("标的")], [t("权重"), "end"], [t("数量"), "end"], [t("价格"), "end"], [t("市值"), "end"], [t("最新排名"), "end"]]}
                 rows={signal.rows.filter((r) => r.type === "holding").map((r) => {
@@ -184,8 +184,8 @@ export function StrategiesPage() {
                     <Instrument key="i" code={r.instrument} />,
                     <span key="w" className="tabular-nums">{typeof r.weight === "number" ? percent(r.weight, 1) : "—"}</span>,
                     <span key="a" className="tabular-nums">{typeof r.amount === "number" ? Math.round(r.amount).toLocaleString() : "—"}</span>,
-                    <span key="p" className="tabular-nums">{typeof r.price === "number" ? r.price.toFixed(3) : "—"}</span>,
-                    <span key="v" className="tabular-nums">{money(r.value)}</span>,
+                    <span key="p" className="tabular-nums">{typeof r.price === "number" ? r.price.toFixed(2) : "—"}</span>,
+                    <span key="v" className="tabular-nums">{money(r.value, workspace.region)}</span>,
                     <span key="r" className={`tabular-nums ${rank == null ? "text-muted" : rank <= signal.topk ? "" : "text-danger"}`}>{rank ?? `> ${signal.rows.filter((x) => x.type === "score").length}`}</span>,
                   ] };
                 })} />

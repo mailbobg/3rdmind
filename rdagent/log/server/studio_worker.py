@@ -314,6 +314,39 @@ def holdings_from_position(position):
     return {"positions": rows, "cash": float(position.get_cash()), "total": float(position.calculate_value())}
 
 
+def unadjust_book(trades, holdings, factors):
+    """Turn Qlib's adjusted prices and share counts into real ones for the trade log and the closing book.
+
+    Qlib backtests in adjusted prices (``$close`` is the raw close times ``$factor``, and shares are counted
+    in the same adjusted units), so a position's value is right but its price and share count are not what a
+    broker shows. ``factors`` maps (instrument, date) -> $factor; a row whose factor is missing is left as
+    it is. Values are unchanged: real price × real shares equals adjusted price × adjusted shares.
+    """
+    def fix(row, day):
+        factor = factors.get((row["instrument"], day))
+        if factor and factor == factor:  # present and not NaN
+            row["price"] = row["price"] / factor
+            row["amount"] = row["amount"] * factor
+        return row
+
+    for trade in trades:
+        fix(trade, trade["date"])
+    if holdings.get("as_of"):
+        for row in holdings["positions"]:
+            fix(row, holdings["as_of"])
+    return trades, holdings
+
+
+def load_factors(instruments, start, end):
+    """(instrument, date) -> $factor from the initialised Qlib provider, for unadjust_book()."""
+    from qlib.data import D
+
+    if not instruments:
+        return {}
+    frame = D.features(sorted(set(instruments)), ["$factor"], start_time=start, end_time=end, freq="day")
+    return {(str(inst), str(day.date())): float(v) for (inst, day), v in frame["$factor"].items()}
+
+
 def instrument_summary(trades, holdings):
     """Per-instrument realised + unrealised P&L: sells - buys - costs + what is still held."""
     held = {row["instrument"]: row["value"] for row in holdings["positions"]}
@@ -511,6 +544,10 @@ def run(config):
     trades = trades_from_indicator(getattr(indicator, "order_indicator_his", {}))
     last_day = max(positions) if positions else None
     holdings = holdings_from_position(positions[last_day]) if last_day is not None else {"positions": [], "cash": None, "total": None}
+    if last_day is not None:
+        holdings["as_of"] = str(getattr(last_day, "date", lambda: last_day)())
+        traded = {t["instrument"] for t in trades} | {r["instrument"] for r in holdings["positions"]}
+        trades, holdings = unadjust_book(trades, holdings, load_factors(traded, config["start"], holdings["as_of"]))
     instruments = instrument_summary(trades, holdings)
     metrics, rows = summarize_report(report)
     return clean({"metrics": {**metrics, "signal_ic": test_ic, "signal_rank_ic": test_rank_ic},

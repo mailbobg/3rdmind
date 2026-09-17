@@ -1149,6 +1149,17 @@ def test_trades_and_holdings_are_flattened_for_the_ui() -> None:
     summary = instrument_summary(trades, holdings)
     assert summary == [{"instrument": "SH600000", "trades": 2, "buy_value": 1000.0, "sell_value": 600.0, "cost": 2.5,
                         "holding_value": 650.0, "pnl": 247.5, "held": True}]
+    # Qlib's adjusted price and share count become the broker's real ones through $factor; values stay put.
+    from rdagent.log.server.studio_worker import unadjust_book
+
+    holdings["as_of"] = "2025-01-06"
+    trades, holdings = unadjust_book(trades, holdings, {("SH600000", "2025-01-03"): 0.5, ("SH600000", "2025-01-06"): 0.5})
+    assert trades[0]["price"] == 20.0 and trades[0]["amount"] == 50.0 and trades[0]["value"] == 1000.0
+    assert holdings["positions"][0] == {"instrument": "SH600000", "amount": 25.0, "price": 26.0, "value": 650.0, "weight": 650.0 / 1047.5}
+    assert instrument_summary(trades, holdings)[0]["pnl"] == 247.5
+    # A missing factor (instrument outside the data) leaves the row as Qlib produced it.
+    trades, _ = unadjust_book([{"date": "2025-01-03", "instrument": "SH600009", "amount": 1.0, "price": 2.0, "value": 2.0, "cost": 0.0}], {"positions": []}, {})
+    assert trades[0]["price"] == 2.0 and trades[0]["amount"] == 1.0
 
 
 @pytest.mark.offline

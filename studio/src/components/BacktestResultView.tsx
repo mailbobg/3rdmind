@@ -97,6 +97,8 @@ export function BacktestResultView({ result, onDiagnose }: { result: BacktestRes
 }
 
 function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instruments: InstrumentSummary[]; holdings?: BacktestResult["holdings"] }) {
+  const { workspace } = useStudio();
+  const region = workspace.region;
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [tradeQuery, setTradeQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -118,7 +120,7 @@ function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instr
     <>
       {instruments.length > 0 && (
         <Section title={tr("持仓与标的收益")} note={tr("{0} 只在手 · 共 {1} 只交易过", [holdings?.positions.length ?? 0, instruments.length])}>
-          <MetricGrid columns={3} items={[{ label: tr("持仓市值"), value: money(marketValue) }, { label: tr("现金"), value: money(holdings?.cash) }, { label: tr("手续费合计"), value: money(totalCost) }]} />
+          <MetricGrid columns={3} items={[{ label: tr("持仓市值"), value: money(marketValue, region) }, { label: tr("现金"), value: money(holdings?.cash, region) }, { label: tr("手续费合计"), value: money(totalCost, region) }]} />
           <Input aria-label={tr("搜索标的")} placeholder={tr("搜索合约代码")} value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
           <DataTable label={tr("持仓与标的收益")} head={[[tr("标的")], [tr("成交笔数"), "end"], [tr("在手市值"), "end"], [tr("手续费"), "end"], [tr("最终收益"), "end"]]}
             rows={filteredInstruments.slice(0, 50).map((r) => ({
@@ -126,8 +128,8 @@ function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instr
               cells: [
                 <span key="i" className="flex items-center gap-1"><Instrument code={r.instrument} />{r.held && <Chip size="sm" color="success" variant="soft">{tr("持有")}</Chip>}</span>,
                 <span key="t" className="tabular-nums">{r.trades}</span>,
-                <span key="h" className="tabular-nums">{r.holding_value ? money(r.holding_value) : "—"}</span>,
-                <span key="c" className="tabular-nums">{money(r.cost)}</span>,
+                <span key="h" className="tabular-nums">{r.holding_value ? money(r.holding_value, region) : "—"}</span>,
+                <span key="c" className="tabular-nums">{money(r.cost, region)}</span>,
                 <Signed key="p" value={r.pnl} format={money} />,
               ],
             }))} />
@@ -146,8 +148,8 @@ function TradeTables({ trades, instruments, holdings }: { trades: Trade[]; instr
                 <Chip key="dir" size="sm" variant="soft" color={t.direction === "buy" ? "success" : "danger"}>{t.direction === "buy" ? tr("买入") : tr("卖出")}</Chip>,
                 <span key="p" className="tabular-nums">{t.price.toFixed(3)}</span>,
                 <span key="a" className="tabular-nums">{Math.round(t.amount).toLocaleString()}</span>,
-                <span key="v" className="tabular-nums">{money(t.value)}</span>,
-                <span key="c" className="tabular-nums">{money(t.cost)}</span>,
+                <span key="v" className="tabular-nums">{money(t.value, region)}</span>,
+                <span key="c" className="tabular-nums">{money(t.cost, region)}</span>,
               ],
             }))} />
           <div className="flex items-center justify-center gap-2 text-[11px] text-muted">
