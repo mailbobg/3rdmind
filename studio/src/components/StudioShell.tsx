@@ -24,11 +24,12 @@ import { useNow } from "./Progress";
 import type { AttentionItem } from "../api/studio";
 import { LlmSettings } from "./LlmSettings";
 import { Btn } from "./minimal";
+import { lang, setLang, t } from "../i18n";
 
 /** The market workspaces, in toggle order. Each has its own experiments, factors, backtests and strategies. */
 export const WORKSPACES: { region: string; label: string; base: string }[] = [
-  { region: "cn", label: "A 股", base: "" },
-  { region: "us", label: "美股", base: "/us" },
+  { region: "cn", label: t("A 股"), base: "" },
+  { region: "us", label: t("美股"), base: "/us" },
 ];
 export function makeWorkspace(region: string): Workspace {
   const w = WORKSPACES.find((x) => x.region === region) || WORKSPACES[0];
@@ -36,11 +37,11 @@ export function makeWorkspace(region: string): Workspace {
 }
 
 const MENU = [
-  { path: "/research", symbol: "◎", title: "AI 研究", desc: "提出假设，开发并评估因子或模型" },
-  { path: "/factors", symbol: "⊞", title: "因子库", desc: "研究产出的因子，挑选进组合" },
-  { path: "/backtest", symbol: "◇", title: "组合回测", desc: "用已选因子构建并验证策略" },
-  { path: "/strategies", symbol: "◈", title: "策略", desc: "保存验证过的组合，持续跟踪" },
-  { path: "/runs", symbol: "↗", title: "运行记录", desc: "统一查看研究与回测" },
+  { path: "/research", symbol: "◎", title: t("AI 研究"), desc: t("提出假设，开发并评估因子或模型") },
+  { path: "/factors", symbol: "⊞", title: t("因子库"), desc: t("研究产出的因子，挑选进组合") },
+  { path: "/backtest", symbol: "◇", title: t("组合回测"), desc: t("用已选因子构建并验证策略") },
+  { path: "/strategies", symbol: "◈", title: t("策略"), desc: t("保存验证过的组合，持续跟踪") },
+  { path: "/runs", symbol: "↗", title: t("运行记录"), desc: t("统一查看研究与回测") },
 ];
 
 // RD-Agent's own Vue UI, served by the log server at "/" (rd-agent/web `npm run build:flask`). The React dev
@@ -59,7 +60,7 @@ function MarketSwitch({ region, onChange }: { region: string; onChange: (r: stri
     onChange(WORKSPACES[next].region);
   };
   return (
-    <div role="tablist" aria-label="市场" className="mkt-switch mx-auto mb-4" style={{ "--mkt-n": WORKSPACES.length, "--mkt-i": index } as React.CSSProperties} onKeyDown={onKey}>
+    <div role="tablist" aria-label={t("市场")} className="mkt-switch mx-auto mb-4" style={{ "--mkt-n": WORKSPACES.length, "--mkt-i": index } as React.CSSProperties} onKeyDown={onKey}>
       <span className="mkt-switch__thumb" aria-hidden />
       {WORKSPACES.map((w) => (
         <button key={w.region} type="button" role="tab" aria-selected={w.region === region} tabIndex={w.region === region ? 0 : -1} onClick={() => onChange(w.region)} className="mkt-switch__item">
@@ -128,20 +129,20 @@ export function StudioShell({ region }: { region: string }) {
       <div className="grid h-full grid-cols-[230px_minmax(0,1fr)] gap-2 bg-background p-2">
         <aside className="flex min-h-0 flex-col overflow-y-auto rounded-r-2xl rounded-l-none border border-border bg-surface px-3.5 py-5">
           <MarketSwitch region={region} onChange={switchTo} />
-          <a href={workspace.href("/research")} className="mx-auto flex flex-col items-center gap-0.5 no-underline" aria-label="AI 研究">
+          <a href={workspace.href("/research")} className="mx-auto flex flex-col items-center gap-0.5 no-underline" aria-label={t("AI 研究")}>
             <img src={`${import.meta.env.BASE_URL}rd-agent-mark.png`} alt="" className="size-20" />
             <small className="text-[11px] text-muted">RD-Agent × Qlib</small>
           </a>
-          <nav aria-label="工作任务" className="mt-5 grid gap-2">
+          <nav aria-label={t("工作任务")} className="mt-5 grid gap-2">
             {MENU.map((item) => (
               <NavLink key={item.path} to={workspace.path(item.path)}
                 className={({ isActive }) => `flex items-start gap-2.5 rounded-[10px] px-2.5 py-3 text-left no-underline transition-colors ${isActive ? "bg-neutral-900 text-white" : "text-foreground hover:bg-surface-secondary"}`}>
                 <span className="w-[22px] text-[19px] leading-none">{item.symbol}</span>
                 <span className="min-w-0 text-[13px] font-medium">{item.title}<small className="mt-1 block text-[10px] font-normal leading-relaxed opacity-65">{item.desc}</small></span>
                 {item.path === "/research" && attention.items.length > 0
-                  ? <span className="ml-auto rounded-full bg-danger px-1.5 text-[10px] font-semibold leading-[16px] text-white" title="等待确认">{attention.items.length}</span>
+                  ? <span className="ml-auto rounded-full bg-danger px-1.5 text-[10px] font-semibold leading-[16px] text-white" title={t("等待确认")}>{attention.items.length}</span>
                   : item.path === "/runs" && jobs.active.length > 0
-                  ? <span className="ml-auto inline-flex items-center gap-1.5 text-[11px]" title={`${jobs.active.length} 个任务在跑`}><i className="live__dot" aria-hidden />{jobs.active.length}</span>
+                  ? <span className="ml-auto inline-flex items-center gap-1.5 text-[11px]" title={t("{0} 个任务在跑", [jobs.active.length])}><i className="live__dot" aria-hidden />{jobs.active.length}</span>
                   : counts[item.path] && <span className="ml-auto text-[11px] opacity-60">{counts[item.path]}</span>}
               </NavLink>
             ))}
@@ -152,14 +153,23 @@ export function StudioShell({ region }: { region: string }) {
             {region === "us" ? <DataBuild onBuilt={() => { reloadEnv(); loadRegions(); }} /> : <DataSync onSynced={reloadEnv} />}
             <div className="flex items-center gap-2">
               <i className={`inline-block size-[7px] rounded-full ${env ? (env.data_ready ? "bg-success" : "bg-warning") : "bg-danger"}`} />
-              {env ? (env.data_ready ? `${workspace.label}数据已就绪` : `等待${workspace.label}数据`) : "后端未连接"}
+              {env ? (env.data_ready ? t("{0}数据已就绪", [workspace.label]) : t("等待{0}数据", [workspace.label])) : t("后端未连接")}
             </div>
             {env ? (
               <small className="mb-4 mt-1.5 block text-muted">{env.start || "—"} → {env.end || "—"}</small>
             ) : (
-              <small className="mb-4 mt-1.5 block text-muted">运行 <code>scripts/start-backend.sh</code> 后 <button className="text-accent underline" onClick={() => reloadEnv()}>重试</button></small>
+              <small className="mb-4 mt-1.5 block text-muted">{t("运行")} <code>scripts/start-backend.sh</code> {t("后")} <button className="text-accent underline" onClick={() => reloadEnv()}>{t("重试")}</button></small>
             )}
-            <a href={PLAYGROUND_URL} target="_blank" rel="noreferrer" className="text-muted">原生 Playground ↗</a>
+            <div className="mb-3 flex items-center gap-1 text-[11px]" role="radiogroup" aria-label="Language">
+              {(["zh", "en"] as const).map((l, i) => (
+                <span key={l} className="inline-flex items-center gap-1">
+                  {i > 0 && <span className="text-muted">/</span>}
+                  <button type="button" role="radio" aria-checked={lang === l} onClick={() => setLang(l)}
+                    className={`rounded px-1 ${lang === l ? "font-semibold text-foreground" : "text-muted hover:text-foreground"}`}>{l === "zh" ? "中文" : "EN"}</button>
+                </span>
+              ))}
+            </div>
+            <a href={PLAYGROUND_URL} target="_blank" rel="noreferrer" className="text-muted">{t("原生 Playground ↗")}</a>
           </div>
         </aside>
         <div className="flex min-h-0 min-w-0 flex-col gap-2">
@@ -167,9 +177,9 @@ export function StudioShell({ region }: { region: string }) {
           failures={jobs.failures} onOpenJob={openJob} onDismissFailure={jobs.dismissFailure} />
         {regions && current && !current.ready ? (
           <section className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 rounded-2xl text-center" style={{ background: "var(--mm-ground)" }}>
-            <div className="text-[15px] font-semibold">{workspace.label}数据还没构建</div>
-            <p className="m-0 max-w-[420px] text-[12px] leading-relaxed text-muted">这个工作区的研究、因子库、回测和策略都要先有 Qlib 数据。{region === "us" ? "点下面从 Yahoo Finance 构建纳斯达克 100 的日线数据。" : "请先同步 Qlib 数据。"}</p>
-            {region === "us" ? <DataBuild compact onBuilt={() => { reloadEnv(); loadRegions(); }} /> : <Btn onClick={() => loadRegions()}>重新检查</Btn>}
+            <div className="text-[15px] font-semibold">{t("{0}数据还没构建", [workspace.label])}</div>
+            <p className="m-0 max-w-[420px] text-[12px] leading-relaxed text-muted">这个工作区的研究、因子库、回测和策略都要先有 Qlib 数据。{region === "us" ? t("点下面从 Yahoo Finance 构建纳斯达克 100 的日线数据。") : t("请先同步 Qlib 数据。")}</p>
+            {region === "us" ? <DataBuild compact onBuilt={() => { reloadEnv(); loadRegions(); }} /> : <Btn onClick={() => loadRegions()}>{t("重新检查")}</Btn>}
           </section>
         ) : <Outlet />}
         </div>

@@ -2,6 +2,7 @@ import type React from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ChangeEvent, MouseEvent, ReactNode } from "react";
+import { t } from "../i18n";
 
 /**
  * The work column's vocabulary: text tabs, outlined buttons, keyed fields in a hairline grid, titled
@@ -247,14 +248,14 @@ export function SelectInput<T extends string>({ value, onChange, options, placeh
               <svg className="mm-select__glass" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden>
                 <circle cx="6" cy="6" r="4.2" /><path d="M9.2 9.2 12.5 12.5" />
               </svg>
-              <input ref={search} className="mm-select__input" value={query} placeholder={searchPlaceholder || "输入筛选…"} aria-label="筛选选项" autoComplete="off" spellCheck={false}
+              <input ref={search} className="mm-select__input" value={query} placeholder={searchPlaceholder || t("输入筛选…")} aria-label={t("筛选选项")} autoComplete="off" spellCheck={false}
                 onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey} />
-              {q ? <button type="button" className="mm-select__clear" aria-label="清除筛选" onMouseDown={(e) => e.preventDefault()} onClick={() => { setQuery(""); search.current?.focus(); }}>×</button> : null}
+              {q ? <button type="button" className="mm-select__clear" aria-label={t("清除筛选")} onMouseDown={(e) => e.preventDefault()} onClick={() => { setQuery(""); search.current?.focus(); }}>×</button> : null}
               <span className="mm-select__count" aria-live="polite">{q ? `${visible.length} / ${options.length}` : options.length}</span>
             </div>
           )}
           <div className="mm-select__options">
-            {items.length ? items : <div className="mm-select__group">{q ? `没有匹配 “${query.trim()}” 的选项` : "没有可选项"}</div>}
+            {items.length ? items : <div className="mm-select__group">{q ? t("没有匹配 “{0}” 的选项", [query.trim()]) : t("没有可选项")}</div>}
           </div>
         </div>,
         document.body,
@@ -323,9 +324,9 @@ export function Tag({ tone, children }: { tone?: "ok" | "warn" | "bad" | "dim"; 
 
 /** Status word coloured by meaning: green when done or accepted, amber while moving, red on failure. */
 export function StatusTag({ status }: { status: string }) {
-  const tone = ["已完成", "接受", "completed"].includes(status) ? "ok"
-    : ["执行失败", "拒绝", "失败", "failed"].includes(status) ? "bad"
-    : ["运行中", "启动中", "running", "queued", "排队中", "加载中"].includes(status) ? "warn" : "dim";
+  const tone = [t("已完成"), t("接受"), "completed"].includes(status) ? "ok"
+    : [t("执行失败"), t("拒绝"), t("失败"), "failed"].includes(status) ? "bad"
+    : [t("运行中"), t("启动中"), "running", "queued", t("排队中"), t("加载中")].includes(status) ? "warn" : "dim";
   return <Tag tone={tone}>{status}</Tag>;
 }
 

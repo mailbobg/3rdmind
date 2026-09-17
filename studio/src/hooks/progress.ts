@@ -1,9 +1,10 @@
 import type { TraceEvent } from "../api/studio";
+import { t } from "../i18n";
 
 /** The four steps every RD-Agent research round goes through, in order. */
 export const STEPS = ["hypothesis", "coding", "evaluation", "feedback"] as const;
 export type StepKey = (typeof STEPS)[number];
-export const STEP_LABELS: Record<StepKey, string> = { hypothesis: "提假设", coding: "写代码", evaluation: "Qlib 评估", feedback: "评估结论" };
+export const STEP_LABELS: Record<StepKey, string> = { hypothesis: t("提假设"), coding: t("写代码"), evaluation: t("Qlib 评估"), feedback: t("评估结论") };
 
 export interface StepState {
   key: StepKey;
@@ -89,10 +90,10 @@ export function medianRoundMs(rounds: RoundProgress[]): number | null {
 export function fmtDuration(ms: number | null | undefined): string {
   if (ms == null || !isFinite(ms) || ms < 0) return "—";
   const s = Math.round(ms / 1000);
-  if (s < 60) return `${s} 秒`;
+  if (s < 60) return t("{0} 秒", [s]);
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m} 分`;
-  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+  if (m < 60) return t("{0} 分", [m]);
+  return t("{0} 小时 {1} 分", [Math.floor(m / 60), m % 60]);
 }
 
 /** A one-line description of where a running round is: "第 2 轮 · 写代码 · 第 3 次迭代 · 已 6 分". */
@@ -100,8 +101,8 @@ export function progressLine(rounds: RoundProgress[], now = Date.now()): string 
   const current = rounds[rounds.length - 1];
   if (!current) return "";
   const step = current.steps.find((s) => s.state === "current");
-  if (!step) return current.finished ? `第 ${Number(current.id) + 1} 轮完成` : "";
+  if (!step) return current.finished ? t("第 {0} 轮完成", [Number(current.id) + 1]) : "";
   const since = step.startedAt != null ? now - step.startedAt : null;
-  const iter = step.key === "coding" && step.iterations ? ` · 第 ${step.iterations} 次迭代` : "";
-  return `第 ${Number(current.id) + 1} 轮 · ${step.label}${iter}${since != null ? ` · 已 ${fmtDuration(since)}` : ""}`;
+  const iter = step.key === "coding" && step.iterations ? t(" · 第 {0} 次迭代", [step.iterations]) : "";
+  return t("第 {0} 轮 · {1}{2}{3}", [Number(current.id) + 1, step.label, iter, since != null ? t(" · 已 {0}", [fmtDuration(since)]) : ""]);
 }

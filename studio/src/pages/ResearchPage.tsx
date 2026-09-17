@@ -15,6 +15,7 @@ import { Section } from "../components/Section";
 import { Hint, MetricGrid } from "../components/widgets";
 import { LiveStatus, RunSummary, StepStrip, useNow } from "../components/Progress";
 import { fmtDuration, progressLine, roundProgress } from "../hooks/progress";
+import { t } from "../i18n";
 
 interface Mode {
   name: string; desc: string; value: string; loops: boolean; duration: boolean; objective: boolean; input?: "reports" | "paper";
@@ -23,27 +24,27 @@ interface Mode {
 }
 // The scenarios the log server's /upload accepts; Data Science needs an MLE-bench dataset, so it stays in the Playground.
 const MODES: Mode[] = [
-  { name: "因子研发", desc: "假设 → 因子实现 → Qlib 评估", value: "Finance Data Building", loops: true, duration: true, objective: true,
-    steps: ["Agent 根据研究方向和前几轮的反馈提出一个假设，并拆成几个因子任务", "为每个因子写 factor.py，在 daily_pv.h5 上计算出 result.h5，通不过检查就自己改", "把新因子和基础特征一起交给 Qlib：LightGBM 训练，TopkDropout 回测", "对照上一轮的指标写反馈，决定接受还是拒绝这个假设，进入下一轮"],
-    output: "每一轮的因子都进因子库，可以挑进组合篮回测；训练出的模型预测（pred.pkl）也能直接当信号回测。" },
-  { name: "模型研发", desc: "模型实现与迭代验证", value: "Finance Model Implementation", loops: true, duration: true, objective: true,
-    steps: ["Agent 提出一个模型结构假设（网络、损失、训练方式）", "写出 PyTorch 模型代码并做形状与训练检查", "在 Qlib 的固定特征集上训练、回测", "对照上一轮写反馈，决定接受还是拒绝，进入下一轮"],
-    output: "每一轮的模型预测（pred.pkl）可以在组合回测里当信号使用。" },
-  { name: "因子 × 模型联合", desc: "RD-Agent 原生联合研究循环", value: "Finance Whole Pipeline", loops: true, duration: true, objective: true,
-    steps: ["Agent 每轮自己决定这一轮改因子还是改模型", "按选择走因子研发或模型研发的实现与评估流程", "反馈同时看因子贡献和模型效果，进入下一轮"],
-    output: "因子进因子库，模型预测可当信号，两者都能回测。" },
-  { name: "研报因子提取", desc: "上传研报 PDF → 提取因子 → 实现与 Qlib 评估", value: "Finance Data Building (Reports)", loops: false, duration: true, objective: false, input: "reports",
-    steps: ["读取上传的研报，抽出其中定义的因子（名称、公式、变量）", "逐个实现成 factor.py 并计算 result.h5", "交给 Qlib 评估"],
-    output: "抽出的因子进因子库。这个场景不迭代假设，跑完一遍就结束。" },
-  { name: "论文模型实现", desc: "上传论文 PDF 或给链接 → 提取模型结构 → 实现", value: "General Model Implementation", loops: false, duration: false, objective: false, input: "paper",
-    steps: ["读取论文，抽出模型结构与训练细节", "实现成可运行的模型代码并做检查"],
-    output: "产出是模型代码，没有 Qlib 评估，也不进因子库。" },
+  { name: t("因子研发"), desc: t("假设 → 因子实现 → Qlib 评估"), value: "Finance Data Building", loops: true, duration: true, objective: true,
+    steps: [t("Agent 根据研究方向和前几轮的反馈提出一个假设，并拆成几个因子任务"), t("为每个因子写 factor.py，在 daily_pv.h5 上计算出 result.h5，通不过检查就自己改"), t("把新因子和基础特征一起交给 Qlib：LightGBM 训练，TopkDropout 回测"), t("对照上一轮的指标写反馈，决定接受还是拒绝这个假设，进入下一轮")],
+    output: t("每一轮的因子都进因子库，可以挑进组合篮回测；训练出的模型预测（pred.pkl）也能直接当信号回测。") },
+  { name: t("模型研发"), desc: t("模型实现与迭代验证"), value: "Finance Model Implementation", loops: true, duration: true, objective: true,
+    steps: [t("Agent 提出一个模型结构假设（网络、损失、训练方式）"), t("写出 PyTorch 模型代码并做形状与训练检查"), t("在 Qlib 的固定特征集上训练、回测"), t("对照上一轮写反馈，决定接受还是拒绝，进入下一轮")],
+    output: t("每一轮的模型预测（pred.pkl）可以在组合回测里当信号使用。") },
+  { name: t("因子 × 模型联合"), desc: t("RD-Agent 原生联合研究循环"), value: "Finance Whole Pipeline", loops: true, duration: true, objective: true,
+    steps: [t("Agent 每轮自己决定这一轮改因子还是改模型"), t("按选择走因子研发或模型研发的实现与评估流程"), t("反馈同时看因子贡献和模型效果，进入下一轮")],
+    output: t("因子进因子库，模型预测可当信号，两者都能回测。") },
+  { name: t("研报因子提取"), desc: t("上传研报 PDF → 提取因子 → 实现与 Qlib 评估"), value: "Finance Data Building (Reports)", loops: false, duration: true, objective: false, input: "reports",
+    steps: [t("读取上传的研报，抽出其中定义的因子（名称、公式、变量）"), t("逐个实现成 factor.py 并计算 result.h5"), t("交给 Qlib 评估")],
+    output: t("抽出的因子进因子库。这个场景不迭代假设，跑完一遍就结束。") },
+  { name: t("论文模型实现"), desc: t("上传论文 PDF 或给链接 → 提取模型结构 → 实现"), value: "General Model Implementation", loops: false, duration: false, objective: false, input: "paper",
+    steps: [t("读取论文，抽出模型结构与训练细节"), t("实现成可运行的模型代码并做检查")],
+    output: t("产出是模型代码，没有 Qlib 评估，也不进因子库。") },
 ];
 
 /** A round's one-line title: the first clause of its hypothesis (full text in the tooltip). */
 function roundTitle(round: RoundView) {
   const text = (round.hypothesis.hypothesis || "").trim();
-  if (!text) return <span className="mm-dim">（等待假设）</span>;
+  if (!text) return <span className="mm-dim">{t("（等待假设）")}</span>;
   const clause = text.split(/(?<=[.。;；:：!?！？])\s+/)[0].replace(/[.。;；:：]$/, "");
   return clause.length > 48 ? clause.slice(0, 48) + "…" : clause;
 }
@@ -99,7 +100,7 @@ export function ResearchPage() {
   }, [trace.traceId, trace.rounds.length]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (trace.interaction) layout.openResults(); }, [trace.interaction]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const status = trace.busy && !trace.events.length ? "加载中" : trace.status;
+  const status = trace.busy && !trace.events.length ? t("加载中") : trace.status;
   const activeRound: RoundView | null = trace.rounds.find((r) => r.id === roundId) || trace.rounds[trace.rounds.length - 1] || null;
   // Step timelines of the selected experiment's rounds; the clock only ticks while it runs.
   const now = useNow(1000, trace.active);
@@ -114,10 +115,10 @@ export function ResearchPage() {
   }, [trace, search, setSearch]);
 
   const start = useCallback(async () => {
-    if (mode.loops && (!Number.isInteger(form.loops) || form.loops < 1 || form.loops > 30)) { trace.setError("研究轮数应为 1–30。"); return; }
-    if (mode.duration && !(form.duration >= 0.1 && form.duration <= 24)) { trace.setError("运行时限应为 0.1–24 小时。"); return; }
-    if (mode.input === "reports" && !files.length) { trace.setError("请至少上传一份研报 PDF。"); return; }
-    if (mode.input === "paper" && !files.length && !/^https?:\/\//.test(form.link.trim())) { trace.setError("请上传论文 PDF，或填写以 http(s) 开头的链接。"); return; }
+    if (mode.loops && (!Number.isInteger(form.loops) || form.loops < 1 || form.loops > 30)) { trace.setError(t("研究轮数应为 1–30。")); return; }
+    if (mode.duration && !(form.duration >= 0.1 && form.duration <= 24)) { trace.setError(t("运行时限应为 0.1–24 小时。")); return; }
+    if (mode.input === "reports" && !files.length) { trace.setError(t("请至少上传一份研报 PDF。")); return; }
+    if (mode.input === "paper" && !files.length && !/^https?:\/\//.test(form.link.trim())) { trace.setError(t("请上传论文 PDF，或填写以 http(s) 开头的链接。")); return; }
     const data = new FormData();
     data.append("scenario", form.scenario);
     if (mode.loops) data.append("loops", String(form.loops));
@@ -143,7 +144,7 @@ export function ResearchPage() {
   const canContinue = !!trace.traceId && !trace.active && MODES.some((m) => m.loops && trace.traceId.startsWith(m.value + "/"));
   const continueResearch = useCallback(async () => {
     if (!canContinue) return;
-    if (!Number.isInteger(moreLoops) || moreLoops < 1 || moreLoops > 30) { trace.setError("继续的轮数应为 1–30。"); return; }
+    if (!Number.isInteger(moreLoops) || moreLoops < 1 || moreLoops > 30) { trace.setError(t("继续的轮数应为 1–30。")); return; }
     setResuming(true);
     try {
       const id = trace.traceId;
@@ -160,14 +161,14 @@ export function ResearchPage() {
 
   // Rounds of the expanded experiment, nested under its row; the states before the first round are spelled out.
   const roundsBody = () => {
-    if (trace.busy && !trace.events.length) return <Empty>加载中…</Empty>;
-    if (status === "启动中") return <Empty>Agent 正在初始化，第一条事件到达前这里是空的，通常几十秒。</Empty>;
-    if (status === "未加载") return <Note tone="info">服务端没有加载这个实验的事件。<small>已结束的实验需要后端以 UI_LOAD_LEGACY_PICKLE_TRACES=true 启动才可回看。</small></Note>;
-    if (status === "已结束" && !trace.rounds.length) return <Note>这个实验的进程已结束，且没有留下任何事件；看日志里的报错。</Note>;
-    if (status === "运行中" && !trace.rounds.length) return <Empty>研究已启动，等待第一轮假设…</Empty>;
+    if (trace.busy && !trace.events.length) return <Empty>{t("加载中…")}</Empty>;
+    if (status === t("启动中")) return <Empty>{t("Agent 正在初始化，第一条事件到达前这里是空的，通常几十秒。")}</Empty>;
+    if (status === t("未加载")) return <Note tone="info">{t("服务端没有加载这个实验的事件。")}<small>{t("已结束的实验需要后端以 UI_LOAD_LEGACY_PICKLE_TRACES=true 启动才可回看。")}</small></Note>;
+    if (status === t("已结束") && !trace.rounds.length) return <Note>{t("这个实验的进程已结束，且没有留下任何事件；看日志里的报错。")}</Note>;
+    if (status === t("运行中") && !trace.rounds.length) return <Empty>{t("研究已启动，等待第一轮假设…")}</Empty>;
     return (
       <>
-      <Table label="研究轮次" columns={[{ label: "轮", width: 36 }, { label: "假设", width: "44%" }, { label: "阶段", optional: true }, { label: "因子", num: true, width: 48, optional: true }, { label: "状态", width: 88 }]}
+      <Table label={t("研究轮次")} columns={[{ label: t("轮"), width: 36 }, { label: t("假设"), width: "44%" }, { label: t("阶段"), optional: true }, { label: t("因子"), num: true, width: 48, optional: true }, { label: t("状态"), width: 88 }]}
         rows={trace.rounds.map((round) => ({
           key: round.id, selected: round.id === (activeRound?.id ?? ""), onClick: () => { setRoundId(round.id); layout.openResults(); },
           cells: [
@@ -180,21 +181,21 @@ export function ResearchPage() {
         }))} />
       {canContinue && (
         <div className="mm-row" style={{ marginTop: 10 }}>
-          <span className="mm-dim" style={{ fontSize: 12 }}>继续研究</span>
-          <NumberInput ariaLabel="继续的轮数" value={moreLoops} onChange={setMoreLoops} min={1} max={30} className="mm-weight" />
-          <span className="mm-dim" style={{ fontSize: 12 }}>轮，</span>
-          <SelectInput ariaLabel="确认方式" className="w-32" value={form.confirmMode} onChange={(v) => setForm((f) => ({ ...f, confirmMode: v }))} options={[
-            { value: "hypothesis", label: "只确认假设" }, { value: "all", label: "全部确认" }, { value: "auto", label: "全自动" },
+          <span className="mm-dim" style={{ fontSize: 12 }}>{t("继续研究")}</span>
+          <NumberInput ariaLabel={t("继续的轮数")} value={moreLoops} onChange={setMoreLoops} min={1} max={30} className="mm-weight" />
+          <span className="mm-dim" style={{ fontSize: 12 }}>{t("轮，")}</span>
+          <SelectInput ariaLabel={t("确认方式")} className="w-32" value={form.confirmMode} onChange={(v) => setForm((f) => ({ ...f, confirmMode: v }))} options={[
+            { value: "hypothesis", label: t("只确认假设") }, { value: "all", label: t("全部确认") }, { value: "auto", label: t("全自动") },
           ]} />
           {form.confirmMode !== "auto" && (
             <>
-              <span className="mm-dim" style={{ fontSize: 12 }}>无人处理</span>
-              <NumberInput ariaLabel="无人处理超时（分钟）" value={form.confirmTimeout} onChange={(v) => setForm((f) => ({ ...f, confirmTimeout: v }))} min={0} max={1440} className="mm-weight" />
-              <span className="mm-dim" style={{ fontSize: 12 }}>分钟后自动继续{form.confirmTimeout === 0 ? "（0 = 一直等）" : ""}</span>
+              <span className="mm-dim" style={{ fontSize: 12 }}>{t("无人处理")}</span>
+              <NumberInput ariaLabel={t("无人处理超时（分钟）")} value={form.confirmTimeout} onChange={(v) => setForm((f) => ({ ...f, confirmTimeout: v }))} min={0} max={1440} className="mm-weight" />
+              <span className="mm-dim" style={{ fontSize: 12 }}>{t("分钟后自动继续")}{form.confirmTimeout === 0 ? t("（0 = 一直等）") : ""}</span>
             </>
           )}
-          <Btn kind="primary" disabled={resuming} onClick={continueResearch}>{resuming ? "启动中…" : `继续研究 ${moreLoops} 轮`}</Btn>
-          <span className="mm-dim" style={{ fontSize: 12 }}>从最后一个快照接着跑，Agent 记得前面每一轮的假设和反馈；新轮次追加到这个实验里。</span>
+          <Btn kind="primary" disabled={resuming} onClick={continueResearch}>{resuming ? t("启动中…") : t("继续研究 {0} 轮", [moreLoops])}</Btn>
+          <span className="mm-dim" style={{ fontSize: 12 }}>{t("从最后一个快照接着跑，Agent 记得前面每一轮的假设和反馈；新轮次追加到这个实验里。")}</span>
         </div>
       )}
       </>
@@ -224,7 +225,7 @@ export function ResearchPage() {
         e.rounds == null ? <span key="r" className="mm-dim">—</span> : String(e.rounds),
         e.accepted == null ? <span key="a" className="mm-dim">—</span> : String(e.accepted),
         e.waiting && (e.status === "running" || e.status === "starting")
-          ? <span key="st" className="flex items-center gap-2 text-[11px] text-accent" title="等你确认"><i className="live__dot" aria-hidden />等你确认</span>
+          ? <span key="st" className="flex items-center gap-2 text-[11px] text-accent" title={t("等你确认")}><i className="live__dot" aria-hidden />{t("等你确认")}</span>
           : open && trace.active && progress.length
           ? <span key="st" className="flex items-center gap-2 text-[11px]" title={progressLine(progress, now)}><i className="live__dot" aria-hidden /><span className="truncate">{progressLine(progress, now)}</span></span>
           : <StatusTag key="st" status={open && trace.events.length ? status : EXPERIMENT_STATUS_LABELS[e.status]} />,
@@ -236,53 +237,53 @@ export function ResearchPage() {
 
   return (
     <PageFrame
-      tabs={<TextTabs label="工作区视图" value={tab} onChange={setTab} items={[{ key: "rounds", label: "研究轮次" }, { key: "new", label: "新建研究" }]} />}
+      tabs={<TextTabs label={t("工作区视图")} value={tab} onChange={setTab} items={[{ key: "rounds", label: t("研究轮次") }, { key: "new", label: t("新建研究") }]} />}
       actions={tab === "rounds" && (
         <>
-          {trace.active && <Btn kind="danger" disabled={trace.busy} onClick={trace.stop}>停止</Btn>}
-          {trace.traceId && <Btn onClick={() => window.open(studio.stdoutUrl(trace.traceId), "_blank")}>日志</Btn>}
-          <Btn onClick={() => { trace.loadTraces(); loadSummaries(); }}>刷新</Btn>
+          {trace.active && <Btn kind="danger" disabled={trace.busy} onClick={trace.stop}>{t("停止")}</Btn>}
+          {trace.traceId && <Btn onClick={() => window.open(studio.stdoutUrl(trace.traceId), "_blank")}>{t("日志")}</Btn>}
+          <Btn onClick={() => { trace.loadTraces(); loadSummaries(); }}>{t("刷新")}</Btn>
         </>
       )}
-      resultsTitle={tab === "new" ? mode.name : activeRound ? `第 ${Number(activeRound.id) + 1} 轮` : "轮次详情"}
+      resultsTitle={tab === "new" ? mode.name : activeRound ? t("第 {0} 轮", [Number(activeRound.id) + 1]) : t("轮次详情")}
       resultsActions={tab === "new" ? undefined : activeRound ? (
         <>
-          {activeRound.factors.length > 0 && <Btn kind="primary" onClick={() => sendToBacktest(activeRound)}>用 {activeRound.factors.length} 个因子回测 →</Btn>}
-          {hasPrediction(activeRound) && <Btn onClick={() => sendPrediction(activeRound)}>用模型预测回测 →</Btn>}
+          {activeRound.factors.length > 0 && <Btn kind="primary" onClick={() => sendToBacktest(activeRound)}>{t("用 {0} 个因子回测 →", [activeRound.factors.length])}</Btn>}
+          {hasPrediction(activeRound) && <Btn onClick={() => sendPrediction(activeRound)}>{t("用模型预测回测 →")}</Btn>}
         </>
       ) : undefined}
       results={tab === "new" ? (
         <div className="flex flex-col gap-3">
-          <Section title="这个场景做什么" note={mode.desc}>
+          <Section title={t("这个场景做什么")} note={mode.desc}>
             <ol className="m-0 flex list-decimal flex-col gap-1 pl-4 text-xs">{mode.steps.map((step) => <li key={step}>{step}</li>)}</ol>
             <Hint>{mode.output}</Hint>
           </Section>
-          <Section title="会用到的环境" note={env?.data_ready ? "就绪" : "未就绪"}>
+          <Section title={t("会用到的环境")} note={env?.data_ready ? t("就绪") : t("未就绪")}>
             <MetricGrid columns={2} items={[
-              { label: "研究模型", value: env?.chat_model?.replace("deepseek/", "") || "未配置" },
-              { label: "Qlib 数据", value: env ? `${env.start || "—"} → ${env.end || "—"}` : "后端未连接" },
-              ...(form.scenario.startsWith("Finance") ? [{ label: "股票池", value: `${universeLabel(form.market)} · 基准 ${chosenUniverse?.benchmark || "SH000300"}` }] : []),
-              ...(mode.loops ? [{ label: "轮数", value: String(form.loops) }, { label: "确认", value: `${{ hypothesis: "只确认假设", all: "全部确认", auto: "全自动" }[form.confirmMode] || form.confirmMode}${form.confirmMode !== "auto" && form.confirmTimeout ? ` · ${form.confirmTimeout} 分钟无人则自动继续` : form.confirmMode !== "auto" ? " · 一直等" : ""}` }] : []),
-              ...(mode.duration ? [{ label: "时限", value: `${form.duration} 小时` }] : []),
+              { label: t("研究模型"), value: env?.chat_model?.replace("deepseek/", "") || t("未配置") },
+              { label: t("Qlib 数据"), value: env ? `${env.start || "—"} → ${env.end || "—"}` : t("后端未连接") },
+              ...(form.scenario.startsWith("Finance") ? [{ label: t("股票池"), value: t("{0} · 基准 {1}", [universeLabel(form.market), chosenUniverse?.benchmark || "SH000300"]) }] : []),
+              ...(mode.loops ? [{ label: t("轮数"), value: String(form.loops) }, { label: t("确认"), value: t("{0}{1}", [{ hypothesis: t("只确认假设"), all: t("全部确认"), auto: t("全自动") }[form.confirmMode] || form.confirmMode, form.confirmMode !== "auto" && form.confirmTimeout ? t(" · {0} 分钟无人则自动继续", [form.confirmTimeout]) : form.confirmMode !== "auto" ? t(" · 一直等") : ""]) }] : []),
+              ...(mode.duration ? [{ label: t("时限"), value: t("{0} 小时", [form.duration]) }] : []),
             ]} />
-            {mode.input && <Hint>{files.length ? `已选 ${files.length} 个文件：${files.map((f) => f.name).join("，")}` : mode.input === "reports" ? "还没有上传研报。" : form.link.trim() ? `将读取链接 ${form.link.trim()}` : "还没有上传论文或填写链接。"}</Hint>}
+            {mode.input && <Hint>{files.length ? t("已选 {0} 个文件：{1}", [files.length, files.map((f) => f.name).join("，")]) : mode.input === "reports" ? t("还没有上传研报。") : form.link.trim() ? t("将读取链接 {0}", [form.link.trim()]) : t("还没有上传论文或填写链接。")}</Hint>}
           </Section>
           {mode.objective && (
-            <Section title="运行中会问你三次" note="不提交它会一直等">
+            <Section title={t("运行中会问你三次")} note={t("不提交它会一直等")}>
               <ol className="m-0 flex list-decimal flex-col gap-1 pl-4 text-xs">
-                <li>开始前：总体研究方向和基础特征集。方向留空就由 Agent 自行选题。</li>
-                <li>每一轮开始：这一轮的假设。认可就直接继续，也可以改写后提交。</li>
-                <li>每一轮结束：评估结论。不同意 Agent 的判断可以在这里改。</li>
+                <li>{t("开始前：总体研究方向和基础特征集。方向留空就由 Agent 自行选题。")}</li>
+                <li>{t("每一轮开始：这一轮的假设。认可就直接继续，也可以改写后提交。")}</li>
+                <li>{t("每一轮结束：评估结论。不同意 Agent 的判断可以在这里改。")}</li>
               </ol>
-              <Hint>确认面板会出现在这一栏，不改直接提交就按 Agent 的原案继续。</Hint>
+              <Hint>{t("确认面板会出现在这一栏，不改直接提交就按 Agent 的原案继续。")}</Hint>
             </Section>
           )}
-          {form.objective.trim() && mode.objective && <Section title="研究方向"><p className="m-0 text-xs">{form.objective}</p></Section>}
+          {form.objective.trim() && mode.objective && <Section title={t("研究方向")}><p className="m-0 text-xs">{form.objective}</p></Section>}
         </div>
       ) : (
         <div className="flex flex-col gap-3">
           {trace.interaction && <InteractionPanel event={trace.interaction} busy={trace.busy} defaultInstruction={form.objective} onSubmit={trace.answer} />}
-          {trace.traceId && !trace.active && trace.rounds.length > 0 && ["已完成", "已停止", "执行失败", "已结束"].includes(status) && (
+          {trace.traceId && !trace.active && trace.rounds.length > 0 && [t("已完成"), t("已停止"), t("执行失败"), t("已结束")].includes(status) && (
             <RunSummary events={trace.events} status={status} onContinue={canContinue ? continueResearch : undefined}
               onBacktest={(names) => {
                 const wanted = new Set(names);
@@ -292,64 +293,64 @@ export function ResearchPage() {
           )}
           {trace.traceId && (progress.length > 0 || trace.active) && <LiveStatus traceId={trace.traceId} events={trace.events} running={trace.active} waiting={!!trace.interaction} roundId={activeRound?.id ?? null}
             confirm={summaries.find((x) => x.id === trace.traceId)?.confirm} autoAnswered={summaries.find((x) => x.id === trace.traceId)?.auto_answered} />}
-          {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} /> : <Hint>在左侧展开一个实验，点一轮查看假设、评估与代码。</Hint>}
+          {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} /> : <Hint>{t("在左侧展开一个实验，点一轮查看假设、评估与代码。")}</Hint>}
         </div>
       )}
     >
-      {trace.error && <Note tone="bad" actions={<Btn kind="text" onClick={() => trace.setError("")}>关闭</Btn>}>{trace.error}</Note>}
+      {trace.error && <Note tone="bad" actions={<Btn kind="text" onClick={() => trace.setError("")}>{t("关闭")}</Btn>}>{trace.error}</Note>}
       {tab === "new" ? (
-        <Block title="新建研究" note={env?.chat_model || "未配置研究模型"}>
+        <Block title={t("新建研究")} note={env?.chat_model || t("未配置研究模型")}>
           <FieldGrid min={160}>
-            <Field label="场景">
+            <Field label={t("场景")}>
               <SelectInput value={form.scenario} onChange={(v) => { setForm((f) => ({ ...f, scenario: v })); setFiles([]); }} options={MODES.map((m) => ({ value: m.value, label: m.name }))} />
             </Field>
             {form.scenario.startsWith("Finance") && universes.length > 0 && (
-              <Field label="股票池" hint="因子在这个池子里计算、排序和回测">
-                <SelectInput value={form.market} onChange={(v) => setForm((f) => ({ ...f, market: v }))} options={universes.map((u) => ({ value: u.market, label: `${universeLabel(u.market)}${u.ready ? "" : "（首次需准备数据）"}`, hint: u.members ? `${u.members} 只 · ${u.benchmark}` : u.benchmark }))} />
+              <Field label={t("股票池")} hint={t("因子在这个池子里计算、排序和回测")}>
+                <SelectInput value={form.market} onChange={(v) => setForm((f) => ({ ...f, market: v }))} options={universes.map((u) => ({ value: u.market, label: `${universeLabel(u.market)}${u.ready ? "" : t("（首次需准备数据）")}`, hint: u.members ? t("{0} 只 · {1}", [u.members, u.benchmark]) : u.benchmark }))} />
               </Field>
             )}
-            {mode.loops && <Field label="轮数" hint="1–30"><NumberInput value={form.loops} onChange={(v) => setForm((f) => ({ ...f, loops: v }))} min={1} max={30} /></Field>}
-            {mode.duration && <Field label="时限（小时）" hint="0.1–24"><NumberInput value={form.duration} onChange={(v) => setForm((f) => ({ ...f, duration: v }))} min={0.1} max={24} step={0.1} /></Field>}
+            {mode.loops && <Field label={t("轮数")} hint="1–30"><NumberInput value={form.loops} onChange={(v) => setForm((f) => ({ ...f, loops: v }))} min={1} max={30} /></Field>}
+            {mode.duration && <Field label={t("时限（小时）")} hint="0.1–24"><NumberInput value={form.duration} onChange={(v) => setForm((f) => ({ ...f, duration: v }))} min={0.1} max={24} step={0.1} /></Field>}
             {mode.loops && (
-              <Field label="确认方式" hint="运行中哪些环节要等你点头">
+              <Field label={t("确认方式")} hint={t("运行中哪些环节要等你点头")}>
                 <SelectInput value={form.confirmMode} onChange={(v) => setForm((f) => ({ ...f, confirmMode: v }))} options={[
-                  { value: "hypothesis", label: "只确认假设", hint: "推荐" },
-                  { value: "all", label: "全部确认", hint: "指示·特征·假设·结论" },
-                  { value: "auto", label: "全自动", hint: "不打断" },
+                  { value: "hypothesis", label: t("只确认假设"), hint: t("推荐") },
+                  { value: "all", label: t("全部确认"), hint: t("指示·特征·假设·结论") },
+                  { value: "auto", label: t("全自动"), hint: t("不打断") },
                 ]} />
               </Field>
             )}
             {mode.loops && form.confirmMode !== "auto" && (
-              <Field label="无人处理时（分钟）" hint="等这么久没人确认就按 Agent 原案继续；0 = 一直等">
+              <Field label={t("无人处理时（分钟）")} hint={t("等这么久没人确认就按 Agent 原案继续；0 = 一直等")}>
                 <NumberInput value={form.confirmTimeout} onChange={(v) => setForm((f) => ({ ...f, confirmTimeout: v }))} min={0} max={1440} />
               </Field>
             )}
             {mode.input && (
-              <Field label={mode.input === "reports" ? "研报 PDF（可多选）" : "论文 PDF"}>
+              <Field label={mode.input === "reports" ? t("研报 PDF（可多选）") : t("论文 PDF")}>
                 <input type="file" accept=".pdf,application/pdf" multiple={mode.input === "reports"} onChange={(e) => setFiles([...(e.target.files || [])])} className="mm-control--file" />
               </Field>
             )}
-            {mode.input === "paper" && <Field label="或论文链接"><TextInput placeholder="https://arxiv.org/pdf/…" value={form.link} onChange={(v) => setForm((f) => ({ ...f, link: v }))} /></Field>}
+            {mode.input === "paper" && <Field label={t("或论文链接")}><TextInput placeholder="https://arxiv.org/pdf/…" value={form.link} onChange={(v) => setForm((f) => ({ ...f, link: v }))} /></Field>}
             {mode.objective && (
-              <Field label="研究方向（可选）" wide>
+              <Field label={t("研究方向（可选）")} wide>
                 <textarea rows={5} className="mm-control" value={form.objective} onChange={(e) => setForm((f) => ({ ...f, objective: e.target.value }))}
-                  placeholder="留空则由 Agent 自行选题。填了会作为总体指示进入每一轮的假设生成，例如：研究沪深300中量价动量因子的增量信息。" />
+                  placeholder={t("留空则由 Agent 自行选题。填了会作为总体指示进入每一轮的假设生成，例如：研究沪深300中量价动量因子的增量信息。")} />
               </Field>
             )}
           </FieldGrid>
-          {chosenUniverse && !chosenUniverse.ready && <div style={{ marginTop: 12 }}><Note tone="info">第一次在{universeLabel(form.market)}上研究要先从 Qlib 导出这个池子的日线数据给因子代码用，中证1000 约半分钟，全市场约一两分钟；点开始后请等待，之后不用再等。</Note></div>}
+          {chosenUniverse && !chosenUniverse.ready && <div style={{ marginTop: 12 }}><Note tone="info">{t("第一次在{0}上研究要先从 Qlib 导出这个池子的日线数据给因子代码用，中证1000 约半分钟，全市场约一两分钟；点开始后请等待，之后不用再等。", [universeLabel(form.market)])}</Note></div>}
           <div className="mm-row" style={{ marginTop: 16 }}>
-            <Btn kind="primary" disabled={trace.busy} onClick={start}>{trace.busy ? "启动中…" : "开始研究"}</Btn>
-            <span className="mm-dim" style={{ fontSize: 12 }}>{mode.desc}{files.length ? ` · 已选 ${files.map((f) => f.name).join("，")}` : ""}</span>
+            <Btn kind="primary" disabled={trace.busy} onClick={start}>{trace.busy ? t("启动中…") : t("开始研究")}</Btn>
+            <span className="mm-dim" style={{ fontSize: 12 }}>{mode.desc}{files.length ? t(" · 已选 {0}", [files.map((f) => f.name).join("，")]) : ""}</span>
           </div>
-          <P>场景说明、环境和确认流程在右栏。</P>
+          <P>{t("场景说明、环境和确认流程在右栏。")}</P>
         </Block>
       ) : (
-        <Block title="实验" count={experiments.length} note={experiments.length ? "点一个实验展开它的轮次；再点一轮在右栏看详情" : undefined}>
+        <Block title={t("实验")} count={experiments.length} note={experiments.length ? t("点一个实验展开它的轮次；再点一轮在右栏看详情") : undefined}>
           {experiments.length ? (
-            <Table label="实验" columns={[{ label: "", width: 22 }, { label: "实验", width: "34%" }, { label: "场景", optional: true }, { label: "轮", num: true, width: 44 }, { label: "接受", num: true, width: 50 }, { label: "状态", width: anyLive ? 180 : 72 }, { label: "更新", width: 100, optional: true }]}
+            <Table label={t("实验")} columns={[{ label: "", width: 22 }, { label: t("实验"), width: "34%" }, { label: t("场景"), optional: true }, { label: t("轮"), num: true, width: 44 }, { label: t("接受"), num: true, width: 66 }, { label: t("状态"), width: anyLive ? 180 : 72 }, { label: t("更新"), width: 100, optional: true }]}
               rows={experimentRows} />
-          ) : <Empty>还没有实验。切到「新建研究」启动第一个。</Empty>}
+          ) : <Empty>{t("还没有实验。切到「新建研究」启动第一个。")}</Empty>}
         </Block>
       )}
     </PageFrame>

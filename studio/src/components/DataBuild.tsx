@@ -4,6 +4,7 @@ import * as studio from "../api/studio";
 import type { BuildStatus } from "../api/studio";
 import { errorText } from "../hooks/studioContext";
 import { Btn } from "./minimal";
+import { t } from "../i18n";
 
 /**
  * The US workspace's data line plus a bottom sheet: the data directory's span and a "重建数据" button that runs
@@ -34,27 +35,27 @@ export function DataBuild({ onBuilt, compact }: { onBuilt: () => void; compact?:
   }, [open]);
   const start = async () => {
     setMessage("");
-    try { const r = await studio.startDataBuild(); if (!r.started) setMessage(r.reason || "未开始"); await load(); } catch (e) { setMessage(errorText(e)); }
+    try { const r = await studio.startDataBuild(); if (!r.started) setMessage(r.reason || t("未开始")); await load(); } catch (e) { setMessage(errorText(e)); }
   };
-  const headline = running ? "构建中" : status?.exit_code === 0 ? "可重建" : status?.exit_code ? "上次失败" : "";
+  const headline = running ? t("构建中") : status?.exit_code === 0 ? t("可重建") : status?.exit_code ? t("上次失败") : "";
   const sheet = open && createPortal(
     <>
       <div className="sheet-backdrop" onClick={() => setOpen(false)} />
-      <div className="sheet" role="dialog" aria-label="重建美股数据">
+      <div className="sheet" role="dialog" aria-label={t("重建美股数据")}>
         <div className="sheet__head">
           <div>
-            <div className="sheet__title">重建美股数据</div>
-            <div className="text-[11px] text-muted">纳斯达克 100 · Nasdaq 成分快照 + Yahoo Finance 日线</div>
+            <div className="sheet__title">{t("重建美股数据")}</div>
+            <div className="text-[11px] text-muted">{t("纳斯达克 100 · Nasdaq 成分快照 + Yahoo Finance 日线")}</div>
           </div>
-          <Btn kind="text" onClick={() => setOpen(false)}>关闭</Btn>
+          <Btn kind="text" onClick={() => setOpen(false)}>{t("关闭")}</Btn>
         </div>
         <div className="sheet__body">
-          <p className="m-0 text-[12px] leading-relaxed">从 2008 年起按月抓纳指 100 成分，下载所有曾经成分和 ^NDX 的日线，按 Qlib 的方式复权归一后写成二进制数据，并生成股票池和公司名。全程约 5–10 分钟，期间不能跑回测或研究。Yahoo 已下架的退市代码会被跳过。</p>
+          <p className="m-0 text-[12px] leading-relaxed">{t("从 2008 年起按月抓纳指 100 成分，下载所有曾经成分和 ^NDX 的日线，按 Qlib 的方式复权归一后写成二进制数据，并生成股票池和公司名。全程约 5–10 分钟，期间不能跑回测或研究。Yahoo 已下架的退市代码会被跳过。")}</p>
           {status?.log?.length ? <div className="sheet__log">{status.log.map((l, i) => <div key={i}>{l}</div>)}</div> : null}
           {message && <div className="text-danger">{message}</div>}
           <div className="flex flex-wrap items-center gap-2">
-            <Btn kind="primary" disabled={running} onClick={start}>{running ? "构建中…" : status?.started ? "重新构建" : "开始构建"}</Btn>
-            <Btn kind="text" onClick={load}>刷新</Btn>
+            <Btn kind="primary" disabled={running} onClick={start}>{running ? t("构建中…") : status?.started ? t("重新构建") : t("开始构建")}</Btn>
+            <Btn kind="text" onClick={load}>{t("刷新")}</Btn>
           </div>
         </div>
       </div>
@@ -63,7 +64,7 @@ export function DataBuild({ onBuilt, compact }: { onBuilt: () => void; compact?:
   );
   if (compact) {
     return <>
-      <Btn kind="primary" onClick={() => setOpen(true)}>{running ? "查看构建进度" : "构建美股数据"}</Btn>
+      <Btn kind="primary" onClick={() => setOpen(true)}>{running ? t("查看构建进度") : t("构建美股数据")}</Btn>
       {sheet}
     </>;
   }
@@ -72,7 +73,7 @@ export function DataBuild({ onBuilt, compact }: { onBuilt: () => void; compact?:
       <button type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open}
         className="-mx-2.5 flex w-[calc(100%+20px)] items-center gap-2.5 rounded-[10px] px-2.5 py-2 text-left text-foreground transition-colors hover:bg-surface-secondary">
         <span className={`w-[22px] text-center text-[17px] leading-none ${running ? "animate-spin" : ""}`} aria-hidden>⟳</span>
-        <span className="min-w-0 flex-1 text-[13px] font-medium">重建数据</span>
+        <span className="min-w-0 flex-1 text-[13px] font-medium">{t("重建数据")}</span>
         <span className={`flex items-center gap-1.5 text-[11px] ${status?.exit_code ? "text-warning" : "text-muted"}`}>
           {running && <i className="inline-block size-[6px] rounded-full bg-warning" />}
           {headline}

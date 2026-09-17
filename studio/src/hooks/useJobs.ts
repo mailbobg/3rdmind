@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as studio from "../api/studio";
 import type { Job } from "../api/studio";
 import type { Toast } from "./useToasts";
+import { t as tr } from "../i18n";
 
 export const JOB_KIND_LABELS: Record<string, string> = {
-  research: "研究", backtest: "回测", search: "组合搜索", diagnose: "拆开回测", refresh: "重算到最新",
-  universe: "准备股票池数据", strategy_update: "更新策略", sync: "同步数据", build: "重建数据",
+  research: tr("研究"), backtest: tr("回测"), search: tr("组合搜索"), diagnose: tr("拆开回测"), refresh: tr("重算到最新"),
+  universe: tr("准备股票池数据"), strategy_update: tr("更新策略"), sync: tr("同步数据"), build: tr("重建数据"),
 };
 
 /**
@@ -36,10 +37,10 @@ export function useJobs(enabled: boolean, notify: (t: Omit<Toast, "id" | "at">) 
             known.current.add(`${j.id}@${j.finished}`);
             const ok = j.status === "completed";
             const body = ok ? summarize(j) : j.error || undefined;
-            notify({ tone: ok ? "ok" : "bad", title: `${j.label} ${ok ? "完成" : "失败"}`, body, trace: undefined, job: j });
+            notify({ tone: ok ? "ok" : "bad", title: `${j.label} ${ok ? tr("完成") : tr("失败")}`, body, trace: undefined, job: j });
             if (!ok) setFailures((list) => [...list.filter((f) => f.id !== j.id), j]);
             if (desktop && typeof Notification !== "undefined" && Notification.permission === "granted") {
-              const n = new Notification(`${j.label} ${ok ? "完成" : "失败"}`, { body, tag: j.id });
+              const n = new Notification(`${j.label} ${ok ? tr("完成") : tr("失败")}`, { body, tag: j.id });
               n.onclick = () => { window.focus(); onOpen(j); n.close(); };
             }
           }
@@ -56,9 +57,9 @@ export function useJobs(enabled: boolean, notify: (t: Omit<Toast, "id" | "at">) 
 
 function summarize(j: Job): string | undefined {
   const r = j.result || {};
-  if (j.kind === "backtest" && r.total_return != null) return `总收益 ${r.total_return >= 0 ? "+" : ""}${(r.total_return * 100).toFixed(1)}%`;
-  if (j.kind === "search" && Array.isArray(r.recommended)) return `推荐 ${r.recommended.length} 个信号`;
-  if (j.kind === "refresh" && r.end) return `数据到 ${r.end}`;
-  if (j.kind === "strategy_update") return r.failures?.length ? `${r.failures.length} 个因子重算失败，回测已启动` : "已启动跟踪回测";
+  if (j.kind === "backtest" && r.total_return != null) return tr("总收益 {0}{1}%", [r.total_return >= 0 ? "+" : "", (r.total_return * 100).toFixed(1)]);
+  if (j.kind === "search" && Array.isArray(r.recommended)) return tr("推荐 {0} 个信号", [r.recommended.length]);
+  if (j.kind === "refresh" && r.end) return tr("数据到 {0}", [r.end]);
+  if (j.kind === "strategy_update") return r.failures?.length ? tr("{0} 个因子重算失败，回测已启动", [r.failures.length]) : tr("已启动跟踪回测");
   return undefined;
 }

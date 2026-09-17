@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as studio from "../api/studio";
 import type { AttentionItem } from "../api/studio";
 import { persistStudioState, restoreStudioState } from "./studioStorage";
+import { t as tr } from "../i18n";
 
 export const ATTENTION_LABELS: Record<AttentionItem["kind"], string> = {
-  instruction: "开始前的研究指示", features: "基础特征集", hypothesis: "这一轮的假设", feedback: "这一轮的评估结论", other: "一个确认",
+  instruction: tr("开始前的研究指示"), features: tr("基础特征集"), hypothesis: tr("这一轮的假设"), feedback: tr("这一轮的评估结论"), other: tr("一个确认"),
 };
 
 export interface NotifyPrefs { desktop: boolean; sound: boolean }
@@ -61,7 +62,7 @@ export function useAttention(enabled: boolean, onOpen: (item: AttentionItem) => 
           if (prefs.sound) chime();
           if (prefs.desktop && typeof Notification !== "undefined" && Notification.permission === "granted") {
             for (const i of fresh) {
-              const n = new Notification("RD-Agent 等你确认", { body: `${i.trace.split("/").pop()} · ${ATTENTION_LABELS[i.kind]}${i.round ? `（第 ${i.round} 轮）` : ""}`, tag: `${i.trace}@${i.since}` });
+              const n = new Notification(tr("RD-Agent 等你确认"), { body: tr("{0} · {1}{2}", [i.trace.split("/").pop(), ATTENTION_LABELS[i.kind], i.round ? tr("（第 {0} 轮）", [i.round]) : ""]), tag: `${i.trace}@${i.since}` });
               n.onclick = () => { window.focus(); onOpen(i); n.close(); };
             }
           }

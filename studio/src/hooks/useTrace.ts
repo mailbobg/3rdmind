@@ -3,6 +3,7 @@ import * as studio from "../api/studio";
 import type { TraceEvent } from "../api/studio";
 import { groupRounds, traceStatus } from "./rounds";
 import { persistStudioState, restoreStudioState } from "./studioStorage";
+import { t } from "../i18n";
 
 type Liveness = "alive" | "dead" | "unknown";
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -33,7 +34,7 @@ export function useTrace() {
 
   const rounds = useMemo(() => groupRounds(events), [events]);
   const status = useMemo(() => traceStatus(events, liveness), [events, liveness]);
-  const active = status === "运行中" || status === "启动中";
+  const active = status === t("运行中") || status === t("启动中");
   const activeRef = useRef(active);
   activeRef.current = active;
 
@@ -72,7 +73,7 @@ export function useTrace() {
     timer.current = setTimeout(async () => {
       try { await refresh(); failures.current = 0; }
       catch (e) {
-        if (++failures.current >= 3) { setError(`轮询已停止：${errorText(e)}`); return; }
+        if (++failures.current >= 3) { setError(t("轮询已停止：{0}", [errorText(e)])); return; }
       }
       schedule();
     }, 3000);

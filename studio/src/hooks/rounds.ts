@@ -1,4 +1,5 @@
 import type { TraceEvent } from "../api/studio";
+import { t } from "../i18n";
 
 export interface CodeFile { name: string; code: string; task: string; loop: string }
 export interface RoundView {
@@ -10,7 +11,8 @@ export interface RoundView {
   factors: string[];
   chartHtml: string;
   feedback: { decision?: boolean; reason?: string; observations?: string; hypothesis_evaluation?: string; new_hypothesis?: string } | null;
-  status: "假设待验证" | "代码已生成" | "评估已返回" | "接受" | "拒绝";
+  /** Display status (already translated). */
+  status: string;
 }
 
 const text = (value: unknown) => (typeof value === "string" ? value : JSON.stringify(value, null, 2));
@@ -50,11 +52,11 @@ export function groupRounds(events: TraceEvent[]): RoundView[] {
       ),
     );
     const metrics = metricEvent ? parseMetrics(metricEvent.content?.result) : null;
-    const status: RoundView["status"] = feedback
-      ? feedback.decision ? "接受" : "拒绝"
-      : metricEvent ? "评估已返回"
-      : files.length ? "代码已生成"
-      : "假设待验证";
+    const status: string = feedback
+      ? feedback.decision ? t("接受") : t("拒绝")
+      : metricEvent ? t("评估已返回")
+      : files.length ? t("代码已生成")
+      : t("假设待验证");
     return {
       id,
       hypothesis,
@@ -72,12 +74,12 @@ export function groupRounds(events: TraceEvent[]): RoundView[] {
 export function traceStatus(events: TraceEvent[], liveness?: "alive" | "dead" | "unknown") {
   // No events yet: either the run is still starting (its process is alive), it never reported anything,
   // or the server never loaded it. Only the server knows which.
-  if (!events.length) return liveness === "alive" ? ("启动中" as const) : liveness === "dead" ? ("已结束" as const) : ("未加载" as const);
+  if (!events.length) return liveness === "alive" ? t("启动中") : liveness === "dead" ? t("已结束") : t("未加载");
   const end = [...events].reverse().find((e) => e.tag.toLowerCase() === "end");
   // No END event: the process is running, or it went away without one (server restart, crash) and the
   // server tells us it is not alive.
-  if (!end) return liveness === "dead" ? ("已结束" as const) : ("运行中" as const);
+  if (!end) return liveness === "dead" ? t("已结束") : t("运行中");
   const code = Number(end.content?.end_code);
-  return code === 0 ? ("已完成" as const) : code === -1 ? ("已停止" as const) : ("执行失败" as const);
+  return code === 0 ? t("已完成") : code === -1 ? t("已停止") : t("执行失败");
 }
 

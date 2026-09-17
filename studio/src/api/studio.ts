@@ -1,3 +1,4 @@
+import { lang, t } from "../i18n";
 /** Market workspace every list request is scoped to ("cn" | "us"); set by the shell before pages load. */
 export type Region = "cn" | "us" | string;
 let apiRegion: Region = "cn";
@@ -117,16 +118,16 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
   try {
     response = await fetch(path, init);
   } catch {
-    throw new ApiError("本地后端未连接。运行 scripts/start-backend.sh 后重试。", 0);
+    throw new ApiError(t("本地后端未连接。运行 scripts/start-backend.sh 后重试。"), 0);
   }
   if ([502, 503, 504].includes(response.status))
-    throw new ApiError("本地后端未连接。运行 scripts/start-backend.sh 后重试。", response.status);
+    throw new ApiError(t("本地后端未连接。运行 scripts/start-backend.sh 后重试。"), response.status);
   const text = await response.text();
   let value: any;
   try {
     value = JSON.parse(text);
   } catch {
-    throw new ApiError("服务未返回 JSON，请确认 RD-Agent 服务及 Vite 代理已启动。", response.status);
+    throw new ApiError(t("服务未返回 JSON，请确认 RD-Agent 服务及 Vite 代理已启动。"), response.status);
   }
   if (!response.ok) throw new ApiError(value?.error || `HTTP ${response.status}`, response.status, value);
   return value as T;
@@ -147,9 +148,10 @@ export interface ExperimentSummary {
 export const traces = () => api<string[]>(scoped("/traces"));
 /** Instrument universes the Qlib data ships with; `ready` = factor input data already built for research. */
 export interface Universe { market: string; label: string; group: string; region: string; benchmark: string; open_cost: number; close_cost: number; min_cost: number; limit_threshold: number | null; members: number | null; ready: boolean }
-export const UNIVERSE_LABELS: Record<string, string> = { csi300: "沪深300", csi500: "中证500", csi800: "中证800", csi1000: "中证1000", csiall: "中证全指", all: "全部 A 股", nasdaq100: "纳斯达克 100" };
+export const UNIVERSE_LABELS: Record<string, string> = { csi300: t("沪深300"), csi500: t("中证500"), csi800: t("中证800"), csi1000: t("中证1000"), csiall: t("中证全指"), all: t("全部 A 股"), nasdaq100: t("纳斯达克 100") };
 /** Universe list from the server; its labels also feed universeLabel() for every later call. */
-export const universes = () => api<Universe[]>("/universes").then((list) => { for (const u of list) if (u.label) UNIVERSE_LABELS[u.market] = u.label; return list.filter((u) => u.region === apiRegion); });
+// The server's labels are Chinese; in English the client's own names win.
+export const universes = () => api<Universe[]>("/universes").then((list) => { if (lang !== "en") for (const u of list) if (u.label) UNIVERSE_LABELS[u.market] = u.label; return list.filter((u) => u.region === apiRegion); });
 /** The market workspaces: A-shares, US, ... with their data directory and calendar span. */
 export interface RegionInfo { region: Region; label: string; provider_uri: string | null; markets: string[]; ready: boolean; start: string | null; end: string | null }
 export const regions = () => api<RegionInfo[]>("/studio/regions");
@@ -309,7 +311,7 @@ export async function waitJob<T = any>(id: string, onProgress?: (j: Job) => void
     const j = await job(id);
     onProgress?.(j);
     if (j.status === "completed") return j.result as T;
-    if (j.status === "failed") throw new ApiError(j.error || `${j.label} 失败`, 500, j);
+    if (j.status === "failed") throw new ApiError(j.error || t("{0} 失败", [j.label]), 500, j);
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 }

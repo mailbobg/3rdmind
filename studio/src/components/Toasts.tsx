@@ -1,4 +1,5 @@
 import type { Toast } from "../hooks/useToasts";
+import { t as tr } from "../i18n";
 
 /** Bottom-right stack of completion notices; click one to jump, × to dismiss. */
 export function Toasts({ toasts, onOpen, onDismiss }: { toasts: Toast[]; onOpen: (t: Toast) => void; onDismiss: (id: string) => void }) {
@@ -11,7 +12,7 @@ export function Toasts({ toasts, onOpen, onDismiss }: { toasts: Toast[]; onOpen:
             <span className="toast__title">{t.title}</span>
             {t.body && <span className="toast__text">{t.body}</span>}
           </button>
-          <button type="button" className="toast__close" aria-label="关闭" onClick={() => onDismiss(t.id)}>×</button>
+          <button type="button" className="toast__close" aria-label={tr("关闭")} onClick={() => onDismiss(t.id)}>×</button>
         </div>
       ))}
     </div>

@@ -1,7 +1,8 @@
 import type { ExperimentStatus, ExperimentSummary } from "../api/studio";
+import { t } from "../i18n";
 
 export const EXPERIMENT_STATUS_LABELS: Record<ExperimentStatus | "unloaded", string> = {
-  starting: "启动中", running: "运行中", completed: "已完成", stopped: "已停止", failed: "执行失败", ended: "已结束", unloaded: "未加载",
+  starting: t("启动中"), running: t("运行中"), completed: t("已完成"), stopped: t("已停止"), failed: t("执行失败"), ended: t("已结束"), unloaded: t("未加载"),
 };
 
 /** A row of the experiment list: every known trace id, with its summary when the server has loaded it. */

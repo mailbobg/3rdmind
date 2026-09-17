@@ -3,6 +3,7 @@ import * as studio from "../api/studio";
 import type { RecentItem } from "../api/studio";
 
 import type { Job } from "../api/studio";
+import { t as tr } from "../i18n";
 export interface Toast { id: string; title: string; body?: string; tone: "ok" | "bad" | "info"; trace?: string; job?: Job; at: number }
 
 /**
@@ -49,9 +50,9 @@ function describe(i: RecentItem): Omit<Toast, "id" | "at"> {
   const name = i.trace.split("/").pop() || i.trace;
   if (i.kind === "round_done") {
     const ic = i.ic != null ? ` · IC ${i.ic.toFixed(3)}` : "";
-    const n = i.factors.length ? ` · ${i.factors.length} 个因子` : "";
-    return { tone: i.decision ? "ok" : "info", trace: i.trace, title: `${name} 第 ${i.round ?? "?"} 轮完成 · ${i.decision ? "接受" : "拒绝"}`, body: `${ic}${n}`.replace(/^ · /, "") || undefined };
+    const n = i.factors.length ? tr(" · {0} 个因子", [i.factors.length]) : "";
+    return { tone: i.decision ? "ok" : "info", trace: i.trace, title: tr("{0} 第 {1} 轮完成 · {2}", [name, i.round ?? "?", i.decision ? tr("接受") : tr("拒绝")]), body: `${ic}${n}`.replace(/^ · /, "") || undefined };
   }
   return { tone: i.status === "completed" ? "ok" : i.status === "failed" ? "bad" : "info", trace: i.trace,
-    title: `${name} ${i.status === "completed" ? "研究结束" : i.status === "failed" ? "研究失败" : "研究已停止"}`, body: i.status === "completed" ? "点开看总结" : undefined };
+    title: `${name} ${i.status === "completed" ? tr("研究结束") : i.status === "failed" ? tr("研究失败") : tr("研究已停止")}`, body: i.status === "completed" ? tr("点开看总结") : undefined };
 }

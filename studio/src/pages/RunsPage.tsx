@@ -15,6 +15,7 @@ import { useNow } from "../components/Progress";
 import { Block, Btn, Empty, Num, StatusTag, Table, TextTabs } from "../components/minimal";
 import type { ReactNode } from "react";
 import { Hint } from "../components/widgets";
+import { t } from "../i18n";
 
 interface Row {
   key: string; kind: string; id: string; name: string; detail: string; result: ReactNode; status: string; time: string | null;
@@ -33,7 +34,7 @@ function JobProgress({ job }: { job: Job }) {
   );
 }
 
-const JOB_STATUS: Record<string, string> = { queued: "排队中", running: "运行中", completed: "已完成", failed: "失败" };
+const JOB_STATUS: Record<string, string> = { queued: t("排队中"), running: t("运行中"), completed: t("已完成"), failed: t("失败") };
 
 /**
  * Every run in one list: research experiments, backtests, and every other background job the server knows
@@ -62,7 +63,7 @@ export function RunsPage() {
       const live = e.status === "running" || e.status === "starting";
       return {
         key: `r:${e.id}`, kind: "research", id: e.id, name: shortName(e.id), detail: e.hypothesis || e.scenario, live, job,
-        result: live && job ? <JobProgress job={job} /> : e.rounds == null ? <span className="mm-dim">—</span> : `${e.rounds} 轮 · ${e.accepted} 接受`,
+        result: live && job ? <JobProgress job={job} /> : e.rounds == null ? <span className="mm-dim">—</span> : t("{0} 轮 · {1} 接受", [e.rounds, e.accepted]),
         status: e.id === trace.traceId && trace.events.length ? trace.status : EXPERIMENT_STATUS_LABELS[e.status], time: e.updated,
       };
     });
@@ -71,7 +72,7 @@ export function RunsPage() {
       const live = b.status === "queued" || b.status === "running";
       return {
         key: `b:${b.id}`, kind: "backtest", id: b.id, name: b.id.slice(0, 8), live, job,
-        detail: `${b.config.factors?.length ?? 0} 信号 · ${b.config.model?.method === "lgbm" ? "LightGBM" : "排名加权"} · ${b.config.start} → ${b.config.end} · ${b.config.market}`,
+        detail: t("{0} 信号 · {1} · {2} → {3} · {4}", [b.config.factors?.length ?? 0, b.config.model?.method === "lgbm" ? "LightGBM" : t("排名加权"), b.config.start, b.config.end, b.config.market]),
         result: live && job ? <JobProgress job={job} /> : <Num value={b.total_return} format={(v) => `${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%`} />,
         status: backtestStatusLabel(b.status), time: b.created || null,
       };
@@ -82,7 +83,7 @@ export function RunsPage() {
       const elapsed = j.started ? (j.finished ? new Date(j.finished).getTime() : now) - new Date(j.started).getTime() : null;
       return {
         key: `j:${j.id}`, kind: j.kind, id: j.id, name: j.label, live, job: j,
-        detail: [j.market, elapsed != null ? `用时 ${fmtDuration(elapsed)}` : "", j.error ? `失败：${j.error}` : ""].filter(Boolean).join(" · "),
+        detail: [j.market, elapsed != null ? t("用时 {0}", [fmtDuration(elapsed)]) : "", j.error ? t("失败：{0}", [j.error]) : ""].filter(Boolean).join(" · "),
         result: live ? <JobProgress job={j} /> : j.result?.total_return != null ? <Num value={j.result.total_return} format={(v) => `${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%`} />
           : j.result?.end ? <span className="mm-mono mm-dim">→ {j.result.end}</span> : <span className="mm-dim">—</span>,
         status: JOB_STATUS[j.status] || j.status, time: j.finished || j.started,
@@ -111,31 +112,31 @@ export function RunsPage() {
 
   return (
     <PageFrame
-      tabs={<TextTabs label="类型" value={filter} onChange={setFilter} items={[{ key: "all", label: "全部" }, { key: "research", label: "研究" }, { key: "backtest", label: "回测" }, { key: "other", label: "其他任务" }]} />}
-      actions={<Btn onClick={() => { trace.loadTraces(); backtests.load(); loadSummaries(); loadJobs(); }}>刷新</Btn>}
-      resultsTitle={selected ? (selected.kind === "research" ? selected.name : selected.kind === "backtest" ? `回测 ${selected.name}` : selected.name) : "详情"}
-      resultsActions={selected && (selected.kind === "research" || selected.kind === "backtest" || selected.job?.link?.page) ? <Btn onClick={() => goTo(selected)}>{selected.kind === "research" ? "在研究页打开 →" : selected.kind === "backtest" ? "在回测页打开 →" : "打开 →"}</Btn> : undefined}
+      tabs={<TextTabs label={t("类型")} value={filter} onChange={setFilter} items={[{ key: "all", label: t("全部") }, { key: "research", label: t("研究") }, { key: "backtest", label: t("回测") }, { key: "other", label: t("其他任务") }]} />}
+      actions={<Btn onClick={() => { trace.loadTraces(); backtests.load(); loadSummaries(); loadJobs(); }}>{t("刷新")}</Btn>}
+      resultsTitle={selected ? (selected.kind === "research" ? selected.name : selected.kind === "backtest" ? t("回测 {0}", [selected.name]) : selected.name) : t("详情")}
+      resultsActions={selected && (selected.kind === "research" || selected.kind === "backtest" || selected.job?.link?.page) ? <Btn onClick={() => goTo(selected)}>{selected.kind === "research" ? t("在研究页打开 →") : selected.kind === "backtest" ? t("在回测页打开 →") : t("打开 →")}</Btn> : undefined}
       results={
         selected?.kind === "research" ? (
           <div className="flex flex-col gap-3">
-            {trace.status === "未加载" && <Alert status="accent"><Alert.Indicator /><Alert.Content><Alert.Title>这个实验的事件未加载到服务端。</Alert.Title></Alert.Content></Alert>}
+            {trace.status === t("未加载") && <Alert status="accent"><Alert.Indicator /><Alert.Content><Alert.Title>{t("这个实验的事件未加载到服务端。")}</Alert.Title></Alert.Content></Alert>}
             {trace.rounds.map((round) => <RoundDetail key={round.id} round={round} />)}
           </div>
         ) : selected?.kind === "backtest" && backtests.result ? <BacktestResultView result={backtests.result} onDiagnose={backtests.diagnose} />
         : selected?.job ? (
           <div className="flex flex-col gap-2 text-xs">
-            <div><span className="mm-dim">类型</span> {JOB_KIND_LABELS[selected.job.kind] || selected.job.kind}</div>
-            <div><span className="mm-dim">状态</span> {JOB_STATUS[selected.job.status] || selected.job.status}{selected.job.message ? ` · ${selected.job.message}` : ""}</div>
-            {selected.job.started && <div><span className="mm-dim">开始</span> {shortTime(selected.job.started)}{selected.job.finished ? ` → ${shortTime(selected.job.finished)}` : ""}</div>}
+            <div><span className="mm-dim">{t("类型")}</span> {JOB_KIND_LABELS[selected.job.kind] || selected.job.kind}</div>
+            <div><span className="mm-dim">{t("状态")}</span> {JOB_STATUS[selected.job.status] || selected.job.status}{selected.job.message ? ` · ${selected.job.message}` : ""}</div>
+            {selected.job.started && <div><span className="mm-dim">{t("开始")}</span> {shortTime(selected.job.started)}{selected.job.finished ? ` → ${shortTime(selected.job.finished)}` : ""}</div>}
             {selected.job.error && <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{selected.job.error}</Alert.Title></Alert.Content></Alert>}
             {selected.job.result && <pre className="live__log">{JSON.stringify(selected.job.result, null, 2)}</pre>}
           </div>
-        ) : <Hint>点一行查看详情。</Hint>
+        ) : <Hint>{t("点一行查看详情。")}</Hint>
       }
     >
-      <Block title="记录" count={rows.length} note={liveCount ? `${liveCount} 个在跑` : undefined}>
+      <Block title={t("记录")} count={rows.length} note={liveCount ? t("{0} 个在跑", [liveCount]) : undefined}>
         {rows.length ? (
-          <Table label="运行记录" columns={[{ label: "类型", width: 76 }, { label: "名称", width: "26%" }, { label: "说明" }, { label: "结果 / 进度", width: 170, optional: true }, { label: "状态", width: 72 }, { label: "时间", width: 100, optional: true }]}
+          <Table label={t("运行记录")} columns={[{ label: t("类型"), width: 76 }, { label: t("名称"), width: "26%" }, { label: t("说明") }, { label: t("结果 / 进度"), width: 170, optional: true }, { label: t("状态"), width: 72 }, { label: t("时间"), width: 100, optional: true }]}
             rows={rows.map((r) => ({
               key: r.key, selected: r.key === selectedKey, onClick: () => open(r),
               cells: [
@@ -147,7 +148,7 @@ export function RunsPage() {
                 <span key="t" className="mm-mono mm-dim">{shortTime(r.time)}</span>,
               ],
             }))} />
-        ) : <Empty>还没有记录。</Empty>}
+        ) : <Empty>{t("还没有记录。")}</Empty>}
       </Block>
     </PageFrame>
   );

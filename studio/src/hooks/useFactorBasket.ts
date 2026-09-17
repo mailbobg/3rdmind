@@ -1,11 +1,12 @@
 import { useCallback, useMemo, useState } from "react";
 import type { FactorWeight } from "../api/studio";
 import { persistStudioState, restoreStudioState } from "./studioStorage";
+import { t } from "../i18n";
 
 /** Signals picked for the portfolio backtest; shared by the factor library, research page and backtest page. */
 export const basketKey = (f: { trace: string; loop_id: number; name: string; kind?: string }) =>
   `${f.kind || "factor"}#${f.trace}#${f.loop_id}#${f.name}`;
-export const PREDICTION_NAME = "模型预测";
+export const PREDICTION_NAME = t("模型预测");
 
 export function useFactorBasket() {
   const [items, setItems] = useState<FactorWeight[]>(() => {

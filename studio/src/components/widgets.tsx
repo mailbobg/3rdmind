@@ -4,6 +4,7 @@ import katex from "katex";
 import { Chip, Table, Tooltip } from "@heroui/react";
 import type { BacktestRow, CorrelationMatrix as Corr } from "../api/studio";
 import { useInstrumentNames } from "../hooks/useInstrumentNames";
+import { t } from "../i18n";
 
 export const percent = (v?: number | null, digits = 2) => (typeof v === "number" && Number.isFinite(v) ? (v * 100).toFixed(digits) + "%" : "—");
 export const fixed = (v?: number | null, digits = 4) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—");
@@ -63,7 +64,7 @@ export function MetricTable({ metrics }: { metrics: Record<string, number> }) {
     return [...head, ...rest];
   }, [metrics]);
   return (
-    <DataTable label="Qlib 指标" head={[["指标"], ["值", "end"]]}
+    <DataTable label={t("Qlib 指标")} head={[[t("指标")], [t("值"), "end"]]}
       rows={rows.map(([k, v]) => ({ key: k, cells: [<Mono key="k">{k}</Mono>, <span key="v" className="tabular-nums">{Number.isFinite(v) ? Number(v.toPrecision(5)).toString() : "—"}</span>] }))} />
   );
 }
@@ -101,19 +102,19 @@ export function EquityChart({ rows }: { rows: BacktestRow[] }) {
     chart.setOption({
       color: ["#14765a", "#989da5", "#c26052"],
       tooltip: { trigger: "axis" },
-      legend: { top: 4, data: ["策略净值（扣费）", "基准净值", "回撤"] },
+      legend: { top: 4, data: [t("策略净值（扣费）"), t("基准净值"), t("回撤")] },
       grid: [{ left: 54, right: 18, top: 44, height: "49%" }, { left: 54, right: 18, top: "72%", height: "17%" }],
       xAxis: [{ type: "category", data: rows.map((r) => r.date), axisLabel: { show: false } }, { type: "category", gridIndex: 1, data: rows.map((r) => r.date) }],
       yAxis: [{ type: "value", scale: true, splitLine: { lineStyle: { color: "#edf0ec" } } }, { type: "value", gridIndex: 1, axisLabel: { formatter: "{value}%" } }],
       series: [
-        { name: "策略净值（扣费）", type: "line", symbol: "none", data: rows.map((r) => r.equity) },
-        { name: "基准净值", type: "line", symbol: "none", lineStyle: { type: "dashed" }, data: rows.map((r) => r.benchmark) },
-        { name: "回撤", type: "line", symbol: "none", xAxisIndex: 1, yAxisIndex: 1, areaStyle: { opacity: 0.12 }, data: rows.map((r) => (r.drawdown == null ? null : +(r.drawdown * 100).toFixed(3))) },
+        { name: t("策略净值（扣费）"), type: "line", symbol: "none", data: rows.map((r) => r.equity) },
+        { name: t("基准净值"), type: "line", symbol: "none", lineStyle: { type: "dashed" }, data: rows.map((r) => r.benchmark) },
+        { name: t("回撤"), type: "line", symbol: "none", xAxisIndex: 1, yAxisIndex: 1, areaStyle: { opacity: 0.12 }, data: rows.map((r) => (r.drawdown == null ? null : +(r.drawdown * 100).toFixed(3))) },
       ],
     }, true);
     return () => { observer.disconnect(); chart.dispose(); };
   }, [rows]);
-  return <div ref={host} role="img" aria-label="策略净值、基准净值与回撤" className="h-[340px] w-full" />;
+  return <div ref={host} role="img" aria-label={t("策略净值、基准净值与回撤")} className="h-[340px] w-full" />;
 }
 
 /** Monthly IC bars around a zero line. */
@@ -121,7 +122,7 @@ export function IcBars({ monthly, field }: { monthly: { month: string; ic: numbe
   const scale = Math.max(0.02, ...monthly.map((m) => Math.abs(m[field] ?? 0)));
   return (
     <div>
-      <div role="img" aria-label="按月 IC" className="flex h-[90px] gap-0.5 border-y border-border"
+      <div role="img" aria-label={t("按月 IC")} className="flex h-[90px] gap-0.5 border-y border-border"
         style={{ background: "linear-gradient(to bottom, transparent 50%, var(--border) 50%, var(--border) calc(50% + 1px), transparent calc(50% + 1px))" }}>
         {monthly.map((m) => {
           const v = m[field];
@@ -158,7 +159,7 @@ export function CorrelationMatrix({ data }: { data: Corr }) {
           ))}
         </tbody>
       </table>
-      <p className="m-0 text-[11px] text-muted">{data.days} 个交易日的截面 Spearman 相关系数均值。|ρ| ≥ 0.7 的两个因子基本是同一个信号，同时入选只是重复计权。</p>
+      <p className="m-0 text-[11px] text-muted">{t("{0} 个交易日的截面 Spearman 相关系数均值。|ρ| ≥ 0.7 的两个因子基本是同一个信号，同时入选只是重复计权。", [data.days])}</p>
     </div>
   );
 }
@@ -189,7 +190,7 @@ export function CurveOverlay({ series, height = 300 }: { series: { name: string;
     }, true);
     return () => { observer.disconnect(); chart.dispose(); };
   }, [series]);
-  return <div ref={host} role="img" aria-label="多条净值曲线对比" style={{ height }} className="w-full" />;
+  return <div ref={host} role="img" aria-label={t("多条净值曲线对比")} style={{ height }} className="w-full" />;
 }
 
 /** LaTeX rendered with KaTeX; falls back to the raw text when it does not parse. */
@@ -206,9 +207,9 @@ export function CodeView({ code, maxHeight = 480 }: { code: string; maxHeight?: 
 }
 
 export function StatusChip({ status }: { status: string }) {
-  const color = status === "已完成" || status === "接受" || status === "completed" ? "success"
-    : status === "执行失败" || status === "拒绝" || status === "failed" ? "danger"
-    : status === "运行中" || status === "启动中" || status === "running" || status === "queued" || status === "加载中" ? "warning" : "default";
+  const color = status === t("已完成") || status === t("接受") || status === "completed" ? "success"
+    : status === t("执行失败") || status === t("拒绝") || status === "failed" ? "danger"
+    : status === t("运行中") || status === t("启动中") || status === "running" || status === "queued" || status === t("加载中") ? "warning" : "default";
   return <Chip size="sm" color={color} variant="soft">{status}</Chip>;
 }
 

@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { capitalize, useStudio } from "../hooks/studioContext";
 import { useResizablePanel } from "../hooks/useResizablePanel";
+import { t } from "../i18n";
 
 export interface PageFrameProps {
   tabs?: ReactNode;
@@ -67,7 +68,7 @@ export function PageFrame(p: PageFrameProps) {
           <div>{p.tabs}</div>
           <div className="mm-head-actions">
             {p.actions}
-            <button type="button" className="mm-btn mm-btn--text" onClick={layout.toggleResults}>{layout.resultsOpen ? "隐藏结果 ▸" : "◂ 显示结果"}</button>
+            <button type="button" className="mm-btn mm-btn--text" onClick={layout.toggleResults}>{layout.resultsOpen ? t("隐藏结果 ▸") : t("◂ 显示结果")}</button>
           </div>
         </div>
         <div className="mm-body">{p.children}</div>
@@ -75,7 +76,7 @@ export function PageFrame(p: PageFrameProps) {
       {layout.resultsOpen && (
         <aside className={`relative flex min-h-0 min-w-0 flex-col bg-surface ${floating ? "float-panel" : "border-t border-border"}`}>
           {!stacked && !expanded && (
-            <div role="separator" aria-orientation="vertical" aria-label="调整结果栏宽度" onPointerDown={panel.onPointerDown}
+            <div role="separator" aria-orientation="vertical" aria-label={t("调整结果栏宽度")} onPointerDown={panel.onPointerDown}
               className="absolute -left-1.5 top-0 bottom-0 z-10 w-3 cursor-col-resize touch-none hover:bg-accent/15 active:bg-accent/25" />
           )}
           <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-border px-3.5 py-2.5">
@@ -83,7 +84,7 @@ export function PageFrame(p: PageFrameProps) {
             <div className="flex flex-wrap items-center gap-1.5">
               {p.resultsActions}
               <button type="button" className="mm-btn mm-btn--text mm-btn--icon" onClick={layout.toggleExpanded}
-                aria-pressed={expanded} title={expanded ? "恢复两栏" : "展开到整块区域"} aria-label={expanded ? "恢复两栏" : "展开到整块区域"}>
+                aria-pressed={expanded} title={expanded ? t("恢复两栏") : t("展开到整块区域")} aria-label={expanded ? t("恢复两栏") : t("展开到整块区域")}>
                 <ExpandIcon expanded={expanded} />
               </button>
             </div>
