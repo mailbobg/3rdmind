@@ -167,7 +167,7 @@ export function ResearchPage() {
     if (status === "运行中" && !trace.rounds.length) return <Empty>研究已启动，等待第一轮假设…</Empty>;
     return (
       <>
-      <Table label="研究轮次" columns={[{ label: "轮", width: 36 }, { label: "假设" }, { label: "阶段", width: 200, optional: true }, { label: "因子", num: true, width: 48, optional: true }, { label: "状态", width: 88 }]}
+      <Table label="研究轮次" columns={[{ label: "轮", width: 36 }, { label: "假设", width: "44%" }, { label: "阶段", optional: true }, { label: "因子", num: true, width: 48, optional: true }, { label: "状态", width: 88 }]}
         rows={trace.rounds.map((round) => ({
           key: round.id, selected: round.id === (activeRound?.id ?? ""), onClick: () => { setRoundId(round.id); layout.openResults(); },
           cells: [
@@ -347,7 +347,7 @@ export function ResearchPage() {
       ) : (
         <Block title="实验" count={experiments.length} note={experiments.length ? "点一个实验展开它的轮次；再点一轮在右栏看详情" : undefined}>
           {experiments.length ? (
-            <Table label="实验" columns={[{ label: "", width: 22 }, { label: "实验" }, { label: "场景", width: 110, optional: true }, { label: "轮", num: true, width: 44 }, { label: "接受", num: true, width: 50 }, { label: "状态", width: anyLive ? 180 : 72 }, { label: "更新", width: 100, optional: true }]}
+            <Table label="实验" columns={[{ label: "", width: 22 }, { label: "实验", width: "34%" }, { label: "场景", optional: true }, { label: "轮", num: true, width: 44 }, { label: "接受", num: true, width: 50 }, { label: "状态", width: anyLive ? 180 : 72 }, { label: "更新", width: 100, optional: true }]}
               rows={experimentRows} />
           ) : <Empty>还没有实验。切到「新建研究」启动第一个。</Empty>}
         </Block>
