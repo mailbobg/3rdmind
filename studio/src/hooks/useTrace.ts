@@ -56,7 +56,8 @@ export function useTrace() {
     const data = await studio.traceSnapshot(id);
     if (id !== traceIdRef.current || disposed.current) return;
     setEvents(data);
-    if (!data.length) {
+    // Without an END event only the server knows whether the process is still there.
+    if (!data.some((e) => e.tag.toLowerCase() === "end")) {
       try {
         const info = await studio.traceStatusInfo(id);
         if (id === traceIdRef.current) setLiveness(!info.loaded ? "unknown" : info.alive ? "alive" : "dead");

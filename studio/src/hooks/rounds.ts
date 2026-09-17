@@ -74,7 +74,9 @@ export function traceStatus(events: TraceEvent[], liveness?: "alive" | "dead" | 
   // or the server never loaded it. Only the server knows which.
   if (!events.length) return liveness === "alive" ? ("启动中" as const) : liveness === "dead" ? ("已结束" as const) : ("未加载" as const);
   const end = [...events].reverse().find((e) => e.tag.toLowerCase() === "end");
-  if (!end) return "运行中" as const;
+  // No END event: the process is running, or it went away without one (server restart, crash) and the
+  // server tells us it is not alive.
+  if (!end) return liveness === "dead" ? ("已结束" as const) : ("运行中" as const);
   const code = Number(end.content?.end_code);
   return code === 0 ? ("已完成" as const) : code === -1 ? ("已停止" as const) : ("执行失败" as const);
 }
