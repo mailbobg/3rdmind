@@ -535,6 +535,33 @@ def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, mo
 
 
 @pytest.mark.offline
+def test_universe_export_is_stale_only_when_the_window_can_grow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An export capped by QLIB_FACTOR_TEST_END is complete even when the Qlib calendar runs further; rebuilding it
+    would produce the same file and, with build=False, an endless 'not ready' answer (the nasdaq100 loop)."""
+    provider = tmp_path / "qlib"
+    (provider / "instruments").mkdir(parents=True)
+    (provider / "instruments" / "csi300.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    (provider / "calendars").mkdir()
+    (provider / "calendars" / "day.txt").write_text("2025-01-02\n2026-09-15\n")
+    (provider / "instruments" / "csi1000.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setenv("QLIB_FACTOR_TEST_END", "2025-12-31")
+    monkeypatch.setattr(server.UI_SETTING, "trace_folder", str(tmp_path / "traces"))
+    out = tmp_path / "traces" / "studio_data" / "universe" / "csi1000"
+    (out / "full").mkdir(parents=True); (out / "full" / "daily_pv.h5").write_bytes(b"")
+    (out / "meta.json").write_text(json.dumps({"market": "csi1000", "start": "2022-10-03", "end": "2025-12-31"}))
+    calls = []
+    monkeypatch.setattr(server.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or type("P", (), {"stdout": '{"status": "completed"}', "stderr": ""})())
+    env = server.universe_env("csi1000", build=False)  # complete up to the configured end: ready, no job
+    assert env["FACTOR_COSTEER_DATA_FOLDER"].endswith("csi1000/full") and not calls
+    monkeypatch.setenv("QLIB_FACTOR_TEST_END", "2030-12-31")  # window open-ended: the export stops at 2025-12-31 while data reaches 2026-09-15
+    with pytest.raises(server.UniverseNotReady):
+        server.universe_env("csi1000", build=False)
+    (out / "meta.json").write_text(json.dumps({"market": "csi1000", "start": "2022-10-03", "end": "2026-09-15"}))
+    assert server.universe_env("csi1000", build=False)["FACTOR_COSTEER_DATA_FOLDER"].endswith("csi1000/full")
+
+
+@pytest.mark.offline
 def test_upload_passes_the_universe_to_the_run(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
     monkeypatch.setattr(server, "universe_env", lambda market, build=True: {"QLIB_FACTOR_MARKET": market, "FACTOR_COSTEER_DATA_FOLDER": "/data/" + market})

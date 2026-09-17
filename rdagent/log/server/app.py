@@ -658,8 +658,12 @@ def universe_env(market: str, build: bool = True) -> dict[str, str]:
             built_end = json.loads((out / "meta.json").read_text()).get("end") or ""
         except ValueError:
             built_end = ""
-    # (Re)build when missing, or when the Qlib data has moved past what was exported (after a data sync).
-    if not (out / "full" / "daily_pv.h5").is_file() or (calendar_end and built_end and built_end < calendar_end):
+    # (Re)build when missing, or when the export could now reach further: the Qlib data has moved past what was
+    # exported (after a data sync) *and* the configured research window allows it. An export capped by
+    # QLIB_FACTOR_TEST_END is complete however far the calendar runs; rebuilding it would give the same file.
+    window_end = os.environ.get("QLIB_FACTOR_TEST_END", "2030-12-31")
+    target_end = min(calendar_end, window_end) if calendar_end else window_end
+    if not (out / "full" / "daily_pv.h5").is_file() or (built_end and built_end < target_end):
         if build:
             build_universe_data(record, out)
         else:
