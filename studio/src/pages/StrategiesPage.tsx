@@ -7,6 +7,7 @@ import { download, errorText, shortName, useStudio } from "../hooks/studioContex
 import { persistStudioState } from "../hooks/studioStorage";
 import { PageFrame } from "../components/PageFrame";
 import { Section } from "../components/Section";
+import { DateInput } from "../components/DateInput";
 import { BacktestResultView } from "../components/BacktestResultView";
 import { Block, Btn, Empty, Field, Note, Num, NumberInput, P, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { CurveOverlay, DataTable, Hint, Instrument, MetricGrid, Mono, Signed, money, percent } from "../components/widgets";
@@ -148,8 +149,8 @@ export function StrategiesPage() {
           {updating && (
             <Section title={t("更新到最新")} note={t("重算成员因子，再在这个区间上回测，结果追加到跟踪记录")}>
               <div className="flex flex-wrap items-end gap-3">
-                <Field label={t("开始")} hint={t("默认证据起点")}><TextInput type="date" value={span.start} onChange={(v) => setSpan((w) => ({ ...w, start: v }))} /></Field>
-                <Field label={t("结束")} hint={t("默认行情最后一天")}><TextInput type="date" value={span.end} onChange={(v) => setSpan((w) => ({ ...w, end: v }))} /></Field>
+                <Field label={t("开始")} hint={t("默认证据起点")}><DateInput ariaLabel={t("开始")} value={span.start} onChange={(v) => setSpan((w) => ({ ...w, start: v }))} max={span.end || env?.end} presets={detail.evidence?.start ? [{ label: t("证据起点"), value: detail.evidence.start }] : []} /></Field>
+                <Field label={t("结束")} hint={t("默认行情最后一天")}><DateInput ariaLabel={t("结束")} value={span.end} onChange={(v) => setSpan((w) => ({ ...w, end: v }))} min={span.start} max={env?.end} presets={env?.end ? [{ label: t("数据末日"), value: env.end }] : []} /></Field>
                 <Btn kind="primary" disabled={busy === detail.id} onClick={() => update(detail)}>{t("开始更新")}</Btn>
                 <Btn kind="text" onClick={() => setUpdating(false)}>{t("取消")}</Btn>
               </div>

@@ -66,7 +66,6 @@ body { margin: 0; background: var(--background); color: var(--foreground); font-
 .mm-control:focus { border-color: var(--mm-accent); }
 .mm-control:disabled { opacity: 0.4; }
 .mm-control[type="number"] { font-family: var(--mm-mono); font-variant-numeric: tabular-nums; }
-.mm-control[type="date"] { font-family: var(--mm-mono); }
 .mm-control::placeholder { color: var(--mm-muted); }
 .mm-select { display: inline-flex; align-items: center; text-align: left; padding-right: 26px; cursor: pointer; appearance: none; position: relative;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236f6e69' stroke-width='1.3'/%3E%3C/svg%3E");
@@ -313,3 +312,37 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .lang-tabs__tab[data-active] { color: #fff; }
 .lang-tabs__tab:focus-visible { outline: 2px solid rgba(27, 27, 25, 0.25); outline-offset: 1px; }
 @media (prefers-reduced-motion: reduce) { .lang-tabs__pill { transition: none; } }
+
+/* Date field (DateInput.tsx): a typed box with a calendar button; the popover is a month grid with a
+   month/year picker and shortcuts, styled like the select list. */
+.mm-date { position: relative; display: inline-flex; align-items: center; width: 100%; min-width: 0; }
+.mm-date__input { width: 100%; padding-right: 30px; font-family: var(--mm-mono); font-variant-numeric: tabular-nums; }
+.mm-date__input--bad { border-color: var(--mm-bad); color: var(--mm-bad); }
+.mm-date__toggle { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 5px; background: transparent; color: var(--mm-muted); cursor: pointer; }
+.mm-date__toggle:hover, .mm-date__toggle[aria-expanded="true"] { background: var(--mm-ground); color: var(--mm-ink); }
+.mm-date__pop { position: fixed; z-index: 70; width: 280px; padding: 8px; background: #fff; border: 1px solid var(--mm-rule); border-radius: 10px; font-size: 12px; color: var(--mm-ink);
+  box-shadow: 0 1px 2px rgba(27, 27, 25, 0.06), 0 10px 30px -8px rgba(27, 27, 25, 0.22); transform-origin: top center; animation: select-in 120ms ease-out; }
+.mm-date__pop--up { transform-origin: bottom center; animation-name: select-in-up; }
+.mm-date__head { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 6px; }
+.mm-date__nav { width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; font-size: 18px; line-height: 1; color: var(--mm-muted); cursor: pointer; }
+.mm-date__nav:hover { background: var(--mm-ground); color: var(--mm-ink); }
+.mm-date__month { flex: 1; height: 28px; border: 0; border-radius: 6px; background: transparent; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--mm-ink); cursor: pointer; }
+.mm-date__month:hover { background: var(--mm-ground); }
+.mm-date__grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.mm-date__wd { text-align: center; font-size: 10.5px; color: var(--mm-muted); line-height: 22px; }
+.mm-date__day { height: 30px; border: 0; border-radius: 7px; background: transparent; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--mm-ink); cursor: pointer; }
+.mm-date__day:hover, .mm-date__day:focus-visible { background: var(--mm-ground); outline: none; }
+.mm-date__day[data-cursor="true"] { box-shadow: inset 0 0 0 1px var(--mm-rule); }
+.mm-date__day--out { color: var(--mm-muted); opacity: 0.55; }
+.mm-date__day--today { font-weight: 600; text-decoration: underline; text-decoration-color: var(--mm-accent); text-underline-offset: 3px; }
+.mm-date__day--picked, .mm-date__day--picked:hover { background: var(--mm-ink); color: #fff; }
+.mm-date__day:disabled { color: var(--mm-muted); opacity: 0.3; cursor: default; background: transparent; }
+.mm-date__months { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px 0; }
+.mm-date__mon { height: 36px; border: 0; border-radius: 7px; background: transparent; font: inherit; font-size: 12px; color: var(--mm-ink); cursor: pointer; }
+.mm-date__mon:hover { background: var(--mm-ground); }
+.mm-date__mon--picked, .mm-date__mon--picked:hover { background: var(--mm-ink); color: #fff; }
+.mm-date__mon:disabled { opacity: 0.3; cursor: default; background: transparent; }
+.mm-date__foot { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--mm-rule-soft); }
+.mm-date__preset { display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 8px; border: 1px solid var(--mm-rule); border-radius: 999px; background: transparent; font: inherit; font-size: 11px; color: var(--mm-ink); cursor: pointer; }
+.mm-date__preset:hover { background: var(--mm-ground); }
+.mm-date__preset-date { font-family: var(--mm-mono); font-size: 10px; color: var(--mm-muted); }

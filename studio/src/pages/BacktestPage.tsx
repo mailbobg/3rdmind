@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
 import type { BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor, Strategy, Universe } from "../api/studio";
 import { universeLabel } from "../api/studio";
+import { DateInput } from "../components/DateInput";
 import { basketKey as key } from "../hooks/useFactorBasket";
 import { backtestStatusLabel } from "../hooks/backtestStatus";
 import { persistStudioState, restoreStudioState } from "../hooks/studioStorage";
@@ -418,8 +419,10 @@ export function BacktestPage() {
         <>
           <Block title={t("回测参数")} note={`${params.start || "?"} → ${params.end || "?"} · ${params.market}`}>
             <FieldGrid min={140}>
-              <Field label={t("开始")}><TextInput type="date" value={params.start} onChange={(v) => setDate("start", v)} /></Field>
-              <Field label={t("结束")}><TextInput type="date" value={params.end} onChange={(v) => setDate("end", v)} /></Field>
+              <Field label={t("开始")}><DateInput ariaLabel={t("开始")} value={params.start} onChange={(v) => setDate("start", v)} min={coverage?.start} max={params.end || coverage?.end || env?.end}
+                presets={[coverage ? { label: t("覆盖起点"), value: addDays(coverage.start, 1) } : null, params.end ? { label: t("结束前一年"), value: shiftYears(params.end, -1) } : null].filter((p): p is { label: string; value: string } => !!p)} /></Field>
+              <Field label={t("结束")}><DateInput ariaLabel={t("结束")} value={params.end} onChange={(v) => setDate("end", v)} min={params.start || coverage?.start} max={coverage?.end || env?.end}
+                presets={[coverage ? { label: t("覆盖末日"), value: coverage.end } : null, env?.end ? { label: t("数据末日"), value: env.end } : null].filter((p): p is { label: string; value: string } => !!p)} /></Field>
               <Field label={t("股票池")}><SelectInput value={params.market} onChange={(v) => { const u = universes.find((x) => x.market === v); setParams((p) => ({ ...p, market: v, ...(u ? { benchmark: u.benchmark, open_cost: u.open_cost, close_cost: u.close_cost } : {}) })); }} options={universes.length ? universes.map((u) => ({ value: u.market as Market, label: universeLabel(u.market), hint: u.members ? t("{0} 只 · {1}", [u.members, u.benchmark]) : u.benchmark })) : ["csi300", "csi500", "all"].map((m) => ({ value: m as Market, label: universeLabel(m) }))} /></Field>
               <Field label={t("基准")}><TextInput value={params.benchmark} onChange={(v) => set("benchmark", v)} /></Field>
               <Field label={t("持股数")} hint={t("每天按评分持有前 topk 只")}><NumberInput value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} /></Field>
@@ -456,10 +459,10 @@ export function BacktestPage() {
           {method === "lgbm" && (
             <Block title="LightGBM" note={t("训练集学关系，验证集早停")}>
               <FieldGrid min={140}>
-                <Field label={t("训练开始")}><TextInput type="date" value={lgbm.train[0]} onChange={(v) => setLgbm((l) => ({ ...l, train: [v, l.train[1]] }))} /></Field>
-                <Field label={t("训练结束")}><TextInput type="date" value={lgbm.train[1]} onChange={(v) => setLgbm((l) => ({ ...l, train: [l.train[0], v] }))} /></Field>
-                <Field label={t("验证开始")}><TextInput type="date" value={lgbm.valid[0]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [v, l.valid[1]] }))} /></Field>
-                <Field label={t("验证结束")}><TextInput type="date" value={lgbm.valid[1]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [l.valid[0], v] }))} /></Field>
+                <Field label={t("训练开始")}><DateInput ariaLabel={t("训练开始")} max={params.start} value={lgbm.train[0]} onChange={(v) => setLgbm((l) => ({ ...l, train: [v, l.train[1]] }))} /></Field>
+                <Field label={t("训练结束")}><DateInput ariaLabel={t("训练结束")} max={params.start} value={lgbm.train[1]} onChange={(v) => setLgbm((l) => ({ ...l, train: [l.train[0], v] }))} /></Field>
+                <Field label={t("验证开始")}><DateInput ariaLabel={t("验证开始")} max={params.start} value={lgbm.valid[0]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [v, l.valid[1]] }))} /></Field>
+                <Field label={t("验证结束")}><DateInput ariaLabel={t("验证结束")} max={params.start} value={lgbm.valid[1]} onChange={(v) => setLgbm((l) => ({ ...l, valid: [l.valid[0], v] }))} /></Field>
                 {lgbmKeys.map((k) => <Field key={k} label={k}><NumberInput value={lgbm.params[k]} onChange={(v) => setLgbm((l) => ({ ...l, params: { ...l.params, [k]: v } }))} /></Field>)}
               </FieldGrid>
             </Block>
