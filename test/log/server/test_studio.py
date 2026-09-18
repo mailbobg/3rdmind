@@ -1988,6 +1988,88 @@ def test_attention_lists_unanswered_requests_of_live_runs(studio_client) -> None
 
 
 @pytest.mark.offline
+def test_gate_judges_factors_by_t_duplication_and_replication() -> None:
+    from rdagent.log.server import studio_gate
+
+    def analysis(t, residual=True, horizon=5):
+        key = "residual_rank_ic" if residual else "rank_ic"
+        return {"days": 400, "rank_ic": {"mean": 0.02, "ir": 0.1}, "horizons": [{"days": 1, key: {"t": t / 2}}, {"days": horizon, key: {"t": t}}]}
+
+    assert studio_gate.best_t(analysis(3.5)) == (3.5, 5)
+    assert studio_gate.best_t({"days": 400, "rank_ic": {"mean": 0.02, "ir": 0.1}}) == (pytest.approx(2.0), 1)
+    assert studio_gate.best_t({}) == (None, None)
+    analyses = {"NEW": analysis(4.0), "COPY": analysis(6.0), "WEAK": analysis(2.4), "DEAD": analysis(0.8), "LOCAL": analysis(-3.6)}
+    others = {"csi1000": {"NEW": analysis(2.7), "LOCAL": analysis(0.3)}}
+    corr = {"NEW": 0.31, "COPY": 0.92, "WEAK": 0.1, "DEAD": 0.0, "LOCAL": -0.55}
+
+    def correlate(pairs):
+        names = [n for n, _ in pairs]
+        matrix = [[1.0 if a == b else corr.get(a, corr.get(b, 0.0)) for b in names] for a in names]
+        return {"names": names, "matrix": matrix}
+
+    library = [("RVOL_20", "/lib/rvol")]
+    kw = {"analyze": lambda path, market: analyses[Path(path).name], "correlate": correlate, "replicate": lambda name, path, second: others[second][name]}
+    gate = studio_gate.gate_round([(n, f"/ws/{n}") for n in analyses], "csi300", library, **kw)
+    levels = {f["name"]: f["level"] for f in gate["factors"]}
+    assert levels == {"NEW": "signal", "COPY": "duplicate", "WEAK": "weak", "DEAD": "noise", "LOCAL": "unreplicated"}
+    assert gate["decision"] is True and gate["second_market"] == "csi1000"
+    new = next(f for f in gate["factors"] if f["name"] == "NEW")
+    assert new["t"] == 4.0 and new["horizon"] == 5 and new["t2"] == 2.7 and new["replicated"] is True and new["corr"] == 0.31
+    local = next(f for f in gate["factors"] if f["name"] == "LOCAL")
+    assert local["replicated"] is False and "增量有限" in "；".join(local["reasons"])
+    assert "COPY ≈ RVOL_20" in gate["hint"] and "WEAK、DEAD" in gate["hint"] and "RVOL_20" in gate["hint"] and "通过" in gate["summary"]
+    # Without a passing factor the round is rejected; an analysis failure is reported, not raised; no second market → no replication.
+    gate = studio_gate.gate_round([("DEAD", "/ws/DEAD"), ("X", "/ws/X")], "nasdaq100", [], analyze=lambda p, m: analyses.get(Path(p).name) or (_ for _ in ()).throw(RuntimeError("no result.h5")), correlate=correlate, replicate=None)
+    assert gate["decision"] is False and [f["level"] for f in gate["factors"]] == ["noise", "error"] and gate["second_market"] is None
+
+
+@pytest.mark.offline
+def test_feedback_requests_wait_for_the_gate_and_carry_its_verdict(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server.rdagent_processes[str(trace_folder / "Finance Data Building/demo")]
+    replies = []
+    task.user_response_q = type("Q", (), {"put": lambda self, payload, **k: replies.append(payload)})()
+
+    class FakeRequests:  # a multiprocessing queue hands items over asynchronously; the test needs them at once
+        def __init__(self): self.items = []
+        def put(self, item, **k): self.items.append(item)
+        def get_nowait(self):
+            if not self.items:
+                raise server.Empty
+            return self.items.pop(0)
+
+    task.user_request_q = FakeRequests()
+    task.is_alive = lambda: True  # type: ignore[method-assign]
+    task.process = object()  # type: ignore[assignment]
+    verdict = {"factors": [{"name": "STR_5", "level": "duplicate", "t": 5.0, "horizon": 1, "nearest": "RVOL_20", "corr": 0.9, "second_market": "csi1000", "t2": None, "replicated": None, "reasons": ["与库里的 RVOL_20 相关 +0.90"]}],
+               "decision": False, "summary": "验收：不通过。STR_5：重复。", "hint": "不要再提波动率族", "market": "csi300", "second_market": "csi1000", "thresholds": {}}
+    seen = []
+    monkeypatch.setattr(server.studio_gate, "gate_round", lambda factors, market, library, **kw: seen.append((factors, market, library)) or dict(verdict))
+    monkeypatch.setattr(server, "run_refresh", lambda *a, **k: None, raising=False)
+    # The fixture's round 0 has a metric event with STR_5's workspace and no verdict yet: that is the round under judgement.
+    task.user_request_q.put({"decision": True, "reason": "looks promising", "new_hypothesis": "more of the same", "observations": "", "hypothesis_evaluation": ""})
+    server._drain_user_requests_into_messages(task)
+    request_msg = server.latest_request(task)
+    assert request_msg["gate"] == "pending"
+    server.apply_confirm_policy(task)  # the policy would answer a verdict at once, but the gate is still running
+    assert replies == []
+    _wait_for(lambda: request_msg.get("gate") != "pending")
+    assert seen and seen[0][0] == [("STR_5", str(tmp_path / "ws" / "f0"))] and seen[0][1] == "csi300"
+    assert request_msg["content"]["decision"] is False
+    assert request_msg["content"]["reason"].startswith("【验收】验收：不通过") and "【Agent 原判断】接受：looks promising" in request_msg["content"]["reason"]
+    assert request_msg["content"]["new_hypothesis"] == "more of the same\n\n不要再提波动率族"
+    assert task.messages[-1]["tag"] == "studio.gate" and task.messages[-1]["loop_id"] == 0 and task.messages[-1]["content"]["decision"] is False
+    server.apply_confirm_policy(task)
+    assert replies[-1]["decision"] is False and replies[-1]["new_hypothesis"].endswith("不要再提波动率族")
+    # Gate off: the request passes straight through.
+    task.confirm = server.parse_confirm("auto", 0, gate=False)
+    task.user_request_q.put({"decision": True, "reason": "r"})
+    server._drain_user_requests_into_messages(task)
+    assert "gate" not in server.latest_request(task)
+    assert server.parse_confirm(None, None)["gate"] is True
+
+
+@pytest.mark.offline
 def test_confirm_policy_answers_requests_by_mode_and_timeout(studio_client, monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import datetime, timedelta, timezone
 
@@ -2041,7 +2123,7 @@ def test_upload_and_resume_carry_the_confirm_policy(studio_client, tmp_path: Pat
     monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
     response = studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "1", "all_duration": "1", "confirm_mode": "auto", "confirm_timeout": "0", "objective": "vol"})
     assert response.status_code == 200, response.get_json()
-    assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "vol"}
+    assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "vol", "gate": True}
     assert studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "1", "confirm_mode": "never"}).status_code == 400
     # Resume: the previous run's policy is inherited unless the request names a new one.
     trace_folder = server.app.config["LOG_FOLDER_PATH"]
@@ -2051,7 +2133,7 @@ def test_upload_and_resume_carry_the_confirm_policy(studio_client, tmp_path: Pat
     assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1}).status_code == 200
     assert started[-1].confirm == {"mode": "all", "timeout_min": 0, "instruction": "old"}
     assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1, "confirm_mode": "auto", "confirm_timeout": 0}).status_code == 200
-    assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "old"}
+    assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "old", "gate": True}
     assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1, "confirm_mode": "never"}).status_code == 400
 
 

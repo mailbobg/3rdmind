@@ -983,6 +983,9 @@ def stale_signals(config):
     for f in config.get("factors", []):
         if f.get("kind", "factor") != "factor" or not f.get("trace"):
             continue
+        signal = Path(f["path"]) / "result.h5"
+        if not signal.is_file() or signal.stat().st_size == 0:
+            continue
         try:
             end = factor_coverage(Path(f["path"]))["end"]
         except Exception:  # noqa: BLE001

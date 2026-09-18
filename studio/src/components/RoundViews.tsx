@@ -10,6 +10,8 @@ import { t } from "../i18n";
 
 /** A round's full detail in the results column. */
 /** `onContinue` adds "继续研究" beside the agent's next hypothesis: the caller resumes the experiment. */
+const GATE_LEVELS: Record<string, string> = { signal: t("通过"), weak: t("偏弱"), noise: t("噪声"), duplicate: t("重复"), unreplicated: t("未复现"), error: t("未能判断") };
+
 export function RoundDetail({ round, onContinue, testDays }: { round: RoundView; onContinue?: () => void; testDays?: number | null }) {
   const [file, setFile] = useState(0);
   useEffect(() => setFile(Math.max(0, round.files.length - 1)), [round.id, round.files.length]);
@@ -22,6 +24,25 @@ export function RoundDetail({ round, onContinue, testDays }: { round: RoundView;
           <p className="m-0 text-xs">{round.hypothesis.hypothesis}</p>
           {round.hypothesis.reason && <Hint>{round.hypothesis.reason}</Hint>}
           {round.hypothesis.concise_knowledge && <Hint>{t("经验：{0}", [round.hypothesis.concise_knowledge])}</Hint>}
+        </Section>
+      )}
+      {round.gate && (
+        <Section title={t("验收")} note={<Chip size="sm" variant="soft" color={round.gate.decision ? "success" : "danger"}>{round.gate.decision ? t("通过") : t("不通过")}</Chip>}>
+          <div className="flex flex-col gap-1.5">
+            {round.gate.factors.map((f) => (
+              <div key={f.name} className="flex flex-col gap-0.5 text-xs">
+                <div className="flex items-center gap-2">
+                  <Mono>{f.name}</Mono>
+                  <span className={f.level === "signal" ? "text-success" : f.level === "weak" ? "" : "text-danger"}>{GATE_LEVELS[f.level] || f.level}</span>
+                  {f.t != null && <span className="text-muted tabular-nums">t {f.t.toFixed(2)}{f.horizon ? ` · ${f.horizon}d` : ""}</span>}
+                  {f.corr != null && f.nearest && <span className="text-muted tabular-nums">ρ({f.nearest}) {f.corr.toFixed(2)}</span>}
+                  {f.second_market && f.t2 != null && <span className="text-muted tabular-nums">{f.second_market} t {f.t2.toFixed(2)}</span>}
+                </div>
+                <Hint>{f.reasons.join("；")}</Hint>
+              </div>
+            ))}
+          </div>
+          <Hint>{t("确定性规则，不经 LLM：市值中性 Rank IC 最好期限 |t| ≥ 3；与库里任一因子秩相关 < 0.7；{0}。这个判定替代了 Agent 的接受 / 拒绝，并作为下一轮的方向反馈给它。", [round.gate.second_market ? t("在 {0} 上同号复现 |t| ≥ 2", [round.gate.second_market]) : t("本区域没有第二个股票池，未做复现检验")])}</Hint>
         </Section>
       )}
       {round.feedback && (

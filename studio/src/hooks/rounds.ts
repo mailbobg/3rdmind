@@ -11,9 +11,14 @@ export interface RoundView {
   factors: string[];
   chartHtml: string;
   feedback: { decision?: boolean; reason?: string; observations?: string; hypothesis_evaluation?: string; new_hypothesis?: string } | null;
+  /** 验收: the Studio's deterministic verdict on the round's factors (studio.gate), when the gate ran. */
+  gate: GateResult | null;
   /** Display status (already translated). */
   status: string;
 }
+
+export interface GateFactor { name: string; level: "signal" | "weak" | "noise" | "duplicate" | "unreplicated" | "error"; t: number | null; horizon: number | null; nearest: string | null; corr: number | null; second_market: string | null; t2: number | null; replicated: boolean | null; reasons: string[] }
+export interface GateResult { factors: GateFactor[]; decision: boolean; summary: string; hint: string; market: string; second_market: string | null; thresholds: Record<string, number> }
 
 const text = (value: unknown) => (typeof value === "string" ? value : JSON.stringify(value, null, 2));
 
@@ -44,6 +49,8 @@ export function groupRounds(events: TraceEvent[]): RoundView[] {
     const feedbackList = tagged("feedback.hypothesis_feedback");
     const feedback = feedbackList[feedbackList.length - 1]?.content || null;
     const chartList = tagged("feedback.return_chart");
+    const gateList = tagged("studio.gate");
+    const gate: GateResult | null = gateList.length ? gateList[gateList.length - 1].content : null;
     const files: CodeFile[] = tagged("evolving.codes").flatMap((e) =>
       (Array.isArray(e.content) ? e.content : []).flatMap((task: any) =>
         Object.entries(task.workspace || {}).map(([name, code]) => ({
@@ -66,6 +73,7 @@ export function groupRounds(events: TraceEvent[]): RoundView[] {
       factors: (metricEvent?.content?.workspaces?.factors || []).map((f: any) => f.name),
       chartHtml: chartList[chartList.length - 1]?.content?.chart_html || "",
       feedback,
+      gate,
       status,
     };
   });

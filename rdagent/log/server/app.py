@@ -43,7 +43,7 @@ from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.ui.storage import WebStorage
 
 app = Flask(__name__, static_folder=str(Path(UI_SETTING.static_path).resolve()))
-from rdagent.log.server import studio_jobs, studio_llm, studio_markets
+from rdagent.log.server import studio_gate, studio_jobs, studio_llm, studio_markets
 from rdagent.log.server.studio import studio
 
 app.register_blueprint(studio)
@@ -259,8 +259,12 @@ app.config["LOG_FOLDER_PATH"] = log_folder_path
 CONFIRM_MODES = ("all", "hypothesis", "auto")
 
 
-def parse_confirm(mode, timeout, instruction="") -> dict:
-    """Validated confirmation policy from request fields (missing ones keep the defaults)."""
+def parse_confirm(mode, timeout, instruction="", gate=None) -> dict:
+    """Validated confirmation policy from request fields (missing ones keep the defaults).
+
+    ``gate`` (default on) is the deterministic 验收 of each round's factors (studio_gate): it replaces the
+    agent's accept/reject before the feedback is confirmed or passed on.
+    """
     mode = str(mode or "hypothesis").strip().lower()
     if mode not in CONFIRM_MODES:
         raise ValueError("confirm_mode must be all, hypothesis or auto")
@@ -270,7 +274,8 @@ def parse_confirm(mode, timeout, instruction="") -> dict:
         raise ValueError("confirm_timeout must be minutes") from error
     if not 0 <= timeout_min <= 24 * 60:
         raise ValueError("confirm_timeout must be 0–1440 minutes")
-    return {"mode": mode, "timeout_min": timeout_min, "instruction": str(instruction or "").strip()}
+    return {"mode": mode, "timeout_min": timeout_min, "instruction": str(instruction or "").strip(),
+            "gate": True if gate is None else bool(gate)}
 
 
 def request_kind(content) -> str:
@@ -323,7 +328,7 @@ def apply_confirm_policy(task: RDAgentTask) -> None:
     if not task.messages or not task.is_alive():
         return
     last = latest_request(task)
-    if last is None or last.get("answered"):
+    if last is None or last.get("answered") or last.get("gate") == "pending":
         return
     kind = request_kind(last.get("content"))
     mode = task.confirm.get("mode", "hypothesis")
@@ -380,6 +385,99 @@ def _drain_user_requests_into_messages(task: RDAgentTask) -> None:
             "content": req,
         }
     task.messages.append(msg)
+    # A factor round's verdict goes through the deterministic gate before anyone (policy or user) answers it.
+    if request_kind(msg.get("content")) == "feedback" and task.confirm.get("gate", True) and task_trace(task).split("/")[0] in GATED_SCENARIOS:
+        msg["gate"] = "pending"
+        threading.Thread(target=gate_feedback, args=(task, msg), name=f"studio-gate-{task_trace(task)}", daemon=True).start()
+
+
+# Scenarios whose rounds produce factor workspaces the gate can judge.
+GATED_SCENARIOS = ("Finance Data Building", "Finance Whole Pipeline")
+
+
+def task_trace(task: RDAgentTask) -> str:
+    """``scenario/name`` of a task; tasks loaded from disk carry it only in their trace path."""
+    if task.scenario and task.trace_name:
+        return f"{task.scenario}/{task.trace_name}"
+    try:
+        return Path(task.log_trace_path).relative_to(log_folder_path).as_posix()
+    except ValueError:
+        return str(task.log_trace_path)
+
+
+def pending_round(messages):
+    """The newest round with factor workspaces and no recorded verdict yet: the one the feedback is about."""
+    from rdagent.log.server.studio import metric_rounds, normalize_loop_id
+
+    judged = set()
+    for m in messages:
+        if m.get("tag") == "feedback.hypothesis_feedback":
+            try:
+                judged.add(normalize_loop_id(m.get("loop_id")))
+            except ValueError:
+                pass
+    rounds = [r for r in metric_rounds(messages) if r["loop_id"] not in judged and r.get("factors")]
+    return rounds[-1] if rounds else None
+
+
+def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> None:
+    """Judge the round behind a pending feedback request and rewrite the request with the verdict.
+
+    Waits briefly for the round's metric event (the runner logs it just before the loop asks), runs
+    studio_gate over the round's factors against the library, then replaces decision / reason /
+    new_hypothesis in the request so the policy or the user confirms the gated verdict, and records the
+    verdict as a ``studio.gate`` event for the round view. Any failure leaves the agent's proposal as is.
+    """
+    from rdagent.log.server import studio_gate
+    from rdagent.log.server.studio import analyze_factor, factor_correlation, factor_library, factor_workspace, rank_ic_t, refresh_dir, run_market, run_refresh
+
+    trace = task_trace(task)
+    gate: dict = {"skipped": "no factor round"}
+    try:
+        with app.app_context():
+            deadline = time.time() + wait_seconds
+            round_ = pending_round(task.messages)
+            while round_ is None and time.time() < deadline:
+                time.sleep(2)
+                round_ = pending_round(task.messages)
+            if round_ is not None:
+                market = run_market(trace)
+                library = []
+                for f in factor_library(rdagent_processes, log_folder_path):
+                    if f.get("market") != market or not f.get("analysis") or (f["trace"] == trace and f["loop_id"] == round_["loop_id"]):
+                        continue
+                    t = rank_ic_t(f["analysis"])
+                    if t is None or abs(t) < studio_gate.T_WEAK:
+                        continue
+                    try:
+                        library.append((f["name"], str(factor_workspace(f["trace"], f["loop_id"], f["name"])), abs(t)))
+                    except (ValueError, KeyError, IndexError):
+                        continue
+                library.sort(key=lambda x: -x[2])
+                library = [(n, p) for n, p, _ in library]
+
+                def replicate(name, path, second):
+                    out = refresh_dir(trace, f"gate:{second}", name)
+                    if not (out / "result.h5").is_file():
+                        run_refresh(Path(path) / "factor.py", name, out, second)
+                    return analyze_factor(out, second)
+
+                factors = [(name, str(Path(path))) for name, path in round_["paths"].items() if name in round_["factors"]]
+                gate = studio_gate.gate_round(factors, market, library, analyze=lambda path, m: analyze_factor(Path(path), m),
+                                              correlate=factor_correlation, replicate=replicate)
+                gate["loop_id"] = round_["loop_id"]
+                content = dict(msg.get("content") or {})
+                original = content.get("decision")
+                content["decision"] = gate["decision"]
+                content["reason"] = f"【验收】{gate['summary']}\n\n【Agent 原判断】{'接受' if original else '拒绝'}：{content.get('reason') or ''}".strip()
+                content["new_hypothesis"] = f"{content.get('new_hypothesis') or ''}\n\n{gate['hint']}".strip()
+                msg["content"] = content
+                task.messages.append({"tag": "studio.gate", "timestamp": datetime.now(timezone.utc).isoformat(),
+                                      "loop_id": round_["loop_id"], "content": gate})
+    except Exception as error:  # noqa: BLE001 - the agent's own verdict stands
+        app.logger.exception("factor gate failed")
+        gate = {"error": str(error)[:300]}
+    msg["gate"] = gate
 
 
 @app.route("/favicon.ico")
