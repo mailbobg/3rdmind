@@ -1954,6 +1954,13 @@ def test_trace_tail_returns_cleaned_last_lines(studio_client) -> None:
     assert payload["lines"] == ["22:33:08 Start Loop 0, Step 3: feedback", "Using chat model deepseek/deepseek-flash", "Training until validation scores don't improve for 50 rounds"]
     assert payload["updated"] and payload["size"] > 0
     assert studio_client.get("/studio/trace-tail", query_string={"trace": "Finance Data Building/nothing"}).get_json()["lines"] == []
+    # A continued run's .resume.log is newer than the original log and is the one shown.
+    import os, time
+    resume = studio_module.TRACE_ROOT / "Finance Data Building" / "demo.resume.log"
+    resume.write_text("12:00:00 Start Loop 3, Step 0: direct_exp_gen\n")
+    future = time.time() + 5
+    os.utime(resume, (future, future))
+    assert studio_client.get("/studio/trace-tail", query_string={"trace": "Finance Data Building/demo", "lines": 3}).get_json()["lines"][-1].startswith("12:00:00 Start Loop 3")
     assert studio_client.get("/studio/trace-tail", query_string={"trace": "../etc"}).status_code == 400
 
 

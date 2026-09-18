@@ -1697,9 +1697,11 @@ def trace_tail():
     trace = request.args.get("trace", "")
     if not trace or ".." in trace.split("/"):
         return jsonify({"error": "trace required"}), 400
-    path = (TRACE_ROOT / trace).with_suffix(".log")
-    if not path.is_file():
+    # A continued run writes to <trace>.resume.log; show whichever file spoke last.
+    candidates = [p for p in ((TRACE_ROOT / trace).with_suffix(".log"), (TRACE_ROOT / trace).with_suffix(".resume.log")) if p.is_file()]
+    if not candidates:
         return jsonify({"lines": [], "updated": None, "size": 0})
+    path = max(candidates, key=lambda p: p.stat().st_mtime)
     try:
         lines = int(request.args.get("lines") or 12)
     except ValueError:
