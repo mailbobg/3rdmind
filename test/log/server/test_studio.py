@@ -2018,6 +2018,18 @@ def test_gate_judges_factors_by_t_duplication_and_replication() -> None:
     local = next(f for f in gate["factors"] if f["name"] == "LOCAL")
     assert local["replicated"] is False and "增量有限" in "；".join(local["reasons"])
     assert "COPY ≈ RVOL_20" in gate["hint"] and "WEAK、DEAD" in gate["hint"] and "RVOL_20" in gate["hint"] and "通过" in gate["summary"]
+    # Families and the full name list reach the hint; error-level factors are named as untested.
+    gate2 = studio_gate.gate_round([("X", "/ws/X")], "csi300", library, analyze=lambda p, m: (_ for _ in ()).throw(RuntimeError("all NaN")), correlate=correlate, replicate=None,
+                                   families=["RVOL_20", "ILLIQ_20"], existing=["ILLIQ_20", "RVOL_20", "MOM_20"])
+    assert "各列一个代表；新假设与它们的相关要低于 0.5）：RVOL_20、ILLIQ_20" in gate2["hint"] and "库里已有 3 个因子" in gate2["hint"] and "没有产出可用的值" in gate2["hint"] and "X" in gate2["hint"]
+    # Family representatives: strongest first, a factor is dropped when it correlates ≥ 0.7 with one already kept.
+    lib = [("A", "/a"), ("B", "/b"), ("C", "/c")]
+    fam_corr = {("A", "B"): 0.9, ("A", "C"): 0.2, ("B", "C"): 0.3}
+    def correlate_lib(pairs):
+        names = [n for n, _ in pairs]
+        return {"names": names, "matrix": [[1.0 if a == b else fam_corr.get((a, b), fam_corr.get((b, a), 0.0)) for b in names] for a in names]}
+    assert studio_gate.family_representatives(lib, correlate_lib) == ["A", "C"]
+    assert studio_gate.family_representatives(lib, lambda pairs: (_ for _ in ()).throw(ValueError("no overlap"))) == ["A", "B", "C"]
     # Without a passing factor the round is rejected; an analysis failure is reported, not raised; no second market → no replication.
     gate = studio_gate.gate_round([("DEAD", "/ws/DEAD"), ("X", "/ws/X")], "nasdaq100", [], analyze=lambda p, m: analyses.get(Path(p).name) or (_ for _ in ()).throw(RuntimeError("no result.h5")), correlate=correlate, replicate=None)
     assert gate["decision"] is False and [f["level"] for f in gate["factors"]] == ["noise", "error"] and gate["second_market"] is None

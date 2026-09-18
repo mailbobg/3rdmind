@@ -109,23 +109,45 @@ def judge_factor(name, path, market, library, *, analyze, correlate, replicate):
     return out
 
 
-def gate_round(factors, market, library, *, analyze, correlate, replicate):
+def family_representatives(library, correlate, threshold=DUPLICATE_CORR):
+    """One name per family: walk ``library`` (strongest first) and keep a factor unless it correlates at
+    ``threshold`` or more with one already kept. Falls back to the full list when the correlation fails."""
+    if len(library) < 2:
+        return [n for n, _ in library]
+    try:
+        corr = correlate(library)
+    except Exception:  # noqa: BLE001
+        return [n for n, _ in library]
+    index = {n: i for i, n in enumerate(corr["names"])}
+    kept = []
+    for name, _ in library:
+        i = index.get(name)
+        if i is None:
+            continue
+        if any(abs(corr["matrix"][i][index[k]]) >= threshold for k in kept if k in index):
+            continue
+        kept.append(name)
+    return kept
+
+
+def gate_round(factors, market, library, *, analyze, correlate, replicate, families=None, existing=None):
     """Judge every factor of a round; the round is accepted when at least one passes.
 
-    ``factors`` is ``[(name, path), ...]``. Returns the per-factor verdicts, the decision, a one-paragraph
-    summary for the feedback's reason, and a hint for the next hypothesis (what to stop proposing).
+    ``factors`` is ``[(name, path), ...]``. ``families`` are the library's family representatives and
+    ``existing`` every library factor's name, both only for the hint. Returns the per-factor verdicts, the
+    decision, a one-paragraph summary for the feedback's reason, and a hint for the next hypothesis.
     """
     verdicts = [judge_factor(name, path, market, library, analyze=analyze, correlate=correlate, replicate=replicate) for name, path in factors]
     decision = any(v["level"] == "signal" for v in verdicts)
     parts = [f"{v['name']}：{LEVEL_LABELS[v['level']]}（{'；'.join(v['reasons'])}）" for v in verdicts]
     summary = f"验收（确定性规则，不经 LLM）：{'通过' if decision else '不通过'}。" + "；".join(parts) + "。"
-    hint = next_hint(verdicts, library)
+    hint = next_hint(verdicts, families if families is not None else [n for n, _ in library], existing)
     return {"factors": verdicts, "decision": decision, "summary": summary, "hint": hint, "market": market,
-            "second_market": SECOND_MARKET.get(market), "thresholds": {"t_signal": T_SIGNAL, "t_weak": T_WEAK, "t_replicate": T_REPLICATE, "duplicate_corr": DUPLICATE_CORR}}
+            "second_market": SECOND_MARKET.get(market), "families": families, "thresholds": {"t_signal": T_SIGNAL, "t_weak": T_WEAK, "t_replicate": T_REPLICATE, "duplicate_corr": DUPLICATE_CORR}}
 
 
-def next_hint(verdicts, library):
-    """What the agent should stop proposing, from this round's verdicts and the library it is compared with."""
+def next_hint(verdicts, families, existing=None):
+    """What the agent should stop proposing, from this round's verdicts, the library's families and its names."""
     lines = []
     duplicates = [v for v in verdicts if v["level"] == "duplicate"]
     if duplicates:
@@ -136,7 +158,12 @@ def next_hint(verdicts, library):
     failed = [v for v in verdicts if v["level"] == "unreplicated"]
     if failed:
         lines.append("这些在本市场有信号但在 " + failed[0]["second_market"] + " 上没有复现，可能是本市场特有或样本内偶然：" + "、".join(v["name"] for v in failed))
-    if library:
-        lines.append("库里已有的独立信号（新假设与它们的相关要低于 0.5）：" + "、".join(n for n, _ in library[:12]))
+    broken = [v["name"] for v in verdicts if v["level"] == "error"]
+    if broken:
+        lines.append("这些没有产出可用的值（窗口长于可用数据、全为 NaN，或结果无法读取），不算被检验过；若要重提，窗口不得超过 120 日并设 min_periods：" + "、".join(broken))
+    if families:
+        lines.append("库里已有的独立信号族（各列一个代表；新假设与它们的相关要低于 0.5）：" + "、".join(families[:12]))
+    if existing:
+        lines.append(f"库里已有 {len(existing)} 个因子，不要再提同名或同定义的：" + "、".join(existing))
     lines.append("验收标准：市值中性 Rank IC 在 1/5/10/20 日中最好期限的 |t| ≥ 3，与库里任一因子的秩相关 < 0.7，并在同区域另一个股票池上同号复现（|t| ≥ 2）。请提出机制不同的假设，而不是同一族的新参数。")
     return "\n".join(lines)

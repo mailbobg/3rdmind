@@ -455,6 +455,8 @@ def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> N
                         continue
                 library.sort(key=lambda x: -x[2])
                 library = [(n, p) for n, p, _ in library]
+                families = studio_gate.family_representatives(library, factor_correlation)
+                existing = sorted({f["name"] for f in factor_library(rdagent_processes, log_folder_path) if f.get("market") == market and not (f["trace"] == trace and f["loop_id"] == round_["loop_id"])})
 
                 def replicate(name, path, second):
                     out = refresh_dir(trace, f"gate:{second}", name)
@@ -464,7 +466,7 @@ def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> N
 
                 factors = [(name, str(Path(path))) for name, path in round_["paths"].items() if name in round_["factors"]]
                 gate = studio_gate.gate_round(factors, market, library, analyze=lambda path, m: analyze_factor(Path(path), m),
-                                              correlate=factor_correlation, replicate=replicate)
+                                              correlate=factor_correlation, replicate=replicate, families=families, existing=existing)
                 gate["loop_id"] = round_["loop_id"]
                 content = dict(msg.get("content") or {})
                 original = content.get("decision")
