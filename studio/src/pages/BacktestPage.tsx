@@ -20,7 +20,7 @@ import { Hint } from "../components/widgets";
 import { t } from "../i18n";
 
 type Market = string;
-interface Params { start: string; end: string; market: Market; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number }
+interface Params { start: string; end: string; market: Market; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon: number; rebalance: number }
 interface Lgbm { train: [string, string]; valid: [string, string]; params: Record<string, number> }
 
 const shiftYears = (date: string, years: number) => { const d = new Date(date); d.setFullYear(d.getFullYear() + years); return d.toISOString().slice(0, 10); };
@@ -31,7 +31,7 @@ export function BacktestPage() {
   const { env, backtests, basket, layout, workspace } = useStudio();
   const saved = useMemo(() => restoreStudioState(), []);
   const [params, setParams] = useState<Params>({
-    start: "", end: "", market: "csi300", benchmark: "SH000300", topk: 10, n_drop: 2, account: 1000000, open_cost: 0.0005, close_cost: 0.0015, ...(saved.params || {}),
+    start: "", end: "", market: "csi300", benchmark: "SH000300", topk: 10, n_drop: 2, account: 1000000, open_cost: 0.0005, close_cost: 0.0015, horizon: 1, rebalance: 1, ...(saved.params || {}),
   });
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((p) => ({ ...p, [k]: v }));
   const [method, setMethod] = useState<"rank" | "lgbm">(saved.model?.method === "lgbm" ? "lgbm" : "rank");
@@ -147,13 +147,13 @@ export function BacktestPage() {
       if (savingFrom === "backtest" && result?.metrics) {
         const c = result.config;
         await studio.saveStrategy({ name, factors: c.factors, model: c.model || { method: "rank" },
-          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost },
+          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost, horizon: c.horizon, rebalance: c.rebalance },
           evidence: { backtest_id: result.id, start: c.start, end: c.end }, ...replace });
       } else if (savingFrom === "search" && searches.result?.recommended_portfolio) {
         const rec = searches.result.recommended_portfolio; const c = searches.result.config;
         const members = c.factors.filter((f) => rec.members.includes(f.name)).map((f) => ({ ...f, weight: rec.weights?.[f.name] ?? f.weight }));
         await studio.saveStrategy({ name, factors: members, model: { method: "rank" },
-          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost },
+          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost, horizon: c.horizon, rebalance: c.rebalance },
           evidence: { search_id: searches.result.id, start: c.start, end: c.end }, ...replace });
       } else return;
       setSavedNote(target ? t("已覆盖策略「{0}」，跟踪从这次回测重新开始。", [name]) : t("已保存为策略「{0}」，在左栏「策略」里跟踪。", [name]));
@@ -427,6 +427,8 @@ export function BacktestPage() {
               <Field label={t("基准")}><TextInput value={params.benchmark} onChange={(v) => set("benchmark", v)} /></Field>
               <Field label={t("持股数")} hint={t("每天按评分持有前 topk 只")}><NumberInput value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} /></Field>
               <Field label={t("每日换出")} hint={t("每天最多换出 n_drop 只")}><NumberInput value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} /></Field>
+              <Field label={t("预测期限（天）")} hint={t("标签看多少个交易日之后的收益：LightGBM 的训练目标和报告的 IC 都按它算。5–10 天的 IC 通常比次日高，且与更低的换手匹配")}><NumberInput value={params.horizon} onChange={(v) => set("horizon", v)} min={1} max={20} /></Field>
+              <Field label={t("调仓间隔（天）")} hint={t("信号每隔多少个交易日刷新一次，也是最短持有天数；5 = 周频调仓。间隔内 TopkDropout 不会换股")}><NumberInput value={params.rebalance} onChange={(v) => set("rebalance", v)} min={1} max={20} /></Field>
               <Field label={t("初始资金")}><NumberInput value={params.account} onChange={(v) => set("account", v)} min={1000} step={100000} /></Field>
               <Field label={t("买入费率")} hint={t("0.0005 = 万分之五")}><NumberInput value={params.open_cost} onChange={(v) => set("open_cost", v)} min={0} max={0.1} step={0.0001} /></Field>
               <Field label={t("卖出费率")} hint={universes.find((u) => u.market === params.market)?.region === "us" ? t("美股经纪佣金接近零，默认万分之一") : t("0.0015 含印花税")}><NumberInput value={params.close_cost} onChange={(v) => set("close_cost", v)} min={0} max={0.1} step={0.0001} /></Field>

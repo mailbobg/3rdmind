@@ -419,7 +419,7 @@ def test_search_prefilter_is_on_by_default_and_reports_exclusions(
     def cache(name, rank_ic, icir):
         folder = ws / name.lower()
         (folder / "studio_analysis.csi300.json").write_text(json.dumps({
-            "status": "completed", "source_mtime": (folder / "result.h5").stat().st_mtime,
+            "status": "completed", "version": studio_module.ANALYSIS_VERSION, "source_mtime": (folder / "result.h5").stat().st_mtime,
             "rank_ic": {"mean": rank_ic, "std": 0.1, "ir": icir, "positive_ratio": 0.6}}))
 
     cache("F_A", 0.03, 0.5)
@@ -485,7 +485,7 @@ def test_search_preview_reports_kept_and_excluded_without_starting(
     def cache(name, rank_ic, icir):
         folder = ws / name.lower()
         (folder / "studio_analysis.csi300.json").write_text(json.dumps({
-            "status": "completed", "source_mtime": (folder / "result.h5").stat().st_mtime,
+            "status": "completed", "version": studio_module.ANALYSIS_VERSION, "source_mtime": (folder / "result.h5").stat().st_mtime,
             "rank_ic": {"mean": rank_ic, "std": 0.1, "ir": icir, "positive_ratio": 0.6}}))
 
     cache("F_A", 0.03, 0.5)
@@ -527,6 +527,7 @@ def test_strategies_are_saved_listed_updated_and_deleted(studio_client, tmp_path
     assert created.status_code == 201, created.get_json()
     strategy = created.get_json()
     assert strategy["factors"][0]["weight"] == -1 and "path" not in strategy["factors"][0]
+    assert "horizon" not in strategy["params"] and "rebalance" not in strategy["params"]  # daily setup left implicit
     assert strategy["run_details"][0]["total_return"] == 0.05 and strategy["run_details"][0]["kind"] == "evidence"
     listed = studio_client.get("/studio/strategies").get_json()
     assert listed[0]["name"] == "反转一号" and listed[0]["latest"]["total_return"] == 0.05 and listed[0]["run_count"] == 1
@@ -1376,9 +1377,13 @@ def test_cached_analysis_is_invalidated_when_result_changes(tmp_path: Path) -> N
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "result.h5").write_bytes(b"x")
-    analysis_cache_path(ws, "csi300").write_text(json.dumps({"status": "completed", "source_mtime": (ws / "result.h5").stat().st_mtime, "days": 3}))
+    fresh = {"status": "completed", "version": studio_module.ANALYSIS_VERSION, "source_mtime": (ws / "result.h5").stat().st_mtime, "days": 3}
+    analysis_cache_path(ws, "csi300").write_text(json.dumps(fresh))
     assert cached_analysis(ws, "csi300")["days"] == 3
-    analysis_cache_path(ws, "csi300").write_text(json.dumps({"status": "completed", "source_mtime": 0, "days": 3}))
+    analysis_cache_path(ws, "csi300").write_text(json.dumps({**fresh, "source_mtime": 0}))
+    assert cached_analysis(ws, "csi300") is None
+    # An analysis written by an older studio_analysis.py (no horizons, no t) is recomputed rather than shown.
+    analysis_cache_path(ws, "csi300").write_text(json.dumps({**fresh, "version": 1}))
     assert cached_analysis(ws, "csi300") is None
 
 
@@ -1394,6 +1399,62 @@ def test_analysis_summary_on_synthetic_ic() -> None:
     summary = summarize(ic, rank_ic, days[0], days[-1], len(index))
     assert summary["days"] == 30 and summary["ic"]["mean"] == pytest.approx(1.0) and summary["rank_ic"]["positive_ratio"] == 1.0
     assert summary["monthly"][0]["month"] == "2025-01" and summary["coverage"] == {"start": "2025-01-01", "end": "2025-02-11"}
+    assert summary["horizons"] == [] and summary["verdict"] is None
+
+
+@pytest.mark.offline
+def test_analysis_t_statistics_horizons_and_residual() -> None:
+    import numpy as np
+    from rdagent.log.server.studio_analysis import T_SIGNAL, label_expression, residualize, stats, verdict
+
+    assert label_expression(1) == "Ref($close, -2)/Ref($close, -1) - 1" and label_expression(5) == "Ref($close, -6)/Ref($close, -1) - 1"
+    # A steady IC of 0.03 with dispersion 0.1 over 250 days: ICIR 0.3, t 4.7; at a 5-day horizon the same
+    # series has a fifth of the independent observations, t 2.1.
+    rng = np.random.default_rng(1)
+    series = pd.Series(0.03 + 0.1 * rng.standard_normal(250))
+    one, five = stats(series, 1), stats(series, 5)
+    assert one["t"] == pytest.approx(one["ir"] * np.sqrt(250)) and five["t"] == pytest.approx(one["t"] / np.sqrt(5))
+    assert stats(pd.Series([], dtype=float)) is None
+    horizons = [{"days": 1, "rank_ic": {"t": 1.2}}, {"days": 10, "rank_ic": {"t": -3.4}}, {"days": 20, "rank_ic": None}]
+    assert verdict(horizons) == {"best_horizon": 10, "t": 3.4, "level": "signal"}
+    assert verdict([{"days": 1, "rank_ic": {"t": 2.2}}])["level"] == "weak" and verdict([{"days": 1, "rank_ic": {"t": 0.5}}])["level"] == "noise"
+    assert verdict([]) is None and T_SIGNAL == 3.0
+    # Residualising strips the market (intercept) and the size slope; a label that is pure size leaves nothing.
+    days = pd.to_datetime(["2025-01-02", "2025-01-03"])
+    stocks = [f"S{i}" for i in range(12)]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    size = pd.Series([float(2 ** i) for i in range(12)] * 2, index=index)
+    label = pd.Series([0.01 + 0.002 * i for i in range(12)] + [-0.02 + 0.001 * i for i in range(12)], index=index)
+    residual = residualize(label, size)
+    assert residual.abs().max() < 1e-9
+    noisy = label + pd.Series([(-1) ** i * 0.005 for i in range(24)], index=index)
+    residual = residualize(noisy, size)
+    assert residual.groupby(level="datetime").mean().abs().max() < 1e-9 and residual.abs().max() > 0.003
+
+
+@pytest.mark.offline
+def test_validate_config_accepts_horizon_and_rebalance() -> None:
+    assert validate_config(_config())["horizon"] == 1 and validate_config(_config())["rebalance"] == 1
+    config = validate_config(_config(horizon=5, rebalance=5))
+    assert config["horizon"] == 5 and config["rebalance"] == 5
+    assert validate_config(_config(horizon=None))["horizon"] == 1
+    for bad in ({"horizon": 0}, {"horizon": 21}, {"rebalance": 2.5}, {"rebalance": "weekly"}):
+        with pytest.raises((ValueError, TypeError)):
+            validate_config(_config(**bad))
+
+
+@pytest.mark.offline
+def test_hold_scores_repeats_each_blocks_first_day() -> None:
+    from rdagent.log.server.studio_worker import hold_scores
+
+    days = pd.bdate_range("2025-01-06", periods=7)
+    index = pd.MultiIndex.from_product([days, ["A", "B"]], names=["datetime", "instrument"])
+    score = pd.Series(range(14), index=index, dtype=float)
+    held = hold_scores(score, 5)
+    assert held.xs(days[4], level="datetime").tolist() == [0.0, 1.0]   # inside the first block: day one's scores
+    assert held.xs(days[5], level="datetime").tolist() == [10.0, 11.0]  # the second block starts fresh
+    assert held.xs(days[6], level="datetime").tolist() == [10.0, 11.0]
+    assert hold_scores(score, 1) is score
 
 
 @pytest.mark.offline

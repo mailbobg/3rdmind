@@ -18,16 +18,23 @@ export interface TraceEvent {
 export interface Environment {
   chat_model: string; embedding_model: string; provider_uri: string; data_ready: boolean;
   start: string | null; end: string | null; python: string;
+  /** The research runs' Qlib test window and its trading-day count (from QLIB_FACTOR_TEST_START/END), for turning ICIR into t. */
+  test_window?: { start: string | null; end: string | null; days: number } | null;
 }
 export interface Round { loop_id: number; factors: string[]; metrics: Record<string, number>; prediction: boolean }
 export type SignalKind = "factor" | "prediction";
 /** One signal in the portfolio: a research factor's result.h5, or a round's Qlib model prediction (pred.pkl). */
 export interface FactorWeight { name: string; weight: number; trace: string; loop_id: number; kind?: SignalKind }
-export interface IcStats { mean: number; std: number; ir: number | null; positive_ratio: number }
+/** `t` is ICIR × √(days / horizon): overlapping labels at longer horizons leave fewer independent days. */
+export interface IcStats { mean: number; std: number; ir: number | null; t?: number | null; positive_ratio: number }
+export interface HorizonStats { days: number; ic: IcStats | null; rank_ic: IcStats | null; residual_rank_ic: IcStats | null }
+export interface FactorVerdict { best_horizon: number; t: number; level: "signal" | "weak" | "noise" }
 /** Single-factor analysis: daily IC of the factor against next-day return, computed server-side and cached. */
 export interface FactorAnalysis {
   coverage: { start: string; end: string }; days: number; rows: number;
   ic: IcStats; rank_ic: IcStats; monthly: { month: string; ic: number | null; rank_ic: number | null }[];
+  /** 1 / 5 / 10 / 20-day forward returns, and the same against the size-neutral residual return; absent on analyses cached before this existed. */
+  horizons?: HorizonStats[]; verdict?: FactorVerdict | null;
 }
 export interface LibraryFactor extends Record<string, unknown> {
   trace: string; loop_id: number; name: string;
@@ -57,6 +64,8 @@ export interface BacktestRequest {
   model?: SignalModel;
   start: string; end: string; market: string; benchmark: string;
   topk: number; n_drop: number; account: number; open_cost: number; close_cost: number;
+  /** Label look-ahead in trading days (LightGBM target, reported IC) and days between signal refreshes (also the minimum hold); both default to 1. */
+  horizon?: number; rebalance?: number;
   /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
   trace?: string; loop_id?: number;
 }
@@ -242,7 +251,7 @@ export const search = async (id: string): Promise<SearchResult> => {
   return { ...(rest as unknown as SearchResult), recommended: portfolio?.members ?? null, recommended_portfolio: portfolio };
 };
 export const runSearch = (config: SearchRequest) => api<{ id: string }>("/studio/searches", config);
-export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number }
+export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number }
 export interface StrategyRun { id: string; kind: "evidence" | "update"; status?: string; start?: string; end?: string; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; benchmark_return?: number | null; error?: string; created?: string }
 export interface Strategy {
   id: string; name: string; note: string; created: string; updated: string;

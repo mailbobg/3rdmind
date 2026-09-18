@@ -59,15 +59,24 @@ export function MetricGrid({ items, columns = 3 }: { items: { label: string; val
 /** Native Qlib metrics as a two-column table, preferred keys first. */
 const PREFERRED = ["IC", "ICIR", "Rank IC", "Rank ICIR", "1day.excess_return_with_cost.annualized_return",
   "1day.excess_return_with_cost.information_ratio", "1day.excess_return_with_cost.max_drawdown"];
-export function MetricTable({ metrics }: { metrics: Record<string, number> }) {
+/** Qlib's own metric table; with ``testDays`` the Rank ICIR is also shown as a t statistic (ICIR × √days). */
+export function MetricTable({ metrics, testDays }: { metrics: Record<string, number>; testDays?: number | null }) {
   const rows = useMemo(() => {
     const head = PREFERRED.filter((k) => k in metrics).map((k) => [k, metrics[k]] as const);
     const rest = Object.entries(metrics).filter(([k]) => !PREFERRED.includes(k));
     return [...head, ...rest];
   }, [metrics]);
+  const t_ = testDays && Number.isFinite(metrics["Rank ICIR"]) ? metrics["Rank ICIR"] * Math.sqrt(testDays) : null;
   return (
-    <DataTable label={t("Qlib 指标")} head={[[t("指标")], [t("值"), "end"]]}
-      rows={rows.map(([k, v]) => ({ key: k, cells: [<Mono key="k">{k}</Mono>, <span key="v" className="tabular-nums">{Number.isFinite(v) ? Number(v.toPrecision(5)).toString() : "—"}</span>] }))} />
+    <div className="flex flex-col gap-1">
+      {t_ != null && (
+        <p className={`m-0 text-xs ${Math.abs(t_) >= 3 ? "text-success" : Math.abs(t_) >= 2 ? "" : "text-danger"}`}>
+          {t("Rank IC 的 t 值 ≈ {0}（Rank ICIR × √{1} 个测试日）：{2}", [t_.toFixed(2), testDays, Math.abs(t_) >= 3 ? t("有信号") : Math.abs(t_) >= 2 ? t("偏弱，需要更多样本") : t("与零区分不开")])}
+        </p>
+      )}
+      <DataTable label={t("Qlib 指标")} head={[[t("指标")], [t("值"), "end"]]}
+        rows={rows.map(([k, v]) => ({ key: k, cells: [<Mono key="k">{k}</Mono>, <span key="v" className="tabular-nums">{Number.isFinite(v) ? Number(v.toPrecision(5)).toString() : "—"}</span>] }))} />
+    </div>
   );
 }
 

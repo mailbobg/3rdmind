@@ -296,7 +296,7 @@ export function ResearchPage() {
           )}
           {trace.traceId && (progress.length > 0 || trace.active) && <LiveStatus traceId={trace.traceId} events={trace.events} running={trace.active} waiting={!!trace.interaction} roundId={activeRound?.id ?? null}
             confirm={summaries.find((x) => x.id === trace.traceId)?.confirm} autoAnswered={summaries.find((x) => x.id === trace.traceId)?.auto_answered} />}
-          {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} /> : <Hint>{t("在左侧展开一个实验，点一轮查看假设、评估与代码。")}</Hint>}
+          {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} testDays={env?.test_window?.days} /> : <Hint>{t("在左侧展开一个实验，点一轮查看假设、评估与代码。")}</Hint>}
         </div>
       )}
     >

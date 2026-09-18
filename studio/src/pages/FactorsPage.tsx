@@ -11,7 +11,7 @@ import { Block, Btn, Empty, Link, Note, Num, Table, Tag, TextInput, TextTabs } f
 import { CodeView, CorrelationMatrix, DataTable, Formula, Hint, IcBars, MetricGrid, MetricTable, Mono, Signed } from "../components/widgets";
 import { t } from "../i18n";
 
-const GUIDE = t("① 单独有没有用：看 IC / Rank IC 的符号和 ICIR（均值÷波动）；|IC|<0.01 且 ICIR≈0 基本是噪声，IC 为负的回测时权重设 −1 反向。② 放一起合不合适：篮内两两相关 |ρ|<0.5 才互补，高相关只是重复计权。③ 覆盖区间要包住回测期。");
+const GUIDE = t("① 单独有没有用：看 Rank IC 的 t 值（ICIR × √天数），|t| ≥ 3 算有信号，2–3 偏弱，< 2 与零区分不开；IC 均值大小本身不说明问题。IC 为负的回测时权重设 −1 反向。② 看多期限：1/5/10/20 日里哪个 t 最高，就用那个预测期限回测；残差 Rank IC 剥掉了市场和市值，是因子真正知道的部分。③ 放一起合不合适：篮内两两相关 |ρ|<0.5 才互补。④ 覆盖区间要包住回测期。");
 
 export function FactorsPage() {
   const { basket, layout, env, workspace } = useStudio();
@@ -148,14 +148,38 @@ export function FactorsPage() {
             <Section title={t("单因子分析")} note={t("沪深300 · 次日收益")}>
               {selected.analysis ? (
                 <>
+                  {selected.analysis.verdict && (
+                    <p className={`m-0 text-xs ${selected.analysis.verdict.level === "signal" ? "text-success" : selected.analysis.verdict.level === "noise" ? "text-danger" : ""}`}>
+                      {selected.analysis.verdict.level === "signal" ? t("有信号：{0} 日期限的 Rank IC t 值 {1}，与零清楚地分得开。", [selected.analysis.verdict.best_horizon, selected.analysis.verdict.t.toFixed(2)])
+                        : selected.analysis.verdict.level === "weak" ? t("偏弱：最好的期限（{0} 日）t 值也只有 {1}，2 到 3 之间，需要更长的样本或跨市场复现才能确认。", [selected.analysis.verdict.best_horizon, selected.analysis.verdict.t.toFixed(2)])
+                        : t("噪声：四个期限的 Rank IC t 值最高 {0}（{1} 日），与零区分不开；IC 均值的大小不改变这个判断。", [selected.analysis.verdict.t.toFixed(2), selected.analysis.verdict.best_horizon])}
+                    </p>
+                  )}
                   <MetricGrid items={[
                     { label: t("IC 均值"), value: <Signed value={selected.analysis.ic.mean} /> },
-                    { label: "ICIR", value: selected.analysis.ic.ir == null ? "—" : selected.analysis.ic.ir.toFixed(2) },
-                    { label: t("IC > 0 天数占比"), value: `${(selected.analysis.ic.positive_ratio * 100).toFixed(0)}%` },
                     { label: t("Rank IC 均值"), value: <Signed value={selected.analysis.rank_ic.mean} /> },
-                    { label: "Rank ICIR", value: selected.analysis.rank_ic.ir == null ? "—" : selected.analysis.rank_ic.ir.toFixed(2) },
+                    { label: t("Rank IC t 值"), value: selected.analysis.rank_ic.t == null ? (selected.analysis.rank_ic.ir == null ? "—" : (selected.analysis.rank_ic.ir * Math.sqrt(selected.analysis.days)).toFixed(2)) : selected.analysis.rank_ic.t.toFixed(2), hint: t("ICIR × √交易日数") },
+                    { label: "Rank ICIR", value: selected.analysis.rank_ic.ir == null ? "—" : selected.analysis.rank_ic.ir.toFixed(3) },
+                    { label: t("IC > 0 天数占比"), value: `${(selected.analysis.ic.positive_ratio * 100).toFixed(0)}%` },
                     { label: t("交易日 / 样本"), value: `${selected.analysis.days} / ${selected.analysis.rows.toLocaleString()}` },
                   ]} />
+                  {selected.analysis.horizons?.length ? (
+                    <>
+                      <DataTable label={t("多期限 Rank IC")} head={[[t("预测期限")], ["Rank IC", "end"], ["ICIR", "end"], [t("t 值"), "end"], [t("残差 Rank IC"), "end"], [t("残差 t"), "end"]]}
+                        rows={selected.analysis.horizons.map((h) => {
+                          const tone = (x?: number | null) => (x == null ? "text-muted" : Math.abs(x) >= 3 ? "text-success" : Math.abs(x) >= 2 ? "" : "text-danger");
+                          return { key: String(h.days), cells: [
+                            <span key="d" className="tabular-nums">{t("{0} 日", [h.days])}{selected.analysis!.verdict?.best_horizon === h.days ? <span className="text-muted"> ★</span> : null}</span>,
+                            <Signed key="r" value={h.rank_ic?.mean} />,
+                            <span key="ir" className="tabular-nums">{h.rank_ic?.ir == null ? "—" : h.rank_ic.ir.toFixed(3)}</span>,
+                            <span key="t" className={`tabular-nums ${tone(h.rank_ic?.t)}`}>{h.rank_ic?.t == null ? "—" : h.rank_ic.t.toFixed(2)}</span>,
+                            <Signed key="rr" value={h.residual_rank_ic?.mean} />,
+                            <span key="rt" className={`tabular-nums ${tone(h.residual_rank_ic?.t)}`}>{h.residual_rank_ic?.t == null ? "—" : h.residual_rank_ic.t.toFixed(2)}</span>,
+                          ] };
+                        })} />
+                      <Hint>{t("期限 N 日 = 下一收盘买入、持有 N 日的收益。t 值按 N 日重叠标签折算成 ICIR × √(天数 ÷ N)。残差 = 每天对 log 成交额做截面回归后的剩余，剥掉市场涨跌和市值方向。★ 是 t 最高的期限，回测时把“预测期限”设成它。")}</Hint>
+                    </>
+                  ) : null}
                   <Hint>{t("按月 Rank IC · 覆盖 {0} → {1}", [selected.analysis.coverage.start, selected.analysis.coverage.end])}</Hint>
                   <IcBars monthly={selected.analysis.monthly} field="rank_ic" />
                 </>
@@ -214,7 +238,7 @@ export function FactorsPage() {
       {error && <Note tone="bad" actions={<Btn kind="text" onClick={() => setError("")}>{t("关闭")}</Btn>}>{error}</Note>}
       <Block title={t("因子")} count={rows.length} note={statusLine} noteTone={maxCorr >= 0.7 ? "bad" : "ok"}>
         {rows.length ? (
-          <Table label={t("因子库")} columns={[{ label: "", width: 34 }, { label: t("因子") }, { label: t("轮"), num: true, width: 44, optional: true }, { label: t("判定"), width: 56, optional: true }, { label: "IC", num: true, width: 82 }, { label: "Rank IC", num: true, width: 82 }, { label: "ICIR", num: true, width: 66, optional: true }, { label: t("覆盖"), width: 156, optional: true }]}
+          <Table label={t("因子库")} columns={[{ label: "", width: 34 }, { label: t("因子") }, { label: t("轮"), num: true, width: 44, optional: true }, { label: t("判定"), width: 56, optional: true }, { label: "IC", num: true, width: 82 }, { label: "Rank IC", num: true, width: 82 }, { label: t("t 值"), num: true, width: 66, optional: true }, { label: t("覆盖"), width: 156, optional: true }]}
             rows={groups.flatMap((g) => [
               { key: `g:${g.trace}`, group: true, cells: [<span key="g">{shortName(g.trace)}<span className="mm-dim">{g.trace.split("/")[0]} · {t(" · {0} 个因子", [g.items.length]).replace(/^ · /, "")}</span></span>] },
               ...g.items.map((f) => ({
@@ -226,7 +250,7 @@ export function FactorsPage() {
                   decisionTag(f.decision),
                   <Num key="ic" value={f.analysis?.ic.mean} />,
                   <Num key="ric" value={f.analysis?.rank_ic.mean} />,
-                  f.analysis?.ic.ir == null ? <span key="ir" className="mm-dim">—</span> : f.analysis.ic.ir.toFixed(2),
+                  f.analysis?.rank_ic.ir == null ? <span key="ir" className="mm-dim">—</span> : <span key="ir" className={Math.abs(f.analysis.rank_ic.t ?? f.analysis.rank_ic.ir * Math.sqrt(f.analysis.days)) >= 3 ? "" : "mm-dim"}>{(f.analysis.rank_ic.t ?? f.analysis.rank_ic.ir * Math.sqrt(f.analysis.days)).toFixed(1)}</span>,
                   <span key="cov" className="mm-mono mm-dim">
                     {coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}${f.refreshed ? " ↻" : ""}` : busyKey === key(f) ? t("分析中…") : <Link onClick={(e) => { e.stopPropagation(); analyze(f); }}>{t("计算指标")}</Link>}
                   </span>,

@@ -191,8 +191,12 @@ def analysis_cache_path(workspace, market):
     return Path(workspace) / f"studio_analysis.{market}.json"
 
 
+# Bump when studio_analysis.py's output gains fields the UI relies on; older caches are recomputed on request.
+ANALYSIS_VERSION = 2
+
+
 def cached_analysis(workspace, market):
-    """The stored single-factor analysis, or None when absent or older than result.h5."""
+    """The stored single-factor analysis, or None when absent, older than result.h5, or from an older analysis."""
     path = analysis_cache_path(workspace, market)
     source = Path(workspace) / "result.h5"
     if not path.is_file() or not source.is_file():
@@ -201,7 +205,7 @@ def cached_analysis(workspace, market):
         data = json.loads(path.read_text())
     except ValueError:
         return None
-    if data.get("source_mtime") != source.stat().st_mtime or data.get("status") != "completed":
+    if data.get("source_mtime") != source.stat().st_mtime or data.get("status") != "completed" or data.get("version") != ANALYSIS_VERSION:
         return None
     return data
 
@@ -313,6 +317,7 @@ def analyze_factor(workspace, market):
     if data.get("status") != "completed":
         raise RuntimeError(data.get("error") or "analysis failed")
     data["source_mtime"] = (Path(workspace) / "result.h5").stat().st_mtime
+    data["version"] = ANALYSIS_VERSION
     output.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False))
     return data
 
@@ -481,7 +486,11 @@ def environment():
     calendar = provider / "calendars" / "day.txt"
     dates = calendar.read_text().splitlines() if calendar.is_file() else []
     llm = studio_llm.resolve()
+    # The research runs' Qlib test window, so the UI can turn a round's Rank ICIR into a t statistic.
+    test_start, test_end = os.environ.get("QLIB_FACTOR_TEST_START"), os.environ.get("QLIB_FACTOR_TEST_END")
+    test_days = sum(1 for d in dates if (not test_start or d >= test_start) and (not test_end or d <= test_end)) if dates and (test_start or test_end) else None
     return jsonify({"chat_model": llm["model"] if llm else os.environ.get("LITELLM_CHAT_MODEL", os.environ.get("CHAT_MODEL", "")),
+                    "test_window": {"start": test_start, "end": test_end, "days": test_days} if test_days else None,
                     "embedding_model": studio_llm.effective_embedding_model(),
                     "provider_uri": str(provider), "data_ready": bool(dates),
                     "start": dates[0] if dates else None, "end": dates[-1] if dates else None,
@@ -1107,7 +1116,7 @@ def backtest_diagnose(job_id):
 
 # ---- Strategies: a named factor portfolio with its evidence and its tracking runs -----------------------
 
-STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost")
+STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost", "horizon", "rebalance")
 
 
 def strategy_path(strategy_id):
@@ -1167,7 +1176,8 @@ def validate_strategy_body(body, existing=None):
     if not isinstance(model, dict) or model.get("method") not in ("rank", "lgbm"):
         raise ValueError("Unsupported signal method")
     params = {k: body.get("params", {}).get(k, body.get(k)) for k in STRATEGY_PARAMS}
-    if any(params[k] is None for k in ("market", "topk", "n_drop")):
+    params = {k: v for k, v in params.items() if v is not None}  # horizon / rebalance stay implicit at the daily default
+    if any(params.get(k) is None for k in ("market", "topk", "n_drop")):
         raise ValueError("策略缺少市场或持仓参数")
     return {"name": name, "note": note, "model": model, "params": params,
             "factors": [{"name": f["name"], "kind": f["kind"], "weight": f["weight"], "trace": f["trace"], "loop_id": f["loop_id"]} for f in resolved]}

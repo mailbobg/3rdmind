@@ -38,7 +38,7 @@ export function BacktestResultView({ result, onDiagnose }: { result: BacktestRes
             result.config.factors.map((f) => <Chip key={`${f.trace}#${f.loop_id}#${f.name}`} size="sm" variant="soft">{f.kind === "prediction" ? tr("模型 · ") : ""}{f.name}{f.weight !== 1 ? ` ×${f.weight}` : ""}</Chip>)}
         </div>
         <Hint>
-          {result.config.start} → {result.config.end} · {result.config.market} · {tr("基准")} {result.config.benchmark || "SH000300"} · topk {result.config.topk} / n_drop {result.config.n_drop}
+          {result.config.start} → {result.config.end} · {result.config.market} · {tr("基准")} {result.config.benchmark || "SH000300"} · topk {result.config.topk} / n_drop {result.config.n_drop}{(result.config.horizon ?? 1) > 1 ? ` · ${tr("预测期限")} ${result.config.horizon}d` : ""}{(result.config.rebalance ?? 1) > 1 ? ` · ${tr("调仓间隔")} ${result.config.rebalance}d` : ""}
           {" · "}{result.config.model?.method === "lgbm" ? tr("LightGBM（训练 {0}，验证 {1}）", [result.config.model.train.join("→"), result.config.model.valid.join("→")]) : tr("排名加权")}
         </Hint>
         {result.error && <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{result.error}</Alert.Title></Alert.Content></Alert>}

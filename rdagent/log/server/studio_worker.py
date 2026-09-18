@@ -32,6 +32,13 @@ def validate_config(config):
         result[key] = int(value) if key in ("topk", "n_drop") else value
     if result["n_drop"] > result["topk"]:
         raise ValueError("n_drop cannot exceed topk")
+    # horizon: days the label looks ahead (LightGBM target and reported IC); rebalance: trading days between
+    # signal refreshes, also the minimum holding period. Both default to the daily setup.
+    for key in ("horizon", "rebalance"):
+        value = float(1 if result.get(key) is None else result[key])
+        if not math.isfinite(value) or not value.is_integer() or not 1 <= value <= 20:
+            raise ValueError(f"{key} must be a whole number of trading days between 1 and 20")
+        result[key] = int(value)
     if not isinstance(result.get("market"), str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", result["market"]):
         raise ValueError("Unsupported instrument universe")
     benchmark = result.get("benchmark", "SH000300")
@@ -434,8 +441,10 @@ def prepare(config):
         raise ValueError("No factor observations inside the selected universe")
     # Require all selected factors on a row; do not silently treat missing data as zero.
     ranks = features.groupby(level="datetime").rank(pct=True).dropna()
-    # Next-day close-to-close return, the label Qlib's templates use with close execution.
-    label_raw = D.features(D.instruments(config["market"]), ["Ref($close, -2)/Ref($close, -1) - 1"],
+    # Forward close-to-close return over ``horizon`` days from the next close; at 1 this is the label Qlib's
+    # templates use with close execution.
+    horizon = int(config.get("horizon", 1))
+    label_raw = D.features(D.instruments(config["market"]), [f"Ref($close, -{horizon + 1})/Ref($close, -1) - 1"],
                            start_time=feature_start, end_time=config["end"], freq="day").iloc[:, 0]
     if label_raw.index.names[0] == "instrument":  # Qlib returns (instrument, datetime); signals are (datetime, instrument)
         label_raw = label_raw.swaplevel(0, 1)
@@ -465,12 +474,31 @@ def combine(prepared, columns, weights, model, log=print):
     return score, report
 
 
+def hold_scores(score, every):
+    """Refresh the signal only every ``every`` trading days: each day inside a block repeats the block's first
+    cross-section. TopkDropout then finds nothing to swap on the other days, so the book turns over once per
+    block instead of daily."""
+    if every <= 1:
+        return score
+    import pandas as pd
+
+    days = score.index.get_level_values("datetime").unique().sort_values()
+    pieces = []
+    for i in range(0, len(days), every):
+        block = days[i:i + every]
+        first = score.xs(block[0], level="datetime")
+        for day in block:
+            pieces.append(pd.Series(first.values, index=pd.MultiIndex.from_arrays([[day] * len(first), first.index], names=["datetime", "instrument"])))
+    return pd.concat(pieces).sort_index()
+
+
 def backtest_score(score, config):
     """Run Qlib's TopkDropout backtest on ``score``; returns the daily report and Qlib's positions/indicators."""
     from qlib.backtest import backtest
 
+    rebalance = int(config.get("rebalance", 1))
     strategy = {"class": "TopkDropoutStrategy", "module_path": "qlib.contrib.strategy",
-                "kwargs": {"signal": score, "topk": config["topk"], "n_drop": config["n_drop"]}}
+                "kwargs": {"signal": hold_scores(score, rebalance), "topk": config["topk"], "n_drop": config["n_drop"], "hold_thresh": rebalance}}
     portfolios, indicators = backtest(
         start_time=config["start"], end_time=config["end"], strategy=strategy,
         executor={"class": "SimulatorExecutor", "module_path": "qlib.backtest.executor",

@@ -171,7 +171,7 @@ export function StrategiesPage() {
               </div>
             </Section>
           )}
-          <Section title={t("成员")} note={t("{0} 个信号 · {1} · {2} · topk {3} / n_drop {4}", [detail.factors.length, detail.model.method === "lgbm" ? "LightGBM" : t("排名加权"), detail.params.market, detail.params.topk, detail.params.n_drop])}>
+          <Section title={t("成员")} note={t("{0} 个信号 · {1} · {2} · topk {3} / n_drop {4}", [detail.factors.length, detail.model.method === "lgbm" ? "LightGBM" : t("排名加权"), detail.params.market, detail.params.topk, detail.params.n_drop]) + ((detail.params.horizon ?? 1) > 1 ? t(" · 预测期限 {0} 天", [detail.params.horizon]) : "") + ((detail.params.rebalance ?? 1) > 1 ? t(" · 调仓间隔 {0} 天", [detail.params.rebalance]) : "")}>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               {detail.factors.map((f) => <span key={`${f.trace}#${f.loop_id}#${f.name}`} className="flex items-center gap-1 text-xs"><Mono>{f.name}</Mono><span className="text-muted">{t("×{0} · {1} 第 {2} 轮", [f.weight, shortName(f.trace), f.loop_id + 1])}</span></span>)}
             </div>

@@ -10,7 +10,7 @@ import { t } from "../i18n";
 
 /** A round's full detail in the results column. */
 /** `onContinue` adds "继续研究" beside the agent's next hypothesis: the caller resumes the experiment. */
-export function RoundDetail({ round, onContinue }: { round: RoundView; onContinue?: () => void }) {
+export function RoundDetail({ round, onContinue, testDays }: { round: RoundView; onContinue?: () => void; testDays?: number | null }) {
   const [file, setFile] = useState(0);
   useEffect(() => setFile(Math.max(0, round.files.length - 1)), [round.id, round.files.length]);
   const current = round.files[file];
@@ -56,7 +56,7 @@ export function RoundDetail({ round, onContinue }: { round: RoundView; onContinu
           </div>
         </Section>
       )}
-      {round.metrics && <Section title={t("原生 Qlib 评估")} note="LightGBM · TopkDropout"><MetricTable metrics={round.metrics} /></Section>}
+      {round.metrics && <Section title={t("原生 Qlib 评估")} note="LightGBM · TopkDropout"><MetricTable metrics={round.metrics} testDays={testDays} /></Section>}
       {round.chartHtml && <Section title={t("收益图")}><iframe srcDoc={round.chartHtml} sandbox="allow-scripts" title={t("收益图")} className="h-[420px] w-full border-0" /></Section>}
       {round.files.length > 0 && (
         <Section title={t("生成代码")} note={current && <Btn kind="text" onClick={() => download(`${current.task || "round"}-${current.name}`, current.code)}>{t("下载代码")}</Btn>}>
