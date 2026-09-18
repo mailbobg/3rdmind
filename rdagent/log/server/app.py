@@ -473,6 +473,9 @@ def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> N
                 content["decision"] = gate["decision"]
                 content["reason"] = f"【验收】{gate['summary']}\n\n【Agent 原判断】{'接受' if original else '拒绝'}：{content.get('reason') or ''}".strip()
                 content["new_hypothesis"] = f"{content.get('new_hypothesis') or ''}\n\n{gate['hint']}".strip()
+                # The hypothesis prompt replays every past round's observations / evaluation / decision but only the
+                # last round's reason and new_hypothesis, so the verdict also goes where it stays visible.
+                content["hypothesis_evaluation"] = f"【验收】{gate['summary']}\n{content.get('hypothesis_evaluation') or ''}".strip()
                 msg["content"] = content
                 task.messages.append({"tag": "studio.gate", "timestamp": datetime.now(timezone.utc).isoformat(),
                                       "loop_id": round_["loop_id"], "content": gate})

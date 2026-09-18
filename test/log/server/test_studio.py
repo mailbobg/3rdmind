@@ -2077,6 +2077,7 @@ def test_feedback_requests_wait_for_the_gate_and_carry_its_verdict(studio_client
     assert request_msg["content"]["decision"] is False
     assert request_msg["content"]["reason"].startswith("【验收】验收：不通过") and "【Agent 原判断】接受：looks promising" in request_msg["content"]["reason"]
     assert request_msg["content"]["new_hypothesis"] == "more of the same\n\n不要再提波动率族"
+    assert request_msg["content"]["hypothesis_evaluation"].startswith("【验收】验收：不通过")  # survives in the replayed history
     assert task.messages[-1]["tag"] == "studio.gate" and task.messages[-1]["loop_id"] == 0 and task.messages[-1]["content"]["decision"] is False
     server.apply_confirm_policy(task)
     assert replies[-1]["decision"] is False and replies[-1]["new_hypothesis"].endswith("不要再提波动率族")
