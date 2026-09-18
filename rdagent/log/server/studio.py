@@ -215,8 +215,12 @@ def cached_analysis(workspace, market):
     return data
 
 
-def refresh_dir(trace, loop_id, name):
-    return REFRESH_ROOT / hashlib.sha1(f"{trace}#{loop_id}#{name}".encode()).hexdigest()[:16]
+def refresh_dir(trace, loop_id, name, market=None):
+    """Where a factor's recomputed signal lives. The copy on the universe it was researched on keeps the
+    original folder; a copy computed on another universe (a cross-universe backtest, the gate's replication)
+    gets its own folder, so the two never overwrite each other."""
+    key = f"{trace}#{loop_id}#{name}" if not market or market == run_market(trace) else f"{trace}#{loop_id}#{name}@{market}"
+    return REFRESH_ROOT / hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
 def refreshed_meta(trace, loop_id, name):
@@ -230,8 +234,17 @@ def refreshed_meta(trace, loop_id, name):
         return None
 
 
-def signal_workspace(trace, loop_id, name, workspace):
-    """Where a factor's result.h5 is read from: the recomputed copy when there is one, else RD-Agent's workspace."""
+def signal_workspace(trace, loop_id, name, workspace, market=None):
+    """Where a factor's result.h5 is read from: the recomputed copy when there is one, else RD-Agent's workspace.
+
+    With ``market`` set to a universe other than the factor's own, the copy computed on that universe is
+    returned when it exists; otherwise the own-universe path comes back and the caller (launch_worker) has
+    the factor recomputed there before running.
+    """
+    if market and market != run_market(trace):
+        other = refresh_dir(trace, loop_id, name, market)
+        if (other / "result.h5").is_file():
+            return other
     return refresh_dir(trace, loop_id, name) if refreshed_meta(trace, loop_id, name) else Path(workspace)
 
 
@@ -444,12 +457,14 @@ def apply_search_prefilter(resolved):
     return kept, excluded, flipped
 
 
-def resolve_factor_paths(default_trace, default_loop_id, factors, prefer_refreshed=True):
+def resolve_factor_paths(default_trace, default_loop_id, factors, prefer_refreshed=True, market=None):
     """Attach workspace paths to the requested factors.
 
     Each factor may name its own ``trace``/``loop_id`` (a basket built from several rounds); otherwise the
     request-level defaults apply. Unknown names, unloaded traces, paths outside the workspace root and
-    missing result.h5 files are all rejected.
+    missing result.h5 files are all rejected. ``market`` is the universe the signals will be used on: a
+    factor researched elsewhere resolves to its copy on that universe, or is marked ``recompute_for`` so
+    the run recomputes it there first.
     """
     resolved = []
     for factor in factors:
@@ -478,13 +493,15 @@ def resolve_factor_paths(default_trace, default_loop_id, factors, prefer_refresh
             if WORKSPACE_ROOT not in path.parents:
                 raise ValueError(f"Factor {name} lives outside the RD-Agent workspace root")
             if prefer_refreshed:
-                path = signal_workspace(trace, loop_id, name, path)
+                path = signal_workspace(trace, loop_id, name, path, market)
             if not (path / "result.h5").is_file():
                 raise ValueError(f"Factor {name} has no result.h5")
         else:
             raise ValueError(f"Unknown signal kind {kind!r}")
-        resolved.append({"name": name, "kind": kind, "weight": float(factor.get("weight", 1)), "path": str(path),
-                         "trace": trace, "loop_id": loop_id})
+        entry = {"name": name, "kind": kind, "weight": float(factor.get("weight", 1)), "path": str(path), "trace": trace, "loop_id": loop_id}
+        if kind == "factor" and market and market != run_market(trace) and Path(path) != refresh_dir(trace, loop_id, name, market):
+            entry["recompute_for"] = market
+        resolved.append(entry)
     return resolved
 
 
@@ -917,10 +934,11 @@ def prepare_backtest_config(body):
         raise ValueError("Trace is not loaded on this server")
     if default_loop is not None:
         body["loop_id"] = normalize_loop_id(default_loop)
-    body["factors"] = resolve_factor_paths(default_trace, body.get("loop_id"), body.get("factors") or [])
     # The universe decides the data directory, region and exchange rules; a caller-given benchmark wins,
-    # otherwise the universe's own index is used.
+    # otherwise the universe's own index is used. Factors researched on another universe resolve to (or are
+    # marked for) their copy on this one.
     record = studio_markets.universe(str(body.get("market") or "csi300"))
+    body["factors"] = resolve_factor_paths(default_trace, body.get("loop_id"), body.get("factors") or [], market=record["market"])
     if not body.get("benchmark"):
         body["benchmark"] = record["benchmark"]
     for key in ("open_cost", "close_cost"):
@@ -978,18 +996,22 @@ def stale_signals(config):
     are left to the worker, which reports them in its own words.
     """
     stale = []
+    market = str(config.get("market") or "csi300")
     for f in config.get("factors", []):
         if f.get("kind", "factor") != "factor" or not f.get("trace"):
             continue
         signal = Path(f["path"]) / "result.h5"
         if not signal.is_file() or signal.stat().st_size == 0:
             continue
-        try:
-            end = factor_coverage(Path(f["path"]))["end"]
-        except Exception:  # noqa: BLE001
-            continue
-        if end >= str(config["end"]):
-            continue
+        needs_copy = f.get("recompute_for") == market
+        end = None
+        if not needs_copy:
+            try:
+                end = factor_coverage(Path(f["path"]))["end"]
+            except Exception:  # noqa: BLE001
+                continue
+            if end >= str(config["end"]):
+                continue
         try:
             original = Path(resolve_factor_paths(f["trace"], f["loop_id"], [{"name": f["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
         except (ValueError, KeyError, IndexError):
@@ -1031,19 +1053,21 @@ def launch_worker(folder, config, args, running_key):
         name, signal_end = "", ""
         try:
             for f in stale:
-                name, signal_end = f["name"], f["signal_end"]
-                write_json(folder / "result.json", {"status": "queued", "message": f"重算 {name} 到最新（信号只到 {signal_end}，窗口到 {config['end']}）"})
-                out = refresh_dir(f["trace"], f["loop_id"], f["name"])
+                name, signal_end = f["name"], f.get("signal_end")
+                why = f"信号只到 {signal_end}，窗口到 {config['end']}" if signal_end else f"它是在 {run_market(f['trace'])} 上研究的，先在 {market} 上算一遍"
+                write_json(folder / "result.json", {"status": "queued", "message": f"重算 {name}（{why}）"})
+                out = refresh_dir(f["trace"], f["loop_id"], f["name"], market)
                 for cached in out.glob("studio_analysis.*.json"):
                     cached.unlink()
                 run_refresh(Path(f["code_path"]), f["name"], out, market)
             refreshed = {(f["trace"], f["loop_id"], f["name"]) for f in stale}
-            current = {**config, "factors": [{**f, "path": str(refresh_dir(f["trace"], f["loop_id"], f["name"]))} if (f.get("trace"), f.get("loop_id"), f["name"]) in refreshed else f
-                                             for f in config["factors"]]}
+            current = {**config, "factors": [{k: v for k, v in {**f, "path": str(refresh_dir(f["trace"], f["loop_id"], f["name"], market))}.items() if k != "recompute_for"}
+                                             if (f.get("trace"), f.get("loop_id"), f["name"]) in refreshed else f for f in config["factors"]]}
             write_json(folder / "result.json", {"status": "queued", "message": "信号已重算到最新，开始运行"})
             start(current)
         except Exception as error:  # noqa: BLE001 - the message is the user's diagnosis
-            write_json(folder / "result.json", {"status": "failed", "error": f"重算 {name} 失败：{error}。可以把结束日改到 {signal_end} 之前再运行，或到因子库看它的 factor.py"})
+            hint = f"可以把结束日改到 {signal_end} 之前再运行，或到因子库看它的 factor.py" if signal_end else "到因子库看它的 factor.py 能否在这个股票池上运行"
+            write_json(folder / "result.json", {"status": "failed", "error": f"重算 {name} 失败：{error}。{hint}"})
 
     threading.Thread(target=refresh_then_start, name=f"studio-refresh-{running_key}", daemon=True).start()
 
@@ -1402,10 +1426,10 @@ def strategy_update(strategy_id):
                 code_path = original / "factor.py"
                 if not code_path.is_file():
                     raise ValueError("no factor.py")
-                out = refresh_dir(f["trace"], f["loop_id"], f["name"])
+                out = refresh_dir(f["trace"], f["loop_id"], f["name"], market)
                 for stale in out.glob("studio_analysis.*.json"):
                     stale.unlink()
-                run_refresh(code_path, f["name"], out, str((strategy.get("params") or {}).get("market") or run_market(f["trace"])))
+                run_refresh(code_path, f["name"], out, market)
                 refreshed.append(f["name"])
             except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                 failures.append(f"{f['name']}: {error}")

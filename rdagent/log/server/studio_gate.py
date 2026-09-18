@@ -11,10 +11,19 @@ itself can be tested without Qlib.
 """
 import math
 
-T_SIGNAL = 3.0  # |t| of the size-neutral Rank IC at the best horizon on the run's market
-T_WEAK = 2.0  # below this the factor is indistinguishable from zero
+# |t| of the size-neutral Rank IC needed at each horizon. t is scaled to n / horizon independent observations,
+# so a 20-day effect has a fifth of the evidence a 1-day effect has in the same sample; the bar comes down with
+# it rather than ruling long horizons out. Longer horizons also carry lower turnover, which is the point of them.
+T_SIGNAL_BY_HORIZON = {1: 3.0, 5: 2.5, 10: 2.0, 20: 2.0}
+T_WEAK_BY_HORIZON = {1: 2.0, 5: 1.75, 10: 1.5, 20: 1.5}  # below this the factor is indistinguishable from zero
+T_REPLICATE_BY_HORIZON = {1: 2.0, 5: 1.75, 10: 1.5, 20: 1.5}  # same sign, at least this |t| on the second market
+T_SIGNAL, T_WEAK, T_REPLICATE = T_SIGNAL_BY_HORIZON[1], T_WEAK_BY_HORIZON[1], T_REPLICATE_BY_HORIZON[1]
 IC_SIGNAL = 0.02  # |Rank IC| at that horizon: a real but smaller signal cannot pay for its own turnover
-T_REPLICATE = 2.0  # same sign, at least this |t| on the second market
+
+
+def bar(table, horizon):
+    """The bar for ``horizon`` (the 1-day bar for horizons the table does not list)."""
+    return table.get(horizon, table[1])
 DUPLICATE_CORR = 0.7  # rank correlation with a library factor from which it counts as the same signal
 RELATED_CORR = 0.5  # from which the overlap is worth mentioning
 
@@ -35,13 +44,16 @@ def best_t(analysis, key="residual_rank_ic"):
 
 
 def best_stats(analysis, key="residual_rank_ic"):
-    """(t, horizon, mean Rank IC) at the horizon with the largest |t|; see best_t."""
-    best = (None, None, None)
+    """(t, horizon, mean Rank IC) at the horizon where |t| clears its own bar by the widest margin; see best_t."""
+    best, best_ratio = (None, None, None), None
     for horizon in analysis.get("horizons") or []:
         stats = horizon.get(key) or horizon.get("rank_ic") or {}
         t = stats.get("t")
-        if t is not None and (best[0] is None or abs(t) > abs(best[0])):
-            best = (float(t), int(horizon["days"]), stats.get("mean"))
+        if t is None:
+            continue
+        ratio = abs(t) / bar(T_SIGNAL_BY_HORIZON, int(horizon["days"]))
+        if best_ratio is None or ratio > best_ratio:
+            best, best_ratio = (float(t), int(horizon["days"]), stats.get("mean")), ratio
     if best[0] is None:
         stats = analysis.get("rank_ic") or {}
         if stats.get("t") is not None:
@@ -88,12 +100,13 @@ def judge_factor(name, path, market, library, *, analyze, correlate, replicate):
     if t is None:
         out["reasons"].append("没有可用的 IC")
         return out
-    if abs(t) < T_WEAK:
-        out["reasons"].append(f"市值中性 Rank IC 的 t 值 {t:.2f}（{horizon} 日），与零区分不开")
+    t_weak, t_signal = bar(T_WEAK_BY_HORIZON, horizon), bar(T_SIGNAL_BY_HORIZON, horizon)
+    if abs(t) < t_weak:
+        out["reasons"].append(f"市值中性 Rank IC 的 t 值 {t:.2f}（{horizon} 日，线 {t_weak:g}），与零区分不开")
         return out
-    if abs(t) < T_SIGNAL:
+    if abs(t) < t_signal:
         out["level"] = "weak"
-        out["reasons"].append(f"t 值 {t:.2f}（{horizon} 日），在 2 到 3 之间，样本不足以确认")
+        out["reasons"].append(f"t 值 {t:.2f}（{horizon} 日），在 {t_weak:g} 到 {t_signal:g} 之间，样本不足以确认")
         return out
     if ic is not None and abs(ic) < IC_SIGNAL:
         out["level"] = "weak"
@@ -106,7 +119,7 @@ def judge_factor(name, path, market, library, *, analyze, correlate, replicate):
             other = replicate(name, path, second)
             t2, _ = best_t(other)
             out["t2"] = t2
-            if t2 is not None and (t2 > 0) == (t > 0) and abs(t2) >= T_REPLICATE:
+            if t2 is not None and (t2 > 0) == (t > 0) and abs(t2) >= bar(T_REPLICATE_BY_HORIZON, horizon):
                 out["replicated"] = True
                 out["reasons"].append(f"在 {second} 上复现（t {t2:.2f}）")
             else:
@@ -154,7 +167,8 @@ def gate_round(factors, market, library, *, analyze, correlate, replicate, famil
     summary = f"验收（确定性规则，不经 LLM）：{'通过' if decision else '不通过'}。" + "；".join(parts) + "。"
     hint = next_hint(verdicts, families if families is not None else [n for n, _ in library], existing)
     return {"factors": verdicts, "decision": decision, "summary": summary, "hint": hint, "market": market,
-            "second_market": SECOND_MARKET.get(market), "families": families, "thresholds": {"t_signal": T_SIGNAL, "t_weak": T_WEAK, "t_replicate": T_REPLICATE, "duplicate_corr": DUPLICATE_CORR}}
+            "second_market": SECOND_MARKET.get(market), "families": families,
+            "thresholds": {"t_signal": T_SIGNAL_BY_HORIZON, "t_weak": T_WEAK_BY_HORIZON, "t_replicate": T_REPLICATE_BY_HORIZON, "ic_signal": IC_SIGNAL, "duplicate_corr": DUPLICATE_CORR}}
 
 
 def next_hint(verdicts, families, existing=None):
@@ -176,5 +190,5 @@ def next_hint(verdicts, families, existing=None):
         lines.append("库里已有的独立信号族（各列一个代表；新假设与它们的相关要低于 0.5）：" + "、".join(families[:12]))
     if existing:
         lines.append(f"库里已有 {len(existing)} 个因子，不要再提同名或同定义的：" + "、".join(existing))
-    lines.append("验收标准：市值中性 Rank IC 在 1/5/10/20 日中最好期限的 |t| ≥ 3 且 |Rank IC| ≥ 0.02，与库里任一因子的秩相关 < 0.7，并在同区域另一个股票池上同号复现（|t| ≥ 2）。请提出机制不同的假设，而不是同一族的新参数。")
+    lines.append("验收标准：市值中性 Rank IC 在 1/5/10/20 日中最有说服力的期限上 |t| 过线（1 日 ≥ 3，5 日 ≥ 2.5，10/20 日 ≥ 2）且 |Rank IC| ≥ 0.02，与库里任一因子的秩相关 < 0.7，并在同区域另一个股票池上同号复现（1 日 |t| ≥ 2，10/20 日 ≥ 1.5）。10–20 日期限的机制换手低、门槛也低，优先考虑。请提出机制不同的假设，而不是同一族的新参数。")
     return "\n".join(lines)

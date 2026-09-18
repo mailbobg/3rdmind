@@ -841,6 +841,43 @@ def test_launch_recomputes_signals_that_stop_before_the_window(studio_client, tm
 
 
 @pytest.mark.offline
+def test_cross_universe_backtest_recomputes_the_factor_on_that_universe(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CSI300 factor requested on CSI1000 resolves to a per-universe copy, computed before the worker starts;
+    the own-universe copy is never overwritten and the next request reuses the copy."""
+    ws = tmp_path / "ws" / "f0"
+    _signal_file(ws, "2025-12-31")
+    (ws / "factor.py").write_text("print(1)")
+    trace, own = "Finance Data Building/demo", studio_module.refresh_dir("Finance Data Building/demo", 0, "STR_5")
+    other = studio_module.refresh_dir(trace, 0, "STR_5", "csi1000")
+    assert other != own and studio_module.refresh_dir(trace, 0, "STR_5", "csi300") == own  # csi300 is the trace's own universe
+    with server.app.app_context():
+        resolved = studio_module.resolve_factor_paths(None, None, [{"name": "STR_5", "weight": 1, "trace": trace, "loop_id": 0}], market="csi1000")
+        assert resolved[0]["recompute_for"] == "csi1000" and resolved[0]["path"] == str(ws)
+        assert "recompute_for" not in studio_module.resolve_factor_paths(None, None, [{"name": "STR_5", "weight": 1, "trace": trace, "loop_id": 0}], market="csi300")[0]
+    refreshed, started = [], []
+
+    def fake_refresh(code_path, name, out_dir, market="csi300"):
+        refreshed.append((name, market, Path(out_dir)))
+        _signal_file(Path(out_dir), "2025-12-31")
+        (Path(out_dir) / "meta.json").write_text(json.dumps({"name": name, "start": "2025-01-02", "end": "2025-12-31"}))
+
+    monkeypatch.setattr(studio_module, "run_refresh", fake_refresh)
+    monkeypatch.setattr(studio_module.subprocess, "Popen", lambda cmd, **k: started.append(cmd) or type("P", (), {"poll": lambda self: None, "returncode": None})())
+    body = {"factors": [{"name": "STR_5", "weight": 1, "trace": trace, "loop_id": 0}], "start": "2025-03-03", "end": "2025-12-31",
+            "market": "csi1000", "benchmark": "SH000852", "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    folder = studio_module.ROOT / response.get_json()["id"]
+    _wait_for(lambda: bool(started))
+    assert refreshed == [("STR_5", "csi1000", other)] and not (own / "result.h5").exists()
+    config = json.loads((folder / "config.json").read_text())
+    assert config["factors"][0]["path"] == str(other) and "recompute_for" not in config["factors"][0]
+    # Second request on csi1000: the copy exists, nothing is recomputed, the worker starts at once.
+    refreshed.clear(); started.clear()
+    assert studio_client.post("/studio/backtests", json=body).status_code == 202 and started and refreshed == []
+
+
+@pytest.mark.offline
 def test_signal_shortfall_names_the_short_signal() -> None:
     from rdagent.log.server.studio_worker import signal_shortfall
 
@@ -2019,6 +2056,14 @@ def test_gate_judges_factors_by_t_duplication_and_replication() -> None:
     assert studio_gate.best_t(analysis(3.5)) == (3.5, 5)
     assert studio_gate.best_t({"days": 400, "rank_ic": {"mean": 0.02, "ir": 0.1}}) == (pytest.approx(2.0), 1)
     assert studio_gate.best_t({}) == (None, None)
+    # Horizon-aware bars: a 20-day t of 2.2 clears its bar (2.0) while a 1-day t of 2.2 does not (3.0); the
+    # horizon is chosen by how far |t| clears its own bar, not by raw |t|.
+    long_run = {"days": 800, "horizons": [{"days": 1, "residual_rank_ic": {"t": 2.6, "mean": 0.01}}, {"days": 20, "residual_rank_ic": {"t": 2.2, "mean": 0.03}}]}
+    assert studio_gate.best_stats(long_run) == (2.2, 20, 0.03)
+    verdict20 = studio_gate.judge_factor("L", "/ws/L", "nasdaq100", [], analyze=lambda p, m: long_run, correlate=None, replicate=None)
+    assert verdict20["level"] == "signal" and verdict20["horizon"] == 20
+    short_only = {"days": 800, "horizons": [{"days": 1, "residual_rank_ic": {"t": 2.2, "mean": 0.03}}]}
+    assert studio_gate.judge_factor("S", "/ws/S", "nasdaq100", [], analyze=lambda p, m: short_only, correlate=None, replicate=None)["level"] == "weak"
     analyses = {"NEW": analysis(4.0), "COPY": analysis(6.0), "WEAK": analysis(2.4), "DEAD": analysis(0.8), "LOCAL": analysis(-3.6), "TINY": analysis(5.0, ic=0.012)}
     others = {"csi1000": {"NEW": analysis(2.7), "LOCAL": analysis(0.3)}}
     corr = {"NEW": 0.31, "COPY": 0.92, "WEAK": 0.1, "DEAD": 0.0, "LOCAL": -0.55, "TINY": 0.2}
@@ -2038,6 +2083,7 @@ def test_gate_judges_factors_by_t_duplication_and_replication() -> None:
     assert gate["decision"] is True and gate["second_market"] == "csi1000"
     new = next(f for f in gate["factors"] if f["name"] == "NEW")
     assert new["t"] == 4.0 and new["horizon"] == 5 and new["ic"] == 0.03 and new["t2"] == 2.7 and new["replicated"] is True and new["corr"] == 0.31
+    assert gate["thresholds"]["t_signal"] == {1: 3.0, 5: 2.5, 10: 2.0, 20: 2.0}
     local = next(f for f in gate["factors"] if f["name"] == "LOCAL")
     assert local["replicated"] is False and "增量有限" in "；".join(local["reasons"])
     assert "COPY ≈ RVOL_20" in gate["hint"] and "WEAK、DEAD" in gate["hint"] and "RVOL_20" in gate["hint"] and "通过" in gate["summary"]

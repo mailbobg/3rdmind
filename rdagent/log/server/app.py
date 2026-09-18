@@ -459,7 +459,8 @@ def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> N
                 existing = sorted({f["name"] for f in factor_library(rdagent_processes, log_folder_path) if f.get("market") == market and not (f["trace"] == trace and f["loop_id"] == round_["loop_id"])})
 
                 def replicate(name, path, second):
-                    out = refresh_dir(trace, f"gate:{second}", name)
+                    # The copy on the second universe is the same one a cross-universe backtest would use.
+                    out = refresh_dir(trace, round_["loop_id"], name, second)
                     if not (out / "result.h5").is_file():
                         run_refresh(Path(path) / "factor.py", name, out, second)
                     return analyze_factor(out, second)
