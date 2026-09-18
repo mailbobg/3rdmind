@@ -165,11 +165,11 @@ export function FactorsPage() {
                   ]} />
                   {selected.analysis.horizons?.length ? (
                     <>
-                      <DataTable label={t("多期限 Rank IC")} head={[[t("预测期限")], ["Rank IC", "end"], ["ICIR", "end"], [t("t 值"), "end"], [t("残差 Rank IC"), "end"], [t("残差 t"), "end"]]}
+                      <DataTable label={t("多期限 Rank IC")} head={[[t("期限")], ["Rank IC", "end"], ["ICIR", "end"], [t("t 值"), "end"], [t("残差 Rank IC"), "end"], [t("残差 t"), "end"]]}
                         rows={selected.analysis.horizons.map((h) => {
                           const tone = (x?: number | null) => (x == null ? "text-muted" : Math.abs(x) >= 3 ? "text-success" : Math.abs(x) >= 2 ? "" : "text-danger");
                           return { key: String(h.days), cells: [
-                            <span key="d" className="tabular-nums">{t("{0} 日", [h.days])}{selected.analysis!.verdict?.best_horizon === h.days ? <span className="text-muted"> ★</span> : null}</span>,
+                            <span key="d" className="whitespace-nowrap tabular-nums">{t("{0} 日", [h.days])}{selected.analysis!.verdict?.best_horizon === h.days ? <span className="text-muted"> ★</span> : null}</span>,
                             <Signed key="r" value={h.rank_ic?.mean} />,
                             <span key="ir" className="tabular-nums">{h.rank_ic?.ir == null ? "—" : h.rank_ic.ir.toFixed(3)}</span>,
                             <span key="t" className={`tabular-nums ${tone(h.rank_ic?.t)}`}>{h.rank_ic?.t == null ? "—" : h.rank_ic.t.toFixed(2)}</span>,

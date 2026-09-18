@@ -950,4 +950,5 @@ export const EN: Record<string, string> = {
   "期限 N 日 = 下一收盘买入、持有 N 日的收益。t 值按 N 日重叠标签折算成 ICIR × √(天数 ÷ N)。残差 = 每天对 log 成交额做截面回归后的剩余，剥掉市场涨跌和市值方向。★ 是 t 最高的期限，回测时把“预测期限”设成它。": "Horizon N = return from buying at the next close and holding N days. t accounts for overlapping N-day labels as ICIR × √(days ÷ N). Residual = what is left after a daily cross-sectional regression on log traded value, stripping the market move and the size tilt. ★ marks the highest t; set the backtest's horizon to it.",
   "这份分析是旧版算的，还没有多期限和残差 IC。": "This analysis predates horizons and residual IC.",
   "重新计算": "Recompute",
+  "期限": "Horizon",
 };
