@@ -294,6 +294,28 @@ def test_resume_appends_to_the_same_trace(studio_client, tmp_path: Path, monkeyp
 
 
 @pytest.mark.offline
+def test_combine_drops_incomplete_rows_only_for_the_columns_it_uses() -> None:
+    import numpy as np
+    import pandas as pd
+    from rdagent.log.server.studio_worker import combine, singles_failure
+
+    days = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])
+    index = pd.MultiIndex.from_product([days, ["A", "B", "C"]], names=["datetime", "instrument"])
+    ranks = pd.DataFrame({"long": np.tile([0.2, 0.5, 0.8], 3), "short": np.r_[np.tile([0.8, 0.5, 0.2], 2), [np.nan] * 3]}, index=index)
+    prepared = {"ranks": ranks, "label": None, "prior_day": days[0], "end_day": days[-1], "calendar": days}
+    model = {"method": "rank"}
+    alone, _ = combine(prepared, ["long"], [1.0], model, log=lambda *_: None)
+    assert alone.index.get_level_values("datetime").nunique() == 3   # the long factor is not cut by the short one
+    with pytest.raises(ValueError):                                   # the pair only covers two days, short of the window
+        combine(prepared, ["long", "short"], [1.0, 1.0], model, log=lambda *_: None)
+    prepared["end_day"] = days[1]
+    both, _ = combine(prepared, ["long", "short"], [1.0, 1.0], model, log=lambda *_: None)
+    assert both.index.get_level_values("datetime").nunique() == 2 and both.loc[(days[0], "A")] == pytest.approx(0.5)
+    message = singles_failure({"F1": {"error": "signal ends 2025-12-31"}, "F2": {"error": "signal ends 2025-12-31"}, "F3": {"error": "no rows"}})
+    assert message.startswith("No candidate could be backtested alone") and "F1、F2：signal ends 2025-12-31" in message and "F3：no rows" in message
+
+
+@pytest.mark.offline
 def test_signal_diagnosis_scores_each_signal_on_the_window() -> None:
     import pandas as pd
     from rdagent.log.server import studio_worker as worker

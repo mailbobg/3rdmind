@@ -124,8 +124,19 @@ export function BacktestPage() {
     if (chosen.length < 2) { setPageError(t("至少勾选两个因子再开始搜索。")); return; }
     setConfirming(true);
     try {
-      basket.replace(chosen.map((r) => ({ name: r.name, trace: r.trace, loop_id: r.loop_id, kind: r.kind, weight: r.weight })));
-      const accepted = await searches.run({ factors: chosen.map((r) => ({ name: r.name, trace: r.trace, loop_id: r.loop_id, kind: r.kind, weight: Number(r.weight) })), model: { method: "rank" }, ...params, search: { objective, prefilter: false } });
+      const members: FactorWeight[] = chosen.map((r) => ({ name: r.name, trace: r.trace, loop_id: r.loop_id, kind: r.kind, weight: Number(r.weight) }));
+      basket.replace(members);
+      // A candidate whose signal stops before the window's end cannot be backtested alone on it; recompute
+      // those first (重算到最新), then search on a window every member covers.
+      const stale = members.filter((f) => { const c = coverageOf(f); return !!c && !!params.end && c.end < params.end; });
+      let end = params.end;
+      if (stale.length) {
+        setAutoNote(t("先把 {0} 个信号重算到最新（{1}），再开始搜索…", [stale.length, stale.map((f) => f.name).join("、")]));
+        await refreshStale(stale);
+        const ends = await Promise.all(stale.map((f) => studio.factorCoverage(f).then((c) => c.end).catch(() => null)));
+        end = [env?.end, ...ends].filter((d): d is string => !!d).sort()[0] || params.end;
+      }
+      const accepted = await searches.run({ factors: members, model: { method: "rank" }, ...params, end, search: { objective, prefilter: false } });
       if (accepted) { setPreview(null); layout.openResults(); }
     } finally { setConfirming(false); }
   };
@@ -539,7 +550,7 @@ export function BacktestPage() {
                     <span key="r" className="text-[11px]">{r.checked ? (r.reason || t("进入搜索")) : r.reason}</span>,
                   ] }))} />
                 <div className="mm-row" style={{ marginTop: 8 }}>
-                  <Btn kind="primary" disabled={confirming} onClick={confirmSearch}>{confirming ? t("启动中…") : t("确认并开始搜索（{0} 个）", [preview.filter((r) => r.checked).length])}</Btn>
+                  <Btn kind="primary" disabled={confirming} onClick={confirmSearch}>{confirming ? (refreshing ? t("重算过期信号中…") : t("启动中…")) : t("确认并开始搜索（{0} 个）", [preview.filter((r) => r.checked).length])}</Btn>
                   <Btn kind="text" onClick={() => setPreview(null)}>{t("取消")}</Btn>
                 </div>
                 <Hint>{t("这是软淘汰：这次没勾的不代表以后没用，换一批队友或换个窗口可以再试。")}</Hint>

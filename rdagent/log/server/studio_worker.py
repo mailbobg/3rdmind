@@ -439,8 +439,10 @@ def prepare(config):
     features = features[features.index.get_level_values("instrument").isin(universe)]
     if features.empty:
         raise ValueError("No factor observations inside the selected universe")
-    # Require all selected factors on a row; do not silently treat missing data as zero.
-    ranks = features.groupby(level="datetime").rank(pct=True).dropna()
+    # Cross-sectional percentile ranks per signal. Rows are not dropped here: a variant only needs its own
+    # columns, so combine() drops incomplete rows for the columns it uses. Otherwise one factor that stops
+    # early (not yet 重算到最新) would cut every other candidate short with it.
+    ranks = features.groupby(level="datetime").rank(pct=True)
     # Forward close-to-close return over ``horizon`` days from the next close; at 1 this is the label Qlib's
     # templates use with close execution.
     horizon = int(config.get("horizon", 1))
@@ -460,7 +462,8 @@ def combine(prepared, columns, weights, model, log=print):
     """
     import numpy as np
 
-    ranks = prepared["ranks"][list(columns)]
+    # Require every selected signal on a row; missing data is never treated as zero.
+    ranks = prepared["ranks"][list(columns)].dropna()
     if model["method"] == "lgbm":
         score, report = train_lgbm_signal(ranks, prepared["label"], model, log=log)
         score = score[score.index.get_level_values("datetime") >= prepared["prior_day"]]
@@ -554,7 +557,7 @@ def signal_diagnosis(prepared, score):
     plus the pairwise correlation of the ranked signals over the window. Together they say which signals
     pull their weight, which point the wrong way, and which pairs are near duplicates.
     """
-    window = prepared["ranks"][prepared["ranks"].index.get_level_values("datetime") >= prepared["prior_day"]]
+    window = prepared["ranks"][prepared["ranks"].index.get_level_values("datetime") >= prepared["prior_day"]].dropna()
     label = prepared["label"]
     signals = []
     for factor in prepared["factors"]:
@@ -815,6 +818,15 @@ def diagnose(config, progress=lambda *_: None):
     return clean({"base": base, "alone": alone, "without": without, "names": names, "method": model["method"]})
 
 
+def singles_failure(singles):
+    """The message when no candidate could be backtested alone: each distinct cause with the names it hit."""
+    by_cause = {}
+    for name, metrics in singles.items():
+        by_cause.setdefault(str(metrics.get("error", "unknown error")), []).append(name)
+    detail = "；".join(f"{'、'.join(names)}：{cause}" for cause, names in by_cause.items())
+    return f"No candidate could be backtested alone on the search window. {detail}"
+
+
 def split_window(calendar, start, end, ratio):
     """Search on the first ``ratio`` of the trading days in [start, end], validate on the rest."""
     import pandas as pd
@@ -877,7 +889,7 @@ def search(config, progress=lambda *_: None):
         record("single", [name], singles[name], tried=name)
     usable = [n for n in names if "error" not in singles[n]]
     if not usable:
-        raise ValueError("No candidate could be backtested alone on the search window")
+        raise ValueError(singles_failure(singles))
     current = [max(usable, key=lambda n: score_of(singles[n]))]
     current_metrics = singles[current[0]]
     record("start", current, current_metrics, accepted=True)
