@@ -428,7 +428,7 @@ export function BacktestPage() {
               <Field label={t("持股数")} hint={t("每天按评分持有前 topk 只")}><NumberInput value={params.topk} onChange={(v) => set("topk", v)} min={1} max={500} /></Field>
               <Field label={t("每日换出")} hint={t("每天最多换出 n_drop 只")}><NumberInput value={params.n_drop} onChange={(v) => set("n_drop", v)} min={0} max={500} /></Field>
               <Field label={t("预测期限（天）")} hint={t("标签看多少个交易日之后的收益：LightGBM 的训练目标和报告的 IC 都按它算。5–10 天的 IC 通常比次日高，且与更低的换手匹配")}><NumberInput value={params.horizon} onChange={(v) => set("horizon", v)} min={1} max={20} /></Field>
-              <Field label={t("调仓间隔（天）")} hint={t("信号每隔多少个交易日刷新一次，也是最短持有天数；5 = 周频调仓。间隔内 TopkDropout 不会换股")}><NumberInput value={params.rebalance} onChange={(v) => set("rebalance", v)} min={1} max={20} /></Field>
+              <Field label={t("调仓间隔（天）")} hint={t("信号每隔多少个交易日刷新一次，也是最短持有天数；5 = 周频。刷新日按 n_drop 换股，间隔内评分不变，只把上次没换完的补完（每天最多 n_drop 只）；n_drop 设成持股数就是刷新日一次换完")}><NumberInput value={params.rebalance} onChange={(v) => set("rebalance", v)} min={1} max={20} /></Field>
               <Field label={t("初始资金")}><NumberInput value={params.account} onChange={(v) => set("account", v)} min={1000} step={100000} /></Field>
               <Field label={t("买入费率")} hint={t("0.0005 = 万分之五")}><NumberInput value={params.open_cost} onChange={(v) => set("open_cost", v)} min={0} max={0.1} step={0.0001} /></Field>
               <Field label={t("卖出费率")} hint={universes.find((u) => u.market === params.market)?.region === "us" ? t("美股经纪佣金接近零，默认万分之一") : t("0.0015 含印花税")}><NumberInput value={params.close_cost} onChange={(v) => set("close_cost", v)} min={0} max={0.1} step={0.0001} /></Field>

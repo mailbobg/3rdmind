@@ -927,7 +927,7 @@ export const EN: Record<string, string> = {
   "预测期限（天）": "Horizon (days)",
   "标签看多少个交易日之后的收益：LightGBM 的训练目标和报告的 IC 都按它算。5–10 天的 IC 通常比次日高，且与更低的换手匹配": "How many trading days ahead the label looks: the LightGBM target and the reported IC follow it. 5–10 day IC is usually higher than next-day and pairs with lower turnover",
   "调仓间隔（天）": "Rebalance every (days)",
-  "信号每隔多少个交易日刷新一次，也是最短持有天数；5 = 周频调仓。间隔内 TopkDropout 不会换股": "Trading days between signal refreshes, also the minimum hold; 5 = weekly. TopkDropout swaps nothing in between",
+  "信号每隔多少个交易日刷新一次，也是最短持有天数；5 = 周频。刷新日按 n_drop 换股，间隔内评分不变，只把上次没换完的补完（每天最多 n_drop 只）；n_drop 设成持股数就是刷新日一次换完": "Trading days between signal refreshes, also the minimum hold; 5 = weekly. Swaps happen on refresh days up to n_drop; in between the scores stay put and only unfinished swaps complete (n_drop a day at most). Set n_drop to the number of holdings to swap everything on the refresh day",
   "预测期限": "horizon",
   "调仓间隔": "rebalance",
   " · 预测期限 {0} 天": " · horizon {0}d",
