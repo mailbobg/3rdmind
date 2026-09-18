@@ -956,6 +956,4 @@ export const EN: Record<string, string> = {
   "因子库里只有 {0} 个因子有可用信号（{1} 个是噪声，{2} 个还没算指标，已在后台分析，稍后再点），不够搜索。": "Only {0} library factors carry a usable signal ({1} are noise, {2} are not analysed yet and are being analysed in the background; try again shortly): not enough to search.",
   "Rank IC 的 t 值不到 2，与零区分不开": "Rank IC t below 2: indistinguishable from zero",
   "还没算单因子指标（后台分析中）": "Not analysed yet (running in the background)",
-  "先把 {0} 个信号重算到最新（{1}），再开始搜索…": "Recomputing {0} signal(s) to the latest data first ({1}), then searching…",
-  "重算过期信号中…": "Recomputing stale signals…",
 };

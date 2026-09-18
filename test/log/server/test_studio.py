@@ -769,6 +769,75 @@ def test_recent_context_places_the_last_week_in_the_runs_history() -> None:
     assert recent_context({"rows": result["rows"][:8]}) is None
 
 
+def _signal_file(folder: Path, end: str) -> None:
+    days = pd.bdate_range("2025-01-02", end)
+    index = pd.MultiIndex.from_product([days, ["SH600000", "SZ000001"]], names=["datetime", "instrument"])
+    folder.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"x": range(len(index))}, index=index, dtype=float).to_hdf(folder / "result.h5", key="data")
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> None:
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError("condition not met in time")
+
+
+@pytest.mark.offline
+def test_launch_recomputes_signals_that_stop_before_the_window(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ws = tmp_path / "ws" / "f0"
+    _signal_file(ws, "2025-06-30")
+    (ws / "factor.py").write_text("print(1)")
+    refreshed, started = [], []
+
+    def fake_refresh(code_path, name, out_dir, market="csi300"):
+        refreshed.append((Path(code_path).name, name, market))
+        _signal_file(Path(out_dir), "2025-12-31")
+        (Path(out_dir) / "meta.json").write_text(json.dumps({"name": name, "start": "2025-01-02", "end": "2025-12-31"}))
+
+    monkeypatch.setattr(studio_module, "run_refresh", fake_refresh)
+    monkeypatch.setattr(studio_module.subprocess, "Popen", lambda cmd, **k: started.append(cmd) or type("P", (), {"poll": lambda self: None, "returncode": None})())
+    body = {"factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}], "start": "2025-03-03", "end": "2025-12-31",
+            "market": "csi300", "benchmark": "SH000300", "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    folder = studio_module.ROOT / response.get_json()["id"]
+    _wait_for(lambda: bool(started))
+    assert refreshed == [("factor.py", "STR_5", "csi300")]
+    config = json.loads((folder / "config.json").read_text())
+    assert config["factors"][0]["path"] == str(studio_module.refresh_dir("Finance Data Building/demo", 0, "STR_5"))
+    assert json.loads((folder / "result.json").read_text())["message"].startswith("信号已重算")
+    # A window the signal already covers starts the worker at once, without recomputing anything.
+    refreshed.clear(); started.clear()
+    response = studio_client.post("/studio/backtests", json={**body, "end": "2025-06-30"})
+    assert response.status_code == 202 and started and refreshed == []
+    # When recomputing fails the job fails with the cause and what to do instead of a coverage error later.
+    monkeypatch.setattr(studio_module, "run_refresh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("factor.py exited 1")))
+    started.clear()
+    # The refreshed copy from the first run would cover the window; point the test at a longer one.
+    response = studio_client.post("/studio/backtests", json={**body, "end": "2026-06-30"})
+    folder = studio_module.ROOT / response.get_json()["id"]
+    _wait_for(lambda: json.loads((folder / "result.json").read_text()).get("status") == "failed")
+    error = json.loads((folder / "result.json").read_text())["error"]
+    assert "重算 STR_5 失败" in error and "factor.py exited 1" in error and "2025-12-31" in error and started == []
+
+
+@pytest.mark.offline
+def test_signal_shortfall_names_the_short_signal() -> None:
+    from rdagent.log.server.studio_worker import signal_shortfall
+
+    days = pd.to_datetime(["2025-01-02", "2025-01-03"])
+    index = pd.MultiIndex.from_product([days, ["A", "B"]], names=["datetime", "instrument"])
+    ranks = pd.DataFrame({"long": [0.2, 0.8, 0.3, 0.7], "short": [0.5, 0.5, float("nan"), float("nan")]}, index=index)
+    message = signal_shortfall(ranks, "2025-01-03")
+    assert "short（到 2025-01-02）" in message and "long" not in message and "重算到最新" in message
+    assert signal_shortfall(ranks, "2025-01-02") == ""
+
+
 @pytest.mark.offline
 def test_strategy_recent_reads_the_newest_completed_run(studio_client, tmp_path: Path) -> None:
     job = studio_module.ROOT / "55555555-5555-5555-5555-555555555555"

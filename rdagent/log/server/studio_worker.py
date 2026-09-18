@@ -473,8 +473,25 @@ def combine(prepared, columns, weights, model, log=print):
     score = score.dropna().sort_index()
     if score.empty:
         raise ValueError("Selected factors have no complete observations")
-    require_signal_coverage(score.index.get_level_values("datetime"), prepared["prior_day"], prepared["end_day"])
+    try:
+        require_signal_coverage(score.index.get_level_values("datetime"), prepared["prior_day"], prepared["end_day"])
+    except ValueError as error:
+        raise ValueError(f"{signal_shortfall(prepared['ranks'][list(columns)], prepared['end_day'])} {error}") from None
     return score, report
+
+
+def signal_shortfall(ranks, end_day):
+    """Name the signals that stop before ``end_day`` and say what to do about it, for the coverage error."""
+    import pandas as pd
+
+    short = []
+    for column in ranks.columns:
+        dates = ranks[column].dropna().index.get_level_values("datetime")
+        if len(dates) and dates.max() < pd.Timestamp(end_day):
+            short.append(f"{column}（到 {dates.max().date()}）")
+    if not short:
+        return ""
+    return f"信号 {'、'.join(short)} 没有覆盖到 {pd.Timestamp(end_day).date()}：把它重算到最新（因子库 → 重算到最新），或把结束日改到它的最后一天之前。"
 
 
 def hold_scores(score, every):

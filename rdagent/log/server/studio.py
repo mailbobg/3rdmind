@@ -6,6 +6,7 @@ import re
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -972,24 +973,87 @@ def _result_poll(path, *, running_key=None, label_done=None):
     return poll
 
 
+def stale_signals(config):
+    """Factor signals that stop before the window's end and can be recomputed (their round kept a factor.py).
+
+    Each entry is the config's factor plus ``signal_end`` and ``code_path``. Signals whose file cannot be read
+    are left to the worker, which reports them in its own words.
+    """
+    stale = []
+    for f in config.get("factors", []):
+        if f.get("kind", "factor") != "factor" or not f.get("trace"):
+            continue
+        try:
+            end = factor_coverage(Path(f["path"]))["end"]
+        except Exception:  # noqa: BLE001
+            continue
+        if end >= str(config["end"]):
+            continue
+        try:
+            original = Path(resolve_factor_paths(f["trace"], f["loop_id"], [{"name": f["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
+        except (ValueError, KeyError, IndexError):
+            continue
+        if (original / "factor.py").is_file():
+            stale.append({**f, "signal_end": end, "code_path": str(original / "factor.py")})
+    return stale
+
+
+def launch_worker(folder, config, args, running_key):
+    """Write the job folder and start studio_worker.py on it.
+
+    Signals that stop before the window's end are recomputed first (the same 重算到最新 as the factor page),
+    on a thread, and the job says which one it is recomputing meanwhile; the worker then reads the fresh
+    copies. Raises OSError only when the worker itself cannot start straight away.
+    """
+    write_json(folder / "config.json", config)
+    write_json(folder / "result.json", {"status": "queued"})
+
+    def start(current):
+        write_json(folder / "config.json", current)
+        with (folder / "stdout.log").open("a") as log:
+            PROCESSES[running_key] = subprocess.Popen(
+                [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_worker.py")), str(folder), *args],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+
+    stale = stale_signals(config)
+    if not stale:
+        try:
+            start(config)
+        except OSError as error:
+            write_json(folder / "result.json", {"status": "failed", "error": str(error)})
+            raise
+        return
+    market = str(config.get("market") or "csi300")
+
+    def refresh_then_start():
+        name, signal_end = "", ""
+        try:
+            for f in stale:
+                name, signal_end = f["name"], f["signal_end"]
+                write_json(folder / "result.json", {"status": "queued", "message": f"重算 {name} 到最新（信号只到 {signal_end}，窗口到 {config['end']}）"})
+                out = refresh_dir(f["trace"], f["loop_id"], f["name"])
+                for cached in out.glob("studio_analysis.*.json"):
+                    cached.unlink()
+                run_refresh(Path(f["code_path"]), f["name"], out, market)
+            refreshed = {(f["trace"], f["loop_id"], f["name"]) for f in stale}
+            current = {**config, "factors": [{**f, "path": str(refresh_dir(f["trace"], f["loop_id"], f["name"]))} if (f.get("trace"), f.get("loop_id"), f["name"]) in refreshed else f
+                                             for f in config["factors"]]}
+            write_json(folder / "result.json", {"status": "queued", "message": "信号已重算到最新，开始运行"})
+            start(current)
+        except Exception as error:  # noqa: BLE001 - the message is the user's diagnosis
+            write_json(folder / "result.json", {"status": "failed", "error": f"重算 {name} 失败：{error}。可以把结束日改到 {signal_end} 之前再运行，或到因子库看它的 factor.py"})
+
+    threading.Thread(target=refresh_then_start, name=f"studio-refresh-{running_key}", daemon=True).start()
+
+
 def launch_backtest(config):
     """Write a job folder and start the worker; returns the job id. Raises OSError when the worker cannot start."""
     ROOT.mkdir(parents=True, exist_ok=True)
     job_id = str(uuid.uuid4())
     folder = job_folder(job_id)
     folder.mkdir()
-    write_json(folder / "config.json", config)
-    write_json(folder / "result.json", {"status": "queued"})
-    try:
-        with (folder / "stdout.log").open("w") as log:
-            PROCESSES[job_id] = subprocess.Popen(
-                [os.environ.get("STUDIO_PYTHON", sys.executable),
-                 str(Path(__file__).with_name("studio_worker.py")), str(folder)],
-                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-            )
-    except OSError as error:
-        write_json(folder / "result.json", {"status": "failed", "error": str(error)})
-        raise
+    launch_worker(folder, config, [], job_id)
     names = [f["name"] for f in config.get("factors", [])]
     studio_jobs.track("backtest", f"回测 {' + '.join(names[:2])}{f' +{len(names) - 2}' if len(names) > 2 else ''}",
                       _result_poll(folder / "result.json", running_key=job_id, label_done=lambda d: {"total_return": (d.get("metrics") or {}).get("total_return")}),
@@ -1069,17 +1133,9 @@ def searches():
     job_id = str(uuid.uuid4())
     folder = search_folder(job_id)
     folder.mkdir()
-    write_json(folder / "config.json", config)
-    write_json(folder / "result.json", {"status": "queued"})
     try:
-        with (folder / "stdout.log").open("w") as log:
-            PROCESSES[f"search:{job_id}"] = subprocess.Popen(
-                [os.environ.get("STUDIO_PYTHON", sys.executable),
-                 str(Path(__file__).with_name("studio_worker.py")), str(folder), "--search"],
-                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-            )
+        launch_worker(folder, config, ["--search"], f"search:{job_id}")
     except OSError as error:
-        write_json(folder / "result.json", {"status": "failed", "error": str(error)})
         return jsonify({"error": str(error)}), 500
     studio_jobs.track("search", f"组合搜索 {len(config['factors'])} 个候选",
                       _result_poll(folder / "result.json", running_key=f"search:{job_id}", label_done=lambda d: {"recommended": (d.get("recommended") or {}).get("members")}),
