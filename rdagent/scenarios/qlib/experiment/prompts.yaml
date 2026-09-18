@@ -31,6 +31,12 @@ qlib_factor_interface: |-
   Your python code should follow the interface to better interact with the user's system.
   Your python code should contain the following part: the import part, the function part, and the main part. You should write a main function name: "calculate_{function_name}" and call this function in "if __name__ == __main__" part. Don't write any try-except block in your python code. The user will catch the exception message and provide the feedback to you.
   User will write your python code into a python file and execute the file directly with "python {your_file_name}.py". You should calculate the factor values and save the result into a HDF5(H5) file named "result.h5" in the same directory as your python file. The result file is a HDF5(H5) file containing a pandas dataframe. The index of the dataframe is the "datetime" and "instrument", and the single column name is the factor name,and the value is the factor value. The result file should be saved in the same directory as your python file.
+  Runtime environment: Python 3.11, pandas 3.x, numpy 2.x. Write for these versions:
+  - `DataFrame.stack()` accepts no `dropna` or `future_stack` argument: call `.stack()` and then `.dropna()` yourself.
+  - `DataFrame.applymap` is gone (use `.map`); `fillna(method=...)` is gone (use `.ffill()` / `.bfill()`); string columns have the `str` dtype, not `object`.
+  - Never leave the result all NaN: rolling windows must be shorter than the data (the debug data spans about half a year); set `min_periods` well below the window and check `result.notna().sum() > 0` before saving.
+  - `rolling(...).apply(python_function)` over 250k+ rows is too slow: prefer vectorised `rolling(...).mean()/std()/cov()/corr()`, or pivot to a wide (datetime × instrument) frame and use numpy.
+  - Cross-sectional (per-day) statistics: `groupby(level="datetime")`; per-stock time series: `groupby(level="instrument")` — say which one each step uses.
 
 qlib_factor_strategy: |-
   Ensure that for every step of data processing, the data format (including indexes) is clearly explained through comments.
