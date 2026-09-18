@@ -1,0 +1,32 @@
+{
+  "name": "rd-agent-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 8081",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gravity-ui/icons": "^2.22.0",
+    "@heroui/react": "^3.2.5",
+    "@heroui/styles": "^3.2.5",
+    "@tailwindcss/vite": "^4.3.3",
+    "echarts": "^6.1.0",
+    "katex": "^0.18.7",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router-dom": "^7.18.3",
+    "tailwind-variants": "^3.3.1",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.0"
+  }
+}

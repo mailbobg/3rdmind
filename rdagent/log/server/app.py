@@ -1,0 +1,1110 @@
+import hmac
+import json
+import logging
+import os
+import random
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from collections import defaultdict
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
+from multiprocessing import Process, Queue
+from pathlib import Path
+from queue import Empty
+
+import randomname
+import typer
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    make_response,
+    redirect,
+    request,
+    send_file,
+    send_from_directory,
+    url_for,
+)
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+
+from rdagent.log.server.security import (
+    SCENARIO_TARGETS,
+    parse_competition,
+    resolve_within,
+    validate_scenario,
+    validate_upload_filename,
+)
+from rdagent.log.storage import FileStorage
+from rdagent.log.ui.conf import UI_SETTING
+from rdagent.log.ui.storage import WebStorage
+
+app = Flask(__name__, static_folder=str(Path(UI_SETTING.static_path).resolve()))
+from rdagent.log.server import studio_jobs, studio_llm, studio_markets
+from rdagent.log.server.studio import studio
+
+app.register_blueprint(studio)
+if UI_SETTING.cors_allowed_origins:
+    CORS(app, origins=UI_SETTING.cors_allowed_origins, supports_credentials=True)
+app.config["UI_SERVER_PORT"] = 19899
+app.config["MAX_CONTENT_LENGTH"] = UI_SETTING.max_upload_mb * 1024 * 1024
+app.config["AUTH_TOKEN"] = UI_SETTING.server_auth_token
+
+_YELLOW = "\033[33m"
+_RESET = "\033[0m"
+
+_PUBLIC_ENDPOINTS = {"favicon", "index", "server_static_files", "static"}
+
+
+@app.before_request
+def _require_authentication() -> Response | tuple[Response, int] | None:
+    token = app.config.get("AUTH_TOKEN", "")
+    if not token or request.method == "OPTIONS" or request.endpoint in _PUBLIC_ENDPOINTS:
+        return None
+
+    authorization = request.headers.get("Authorization", "")
+    header_token = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+    provided_token = header_token or request.cookies.get("rdagent_auth", "")
+    if not provided_token or not hmac.compare_digest(provided_token, token):
+        return jsonify({"error": "Authentication required"}), 401
+    return None
+
+
+class _YellowWarningFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        if record.levelno == logging.WARNING:
+            record.levelname = f"{_YELLOW}{record.levelname}{_RESET}"
+        return super().format(record)
+
+
+def _configure_app_logger() -> None:
+    formatter = _YellowWarningFormatter(
+        fmt="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    for handler in app.logger.handlers:
+        handler.setFormatter(formatter)
+
+
+_configure_app_logger()
+
+
+_TARGETS_WITHOUT_USER_INTERACTION = {"general_model", "fin_factor_report"}
+
+
+class RDAgentTask:
+    def __init__(
+        self,
+        target_name: str,
+        kwargs: dict,
+        stdout_path: str,
+        log_trace_path: str,
+        scenario: str,
+        trace_name: str,
+        ui_server_port: int | None = None,
+        create_process: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self.target_name = target_name
+        self.kwargs = kwargs
+        # Per-run settings (e.g. the instrument universe) delivered as environment variables, applied in the
+        # child before any rdagent settings module is imported so pydantic-settings picks them up.
+        # The Studio's saved LLM settings (studio_llm) sit beneath the run's own variables.
+        self.env: dict[str, str] = {**studio_llm.env(), **(env or {})}
+        if sys.platform == "darwin":
+            # Qlib's PyTorch models spawn DataLoader workers (n_jobs 20 in the templates, sized for the Docker
+            # image); forked workers segfault on macOS, so local runs train in-process unless told otherwise.
+            for kind in ("FACTOR", "MODEL", "QUANT"):
+                self.env.setdefault(f"QLIB_{kind}_N_JOBS", "0")
+        # How confirmations are handled while the run is unattended: mode "all" waits for the user on every
+        # request, "hypothesis" only on hypotheses (instruction, features and verdicts pass as proposed),
+        # "auto" never waits; timeout_min (0 = never) passes an unanswered request as proposed after that long.
+        self.confirm: dict = {"mode": "hypothesis", "timeout_min": 30, "instruction": ""}
+        self.stdout_path = stdout_path
+        self.log_trace_path = log_trace_path
+        self.scenario = scenario
+        self.trace_name = trace_name
+        self.ui_server_port = ui_server_port
+        self.process: Process | None = None
+
+        # Two IPC queues for user interaction.
+        # - `user_request_q`: rdagent subprocess -> server (dicts to render on frontend)
+        # - `user_response_q`: server -> rdagent subprocess (user input dicts)
+        # NOTE: Use multiprocessing.Queue because rdagent is started as a separate process.
+        self.user_request_q: Queue = Queue(maxsize=1024)
+        self.user_response_q: Queue = Queue(maxsize=1024)
+
+        if create_process:
+            self.process = Process(
+                target=self._run,
+                name=f"rdagent:{self.scenario}:{self.trace_name}",
+            )
+        self.messages: list[dict] = []
+        self.pointers: defaultdict[str, int] = defaultdict(int)
+
+    def start(self) -> None:
+        if self.process is not None:
+            self.process.start()
+
+    def is_alive(self) -> bool:
+        return self.process is not None and self.process.is_alive()
+
+    def get_end_code(self) -> int:
+        if self.process is None or self.process.exitcode is None:
+            return 0
+        return self.process.exitcode
+
+    def stop(self) -> None:
+        if self.process is not None and self.process.is_alive():
+            self.process.terminate()
+            self.process.join()
+
+        # Best-effort cleanup for IPC queues.
+        for q in (self.user_request_q, self.user_response_q):
+            try:
+                q.cancel_join_thread()
+            except Exception:
+                pass
+            try:
+                q.close()
+            except Exception:
+                pass
+
+    def _run(self) -> None:
+        os.environ.update(self.env)
+        from rdagent.log.conf import LOG_SETTINGS
+
+        LOG_SETTINGS.trace_path = self.log_trace_path
+        LOG_SETTINGS.set_ui_server_port(self.ui_server_port)
+
+        from rdagent.log import rdagent_logger
+
+        rdagent_logger.refresh_storages_from_settings()
+        rdagent_logger.set_storages_path(self.log_trace_path)
+        Path(self.stdout_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.stdout_path, "w") as log_file:
+            with redirect_stdout(log_file), redirect_stderr(log_file):
+                rdagent_logger.rebind_console_to_current_streams()
+                try:
+                    # Only interactive targets should receive IPC queues.
+                    if self.target_name not in _TARGETS_WITHOUT_USER_INTERACTION:
+                        self.kwargs.setdefault(
+                            "user_interaction_queues",
+                            (self.user_request_q, self.user_response_q),
+                        )
+
+                    if self.target_name == "data_science":
+                        from rdagent.app.data_science.loop import main as data_science
+
+                        data_science(**self.kwargs)
+                    elif self.target_name == "general_model":
+                        from rdagent.app.general_model.general_model import (
+                            extract_models_and_implement as general_model,
+                        )
+
+                        general_model(**self.kwargs)
+                    elif self.target_name == "fin_factor":
+                        from rdagent.app.qlib_rd_loop.factor import main as fin_factor
+
+                        fin_factor(**self.kwargs)
+                    elif self.target_name == "fin_factor_report":
+                        from rdagent.app.qlib_rd_loop.factor_from_report import (
+                            main as fin_factor_report,
+                        )
+
+                        fin_factor_report(**self.kwargs)
+                    elif self.target_name == "fin_model":
+                        from rdagent.app.qlib_rd_loop.model import main as fin_model
+
+                        fin_model(**self.kwargs)
+                    elif self.target_name == "fin_quant":
+                        from rdagent.app.qlib_rd_loop.quant import main as fin_quant
+
+                        fin_quant(**self.kwargs)
+                    elif self.target_name == "resume":
+                        from rdagent.log.server.resume import resume_loop
+
+                        resume_loop(**self.kwargs)
+                    else:
+                        raise ValueError(f"Unknown target: {self.target_name}")
+                except Exception:
+                    traceback.print_exc()
+                    raise
+
+
+rdagent_processes: dict[str, RDAgentTask] = {}
+log_folder_path = Path(UI_SETTING.trace_folder).resolve()
+upload_folder_path = Path(UI_SETTING.upload_folder).resolve()
+
+# Expose these on app.config so blueprints (e.g. studio.py) can reach them via
+# flask.current_app instead of importing this module. When the server is launched
+# with `python -m rdagent.log.server.app`, this module is also bound to
+# sys.modules["__main__"]; a plain `import` from a blueprint creates a second,
+# empty copy of the module (and thus an empty rdagent_processes), so it must
+# always be reached through current_app.
+app.config["RDAGENT_PROCESSES"] = rdagent_processes
+app.config["LOG_FOLDER_PATH"] = log_folder_path
+
+
+CONFIRM_MODES = ("all", "hypothesis", "auto")
+
+
+def parse_confirm(mode, timeout, instruction="") -> dict:
+    """Validated confirmation policy from request fields (missing ones keep the defaults)."""
+    mode = str(mode or "hypothesis").strip().lower()
+    if mode not in CONFIRM_MODES:
+        raise ValueError("confirm_mode must be all, hypothesis or auto")
+    try:
+        timeout_min = int(timeout) if timeout not in (None, "") else 30
+    except (TypeError, ValueError) as error:
+        raise ValueError("confirm_timeout must be minutes") from error
+    if not 0 <= timeout_min <= 24 * 60:
+        raise ValueError("confirm_timeout must be 0–1440 minutes")
+    return {"mode": mode, "timeout_min": timeout_min, "instruction": str(instruction or "").strip()}
+
+
+def request_kind(content) -> str:
+    if not isinstance(content, dict):
+        return "other"
+    if "features" in content:
+        return "features"
+    if "user_instruction" in content:
+        return "instruction"
+    if "decision" in content:
+        return "feedback"
+    if "hypothesis" in content:
+        return "hypothesis"
+    return "other"
+
+
+def default_reply(content, instruction: str = ""):
+    """The payload that continues a request exactly as the agent proposed."""
+    kind = request_kind(content)
+    if kind == "features":
+        return content["features"]
+    if kind == "instruction":
+        return {**content, "user_instruction": content.get("user_instruction") or instruction}
+    return content
+
+
+def auto_answer(task: RDAgentTask, message: dict, why: str) -> None:
+    """Continue a pending request as proposed, and record that the Studio did so and why."""
+    try:
+        task.user_response_q.put(default_reply(message.get("content"), task.confirm.get("instruction", "")), block=False)
+    except Exception:  # noqa: BLE001
+        app.logger.exception("Failed to auto-answer a user request")
+        return
+    message["answered"] = True
+    message["auto"] = why
+    task.messages.append({"tag": "user_interaction.auto", "timestamp": datetime.now(timezone.utc).isoformat(),
+                          "loop_id": message.get("loop_id"), "content": {"kind": request_kind(message.get("content")), "why": why}})
+
+
+def latest_request(task: RDAgentTask) -> dict | None:
+    """The most recent user_interaction.request message of a task (later log events may follow it)."""
+    for message in reversed(task.messages):
+        if message.get("tag") == "user_interaction.request":
+            return message
+    return None
+
+
+def apply_confirm_policy(task: RDAgentTask) -> None:
+    """Answer the task's pending request when its policy says so (mode) or it has waited too long (timeout)."""
+    if not task.messages or not task.is_alive():
+        return
+    last = latest_request(task)
+    if last is None or last.get("answered"):
+        return
+    kind = request_kind(last.get("content"))
+    mode = task.confirm.get("mode", "hypothesis")
+    if mode == "auto" or (mode == "hypothesis" and kind != "hypothesis"):
+        auto_answer(task, last, "policy")
+        return
+    timeout_min = int(task.confirm.get("timeout_min") or 0)
+    if timeout_min:
+        try:
+            since = datetime.fromisoformat(str(last.get("timestamp")).replace("Z", "+00:00"))
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return
+        if datetime.now(timezone.utc) - since >= timedelta(minutes=timeout_min):
+            auto_answer(task, last, "timeout")
+
+
+def _confirm_watcher() -> None:
+    """Drain requests of every live run and apply its confirmation policy, so unattended runs never stall."""
+    while True:
+        try:
+            for task in list(rdagent_processes.values()):
+                if task is None or task.process is None or not task.is_alive():
+                    continue
+                _drain_user_requests_into_messages(task)
+                apply_confirm_policy(task)
+        except Exception:  # noqa: BLE001
+            app.logger.exception("confirm watcher failed")
+        time.sleep(2)
+
+
+def _drain_user_requests_into_messages(task: RDAgentTask) -> None:
+    """Move a single pending user-interaction request into `task.messages`.
+
+    Assumption: each rdagent process only has one active request at a time.
+    """
+
+    try:
+        req = task.user_request_q.get_nowait()
+    except Empty:
+        return
+    except Exception:
+        return
+
+    # Standardize the message shape for the frontend.
+    # The agent can send either a full message dict, or a raw content dict.
+    if isinstance(req, dict) and {"tag", "timestamp", "content"}.issubset(req.keys()):
+        msg = req
+    else:
+        msg = {
+            "tag": "user_interaction.request",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "content": req,
+        }
+    task.messages.append(msg)
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/vnd.microsoft.icon")
+
+
+def _normalize_static_request_path(fn: str) -> str:
+    static_prefix = UI_SETTING.static_path.strip("./")
+    if static_prefix and fn.startswith(f"{static_prefix}/"):
+        return fn[len(static_prefix) + 1 :]
+    return fn
+
+
+def _get_or_create_task(trace_id: str) -> RDAgentTask:
+    task = rdagent_processes.get(trace_id)
+    if task is None:
+        task = RDAgentTask(
+            target_name="",
+            kwargs={},
+            stdout_path="",
+            log_trace_path=trace_id,
+            scenario="",
+            trace_name="",
+            ui_server_port=None,
+            create_process=False,
+        )
+        rdagent_processes[trace_id] = task
+    return task
+
+
+def _resolve_stdout_path(trace_id: str) -> Path | None:
+    normalized_trace_id = str(trace_id or "").strip()
+    if not normalized_trace_id:
+        return None
+
+    task = rdagent_processes.get(str(log_folder_path / normalized_trace_id))
+    if task is None or not task.stdout_path:
+        return None
+
+    stdout_path = Path(task.stdout_path).resolve()
+
+    try:
+        if os.path.commonpath([str(stdout_path), str(log_folder_path)]) != str(log_folder_path):
+            return None
+    except ValueError:
+        return None
+
+    return stdout_path
+
+
+def read_trace(log_path: Path, id: str = "") -> None:
+    fs = FileStorage(log_path)
+    ws = WebStorage(port=1, path=log_path)
+    task = _get_or_create_task(id)
+    task.messages = []
+    last_timestamp = None
+    for msg in fs.iter_msg():
+        data = ws._obj_to_json(obj=msg.content, tag=msg.tag, id=id, timestamp=msg.timestamp.isoformat())
+        if data:
+            if isinstance(data, list):
+                for d in data:
+                    task.messages.append(d["msg"])
+                    last_timestamp = msg.timestamp
+            else:
+                task.messages.append(data["msg"])
+                last_timestamp = msg.timestamp
+
+    now = datetime.now(timezone.utc)
+    if last_timestamp and (now - last_timestamp).total_seconds() > 1800:
+        task.messages.append(
+            {
+                "tag": "END",
+                "timestamp": now.isoformat(),
+                "content": {"error_msg": "Trace session has ended.", "end_code": 0},
+            }
+        )
+
+
+def _collect_existing_trace_ids(trace_root: Path) -> list[str]:
+    """Return trace ids that should be visible in the UI history panel."""
+
+    if not trace_root.exists():
+        return []
+
+    trace_ids: list[str] = []
+    for trace_dir in sorted(trace_root.glob("*/*"), key=lambda p: str(p)):
+        if not trace_dir.is_dir():
+            continue
+        if "uploads" in trace_dir.relative_to(trace_root).parts:
+            continue
+        if not any(trace_dir.rglob("*.pkl")):
+            continue
+
+        trace_ids.append(trace_dir.relative_to(trace_root).as_posix())
+
+    return trace_ids
+
+
+def _load_existing_traces(trace_root: Path) -> None:
+    """Load persisted traces into memory so the UI survives a server restart."""
+
+    for trace_id in _collect_existing_trace_ids(trace_root):
+        trace_dir = trace_root / trace_id
+
+        try:
+            read_trace(trace_dir, id=str(trace_dir))
+        except Exception:
+            app.logger.exception("Failed to load trace from %s", trace_dir)
+
+
+@app.route("/trace", methods=["POST"])
+def update_trace():
+    data = request.get_json()
+    trace_id = data.get("id")
+    return_all = data.get("all")
+    reset = data.get("reset")
+    msg_num = random.randint(1, 10)
+    app.logger.info(data)
+    log_folder_path = Path(UI_SETTING.trace_folder).absolute()
+    if not trace_id:
+        return jsonify({"error": "Trace ID is required"}), 400
+    trace_id = str(log_folder_path / trace_id)
+
+    task = _get_or_create_task(trace_id)
+
+    # Make sure any pending user-interaction requests are visible to the frontend, and answer at once those
+    # the run's confirmation policy does not need a human for, so the page never shows them as pending.
+    _drain_user_requests_into_messages(task)
+    apply_confirm_policy(task)
+
+    if task.process is not None and not task.is_alive():
+        if not task.messages or task.messages[-1].get("tag") != "END":
+            task.messages.append(
+                {
+                    "tag": "END",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "content": {
+                        "error_msg": "RD-Agent process has completed.",
+                        "end_code": task.get_end_code(),
+                    },
+                }
+            )
+            app.logger.warning(f"Process for {trace_id} has ended.")
+
+    # Studio restores full immutable views without moving legacy clients' cursors.
+    if data.get("snapshot") is True:
+        return jsonify(task.messages), 200
+
+    user_ip = request.remote_addr
+
+    if reset:
+        task.pointers[user_ip] = 0
+
+    start_pointer = task.pointers[user_ip]
+    end_pointer = start_pointer + msg_num
+    if end_pointer > len(task.messages) or return_all:
+        end_pointer = len(task.messages)
+
+    returned_msgs = task.messages[start_pointer:end_pointer]
+    task.pointers[user_ip] = end_pointer
+    if returned_msgs:
+        app.logger.info([msg["tag"] for msg in returned_msgs])
+    return jsonify(returned_msgs), 200
+
+
+@app.route("/stdout", methods=["GET"])
+def download_stdout_file():
+    trace_id = request.args.get("id", "")
+    stdout_path = _resolve_stdout_path(trace_id)
+
+    if stdout_path is None:
+        return jsonify({"error": "Trace ID is required or invalid"}), 400
+    if not stdout_path.exists() or not stdout_path.is_file():
+        return jsonify({"error": "Stdout file not found"}), 404
+
+    return send_file(
+        stdout_path,
+        as_attachment=True,
+        download_name=stdout_path.name,
+        mimetype="text/plain",
+    )
+
+
+@app.route("/traces", methods=["GET"])
+def list_traces():
+    """Return trace ids that are available for history browsing."""
+
+    trace_ids = _collect_existing_trace_ids(log_folder_path)
+    region = (request.args.get("region") or "").strip().lower()
+    if region:
+        # Scope to a market workspace by the studio-run.json each Studio run leaves beside its trace; runs
+        # without one (older or Playground-started) count as A-shares.
+        def trace_region(trace_id: str) -> str:
+            path = log_folder_path / trace_id / "studio-run.json"
+            try:
+                return studio_markets.region_of(json.loads(path.read_text()).get("market")) if path.is_file() else "cn"
+            except (OSError, ValueError):
+                return "cn"
+
+        trace_ids = [t for t in trace_ids if trace_region(t) == region]
+    return jsonify(trace_ids), 200
+
+
+def record_run_market(log_trace_path, market: str) -> None:
+    """Remember which universe a run was started on (studio-run.json beside the trace) for the Studio's summaries."""
+    try:
+        folder = Path(log_trace_path)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "studio-run.json").write_text(json.dumps({"market": market}))
+    except OSError as error:
+        app.logger.warning(f"Could not record the universe of {log_trace_path}: {error}")
+
+
+def available_universes() -> list[str]:
+    """Every universe the registry knows (A-share lists first, then declared providers such as US data)."""
+    return studio_markets.markets()
+
+
+class UniverseNotReady(Exception):
+    """The universe's factor input data has not been exported yet (or is stale); a build job is needed first."""
+
+    def __init__(self, market: str, job: dict):
+        super().__init__(f"{market} 的股票池数据还没准备好")
+        self.market, self.job = market, job
+
+
+def build_universe_data(record: dict, out: Path) -> None:
+    """Export the universe's daily OHLCV for factor code (studio_universe.py) into ``out``; raises on failure."""
+    start = os.environ.get("QLIB_FACTOR_TRAIN_START", "2023-01-01")
+    end = os.environ.get("QLIB_FACTOR_TEST_END", "2030-12-31")
+    # Factor code needs history before the training window for rolling features; give it a quarter.
+    from datetime import date
+
+    start = (date.fromisoformat(start) - timedelta(days=90)).isoformat()
+    completed = subprocess.run(
+        [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_universe.py")),
+         record["provider_uri"], record["market"], start, end, str(out), record["region"]],
+        capture_output=True, text=True, timeout=1800,
+    )
+    line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    try:
+        status = json.loads(line)
+    except ValueError:
+        raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "universe data build produced no output")
+    if status.get("status") != "completed":
+        raise RuntimeError(status.get("error") or "universe data build failed")
+
+
+def universe_env(market: str, build: bool = True) -> dict[str, str]:
+    """Environment for a run on ``market``: universe, benchmark, region and data directory for RD-Agent's Qlib
+    settings, plus a factor data folder built for it.
+
+    CSI300 keeps the folders configured in .env (the data every existing experiment used); any other universe
+    gets ``traces/studio_data/universe/<market>/{full,debug}/daily_pv.h5``, built on first use by
+    studio_universe.py over the configured research window (train start to test end).
+    """
+    record = studio_markets.universe(market)  # raises ValueError for an unknown market
+    market = record["market"]
+    env = {}
+    for kind in ("FACTOR", "MODEL", "QUANT"):
+        env[f"QLIB_{kind}_MARKET"] = market
+        env[f"QLIB_{kind}_BENCHMARK"] = record["benchmark"]
+        env[f"QLIB_{kind}_REGION"] = record["region"]
+        env[f"QLIB_{kind}_PROVIDER_URI"] = record["provider_uri"]
+        env[f"QLIB_{kind}_LIMIT_THRESHOLD"] = "null" if record["limit_threshold"] is None else str(record["limit_threshold"])
+        env[f"QLIB_{kind}_OPEN_COST"] = str(record["open_cost"])
+        env[f"QLIB_{kind}_CLOSE_COST"] = str(record["close_cost"])
+    if market == "csi300":
+        return env
+    # RD-Agent's LightGBM penalties (L1 205.7, L2 581) were tuned for CSI300; the leaf gradient sums they are
+    # compared with grow with the number of rows, so a smaller universe gets them scaled by its size, else the
+    # evaluation model never splits and every factor looks useless.
+    members = record.get("members") or 300
+    if members < 300:
+        scale = members / 300
+        for kind in ("FACTOR", "MODEL", "QUANT"):
+            env[f"QLIB_{kind}_LGB_LAMBDA_L1"] = f"{205.6999 * scale:.4f}"
+            env[f"QLIB_{kind}_LGB_LAMBDA_L2"] = f"{580.9768 * scale:.4f}"
+    if record["region"] != "cn":
+        env["QLIB_PROVIDER_URI"] = record["provider_uri"]
+    out = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe" / market
+    calendar_file = Path(record["provider_uri"]) / "calendars" / "day.txt"
+    calendar_end = calendar_file.read_text().strip().splitlines()[-1] if calendar_file.is_file() else ""
+    built_end = ""
+    if (out / "meta.json").is_file():
+        try:
+            built_end = json.loads((out / "meta.json").read_text()).get("end") or ""
+        except ValueError:
+            built_end = ""
+    # (Re)build when missing, or when the export could now reach further: the Qlib data has moved past what was
+    # exported (after a data sync) *and* the configured research window allows it. An export capped by
+    # QLIB_FACTOR_TEST_END is complete however far the calendar runs; rebuilding it would give the same file.
+    window_end = os.environ.get("QLIB_FACTOR_TEST_END", "2030-12-31")
+    target_end = min(calendar_end, window_end) if calendar_end else window_end
+    if not (out / "full" / "daily_pv.h5").is_file() or (built_end and built_end < target_end):
+        if build:
+            build_universe_data(record, out)
+        else:
+            # The caller wants to answer now: hand back the (new or already running) build job instead.
+            job = studio_jobs.find("universe", market=market) or studio_jobs.run(
+                "universe", f"准备 {studio_markets.universe(market)['label']} 数据", lambda job: build_universe_data(record, out),
+                market=market, link={"page": "research", "market": market})
+            raise UniverseNotReady(market, job)
+    env["FACTOR_COSTEER_DATA_FOLDER"] = str(out / "full")
+    env["FACTOR_COSTEER_DATA_FOLDER_DEBUG"] = str(out / "debug")
+    return env
+
+
+@app.route("/universes", methods=["GET"])
+def list_universes():
+    prepared = Path(UI_SETTING.trace_folder).resolve() / "studio_data" / "universe"
+    return jsonify([{"market": u["market"], "label": u["label"], "group": u["group"], "region": u["region"], "benchmark": u["benchmark"],
+                     "open_cost": u["open_cost"], "close_cost": u["close_cost"], "min_cost": u["min_cost"], "limit_threshold": u["limit_threshold"], "members": u.get("members"),
+                     "ready": u["market"] == "csi300" or (prepared / u["market"] / "full" / "daily_pv.h5").is_file()}
+                    for u in studio_markets.universes()])
+
+
+@app.route("/upload", methods=["POST"])
+def upload_file():
+    # 获取请求体中的字段
+    global rdagent_processes
+    try:
+        scenario = validate_scenario(request.form.get("scenario"))
+    except ValueError:
+        return jsonify({"error": "Invalid scenario"}), 400
+    files = request.files.getlist("files")
+    competition = request.form.get("competition")
+    loop_n = request.form.get("loops")
+    all_duration = request.form.get("all_duration")
+    market = (request.form.get("market") or "csi300").strip().lower()
+    try:
+        confirm = parse_confirm(request.form.get("confirm_mode"), request.form.get("confirm_timeout"), request.form.get("objective"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    run_env: dict[str, str] = {}
+    if scenario.startswith("Finance"):
+        try:
+            run_env = universe_env(market, build=False)
+        except UniverseNotReady as pending:
+            # First research on this universe: the data export runs as a job; the client retries when it is done.
+            return jsonify({"error": str(pending), "job": pending.job["id"], "retry": True}), 409
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            return jsonify({"error": f"准备 {market} 股票池数据失败：{error}"}), 500
+
+    # scenario = "Data Science Loop"
+    if scenario == "Data Science":
+        try:
+            competition = parse_competition(competition)
+        except ValueError:
+            return jsonify({"error": "Invalid competition"}), 400
+        trace_name = f"{competition}-{randomname.get_name()}"
+    else:
+        trace_name = randomname.get_name()
+    try:
+        trace_files_path = resolve_within(upload_folder_path, scenario, trace_name)
+        log_trace_path = resolve_within(log_folder_path, scenario, trace_name)
+        stdout_path = resolve_within(log_folder_path, scenario, f"{trace_name}.log")
+    except ValueError:
+        return jsonify({"error": "Invalid destination path"}), 400
+    if not stdout_path.exists():
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # save files
+    for file in files:
+        if file:
+            try:
+                sanitized_filename = validate_upload_filename(secure_filename(file.filename or ""))
+                target_path = resolve_within(trace_files_path, sanitized_filename)
+            except ValueError:
+                return jsonify({"error": "Invalid upload file"}), 400
+            if target_path.exists():
+                return jsonify({"error": "Upload file already exists"}), 409
+            trace_files_path.mkdir(parents=True, exist_ok=True)
+            file.save(target_path)
+
+    target_name = SCENARIO_TARGETS[scenario]
+    kwargs = {}
+    loop_n_val = int(loop_n) if loop_n else None
+    all_duration_val = f"{all_duration}h" if all_duration else None
+
+    if scenario == "Finance Data Building":
+        kwargs = {
+            "loop_n": loop_n_val,
+            "all_duration": all_duration_val,
+            "base_features_path": str(trace_files_path),
+        }
+    if scenario == "Finance Model Implementation":
+        kwargs = {
+            "loop_n": loop_n_val,
+            "all_duration": all_duration_val,
+            "base_features_path": str(trace_files_path),
+        }
+    if scenario == "Finance Whole Pipeline":
+        kwargs = {
+            "loop_n": loop_n_val,
+            "all_duration": all_duration_val,
+            "base_features_path": str(trace_files_path),
+        }
+    if scenario == "Finance Data Building (Reports)":
+        kwargs = {"report_folder": str(trace_files_path), "all_duration": all_duration_val}
+    if scenario == "General Model Implementation":
+        if len(files) == 0:  # files is one link
+            rfp = request.form.get("files", "")
+        else:  # one file is uploaded
+            rfp = str(resolve_within(trace_files_path, validate_upload_filename(secure_filename(files[0].filename))))
+        kwargs = {"report_file_path": rfp}
+    if scenario == "Data Science":
+        kwargs = {"competition": competition, "loop_n": loop_n_val, "timeout": all_duration_val}
+
+    app.logger.info(f"Started process for {log_trace_path} with target: {target_name}, kwargs: {kwargs}")
+    task = RDAgentTask(
+        target_name=target_name,
+        kwargs=kwargs,
+        stdout_path=str(stdout_path),
+        log_trace_path=str(log_trace_path),
+        scenario=scenario,
+        trace_name=trace_name,
+        ui_server_port=app.config["UI_SERVER_PORT"],
+        env=run_env,
+    )
+    task.confirm = confirm
+    task.start()
+    record_run_market(log_trace_path, market)
+    app.logger.warning(f"Task {log_trace_path} started (universe {market}).")
+    rdagent_processes[str(log_trace_path)] = task
+    return (
+        jsonify(
+            {
+                "id": f"{scenario}/{trace_name}",
+            }
+        ),
+        200,
+    )
+
+
+@app.route("/receive", methods=["POST"])
+def receive_msgs():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data received"}), 400
+    except Exception as e:
+        return jsonify({"error": "Internal Server Error"}), 500
+
+    if isinstance(data, list):
+        for d in data:
+            task = _get_or_create_task(d["id"])
+            task.messages.append(d["msg"])
+    else:
+        task = _get_or_create_task(data["id"])
+        task.messages.append(data["msg"])
+
+    return jsonify({"status": "success"}), 200
+
+
+@app.route("/user_interaction/submit", methods=["POST"])
+def submit_user_interaction_response():
+    """Frontend submits a user response; server forwards it to the rdagent subprocess via IPC queue."""
+    data = request.get_json(silent=True) or {}
+    trace_id = data.get("id")
+    payload = data.get("payload")
+
+    if not trace_id:
+        return jsonify({"error": "Trace ID is required"}), 400
+    if payload is None:
+        return jsonify({"error": "Missing 'payload'"}), 400
+
+    trace_id = str(log_folder_path / trace_id)
+    task = _get_or_create_task(trace_id)
+    _drain_user_requests_into_messages(task)
+    pending = latest_request(task)
+    if pending is None or pending.get("answered"):
+        # A stale card (already answered by the policy, a timeout or another tab) must not push a second payload,
+        # which the loop would take as the answer to its next question.
+        return jsonify({"error": "这个确认已经处理过了", "answered": True}), 409
+
+    try:
+        task.user_response_q.put(payload, block=False)
+    except Exception:
+        app.logger.exception("Failed to enqueue a user response")
+        return jsonify({"error": "Failed to enqueue user response"}), 500
+    pending["answered"] = True  # the attention list stops showing it
+
+    return jsonify({"status": "success"}), 200
+
+
+def recorded_loops(messages: list[dict]) -> tuple[int, bool]:
+    """(number of loops the trace has started, whether the last one finished with feedback)."""
+    loops: set[int] = set()
+    finished: set[int] = set()
+    for m in messages:
+        raw = m.get("loop_id")
+        try:
+            loop_id = int(raw) if raw is not None and str(raw).strip().lstrip("-").isdigit() else None
+        except (TypeError, ValueError):
+            loop_id = None
+        if loop_id is None:
+            continue
+        loops.add(loop_id)
+        if m.get("tag") == "feedback.hypothesis_feedback":
+            finished.add(loop_id)
+    if not loops:
+        return 0, True
+    last = max(loops)
+    return last + 1, last in finished
+
+
+@app.route("/resume", methods=["POST"])
+def resume_research():
+    """Continue a loop-based experiment for `loops` more rounds, appending to the same trace.
+
+    The restored loop counts every loop it walks past, so the target passed to it is the rounds already
+    recorded plus the rounds requested; an unfinished last round is completed as the first of them.
+    """
+    global rdagent_processes
+    data = request.get_json() or {}
+    trace_id = str(data.get("id") or "")
+    try:
+        loops = int(data.get("loops") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "loops must be an integer"}), 400
+    if not 1 <= loops <= 30:
+        return jsonify({"error": "loops must be between 1 and 30"}), 400
+    scenario, _, trace_name = trace_id.partition("/")
+    from rdagent.log.server.resume import LOOP_SCENARIOS
+
+    if scenario not in LOOP_SCENARIOS or not trace_name:
+        return jsonify({"error": "Only factor, model and joint experiments can be continued"}), 400
+    try:
+        log_trace_path = resolve_within(log_folder_path, scenario, trace_name)
+        stdout_path = resolve_within(log_folder_path, scenario, f"{trace_name}.resume.log")
+    except ValueError:
+        return jsonify({"error": "Invalid trace id"}), 400
+    if not (log_trace_path / "__session__").is_dir():
+        return jsonify({"error": "This experiment has no saved session to continue from"}), 404
+    previous = rdagent_processes.get(str(log_trace_path))
+    if previous is not None and previous.is_alive():
+        return jsonify({"error": "This experiment is still running"}), 409
+    history = [m for m in (previous.messages if previous else []) if str(m.get("tag", "")).lower() != "end"]
+    started, last_finished = recorded_loops(history)
+    total = started + loops if last_finished else started - 1 + loops
+    all_duration = data.get("all_duration")
+    task = RDAgentTask(
+        target_name="resume",
+        kwargs={"scenario": scenario, "path": str(log_trace_path), "loop_n": total,
+                "all_duration": f"{all_duration}h" if all_duration else None},
+        stdout_path=str(stdout_path),
+        log_trace_path=str(log_trace_path),
+        scenario=scenario,
+        trace_name=trace_name,
+        ui_server_port=app.config["UI_SERVER_PORT"],
+    )
+    task.messages = history
+    if previous is not None:
+        task.pointers = previous.pointers
+        task.confirm = dict(previous.confirm)
+    if any(k in data for k in ("confirm_mode", "confirm_timeout")):
+        try:
+            task.confirm = parse_confirm(data.get("confirm_mode", task.confirm["mode"]), data.get("confirm_timeout", task.confirm["timeout_min"]), task.confirm.get("instruction", ""))
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+    task.start()
+    rdagent_processes[str(log_trace_path)] = task
+    app.logger.warning(f"Resumed {log_trace_path} for {loops} more loop(s) (loop_n={total}).")
+    return jsonify({"id": trace_id, "loops": loops, "loop_n": total}), 200
+
+
+@app.route("/research/from-strategy", methods=["POST"])
+def research_from_strategy():
+    """回流研究: start a factor-research run that treats a saved strategy's members as its base features.
+
+    The members' factor.py files (server-side, trusted) are written into the run's upload folder, which
+    the factor loop reads as `base_features_path`: every round then trains on strategy members + new
+    factors, and the agent is told not to duplicate them. The research direction is prefixed with the
+    strategy context so the hypotheses aim at incremental signals.
+    """
+    from rdagent.log.server.studio import load_strategy, resolve_factor_paths
+
+    global rdagent_processes
+    data = request.get_json() or {}
+    try:
+        strategy = load_strategy(str(data.get("strategy_id") or ""))
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    try:
+        loop_n = int(data.get("loops") or 3)
+        all_duration = float(data.get("all_duration") or 2)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid loops or duration"}), 400
+    if not 1 <= loop_n <= 30 or not 0.1 <= all_duration <= 24:
+        return jsonify({"error": "loops must be 1–30 and duration 0.1–24 hours"}), 400
+    scenario = "Finance Data Building"
+    trace_name = f"{randomname.get_name()}-on-strategy"
+    try:
+        trace_files_path = resolve_within(upload_folder_path, scenario, trace_name)
+        log_trace_path = resolve_within(log_folder_path, scenario, trace_name)
+        stdout_path = resolve_within(log_folder_path, scenario, f"{trace_name}.log")
+    except ValueError:
+        return jsonify({"error": "Invalid destination path"}), 400
+    trace_files_path.mkdir(parents=True, exist_ok=True)
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    members = []
+    for factor in strategy["factors"]:
+        if factor.get("kind", "factor") != "factor":
+            continue
+        try:
+            workspace = Path(resolve_factor_paths(factor["trace"], factor["loop_id"], [{"name": factor["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
+        except ValueError as error:
+            return jsonify({"error": f"{factor['name']}: {error}"}), 400
+        code = workspace / "factor.py"
+        if not code.is_file():
+            return jsonify({"error": f"{factor['name']} 没有保存 factor.py，无法作为基础特征"}), 400
+        (trace_files_path / f"{factor['name']}.py").write_text(code.read_text())
+        members.append(factor["name"])
+    if not members:
+        return jsonify({"error": "策略里没有可作为基础特征的因子"}), 400
+    kwargs = {"loop_n": loop_n, "all_duration": f"{all_duration}h", "base_features_path": str(trace_files_path)}
+    try:
+        run_env = universe_env(str((strategy.get("params") or {}).get("market") or "csi300"), build=False)
+    except UniverseNotReady as pending:
+        return jsonify({"error": str(pending), "job": pending.job["id"], "retry": True}), 409
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        return jsonify({"error": f"准备股票池数据失败：{error}"}), 500
+    task = RDAgentTask(target_name="fin_factor", kwargs=kwargs, stdout_path=str(stdout_path), log_trace_path=str(log_trace_path),
+                       scenario=scenario, trace_name=trace_name, ui_server_port=app.config["UI_SERVER_PORT"], env=run_env)
+    task.start()
+    record_run_market(log_trace_path, run_env.get("QLIB_FACTOR_MARKET", "csi300"))
+    rdagent_processes[str(log_trace_path)] = task
+    app.logger.warning(f"Started research on strategy {strategy['id']} ({', '.join(members)}) at {log_trace_path}.")
+    return jsonify({"id": f"{scenario}/{trace_name}", "members": members,
+                    "instruction": data.get("instruction") or default_strategy_instruction(strategy, members)}), 200
+
+
+def default_strategy_instruction(strategy, members):
+    """The research direction the UI pre-fills into the agent's first confirmation."""
+    return (f"当前策略「{strategy['name']}」由这些因子组成并作为基础特征参与训练：{', '.join(members)}。"
+            "请寻找与它们低相关、能提供增量信息的新因子，不要重新实现或微调这些已有因子；"
+            "评估时以加入后组合的年化超额收益和回撤改善为准。")
+
+
+@app.route("/control", methods=["POST"])
+def control_process():
+    global rdagent_processes
+    data = request.get_json()
+    app.logger.info(data)
+    if not data or "id" not in data or "action" not in data:
+        return jsonify({"error": "Missing 'id' or 'action' in request"}), 400
+
+    id = str(log_folder_path / data["id"])
+    action = data["action"]
+
+    if action != "stop":
+        return jsonify({"error": "Only 'stop' action is supported"}), 400
+
+    if id not in rdagent_processes or rdagent_processes[id] is None:
+        return jsonify({"error": "No running process for given id"}), 400
+
+    task = rdagent_processes[id]
+
+    if task.process is None:
+        return jsonify({"error": "No running process for given id"}), 400
+
+    try:
+        if task.is_alive():
+            task.stop()
+
+        if not task.messages or task.messages[-1].get("tag") != "END":
+            task.messages.append(
+                {
+                    "tag": "END",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "content": {"error_msg": "RD-Agent process was stopped by user.", "end_code": -1},
+                }
+            )
+            app.logger.warning(f"Process for {id} has been stopped.")
+        return jsonify({"status": "stopped"}), 200
+    except Exception:
+        app.logger.exception("Failed to stop process %s", id)
+        return jsonify({"error": "Failed to stop process"}), 500
+
+
+@app.route("/test", methods=["GET"])
+def test():
+    # return 'Hello, World!'
+    msgs = {k: [i["tag"] for i in task.messages] for k, task in rdagent_processes.items()}
+    pointers = {k: dict(task.pointers) for k, task in rdagent_processes.items()}
+    return jsonify({"msgs": msgs, "pointers": pointers}), 200
+
+
+@app.route("/", methods=["GET"])
+def index():
+    token = app.config.get("AUTH_TOKEN", "")
+    supplied_token = request.args.get("token", "")
+    if token and supplied_token and hmac.compare_digest(supplied_token, token):
+        response = make_response(redirect(url_for("index")))
+        response.set_cookie("rdagent_auth", token, httponly=True, samesite="Strict")
+        return response
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/app/", methods=["GET"])
+def studio_app():
+    """The React Studio build (rd-agent/studio, `npm run build` → static/app/)."""
+    return send_from_directory(Path(app.static_folder) / "app", "index.html")
+
+
+@app.route("/<path:fn>", methods=["GET"])
+def server_static_files(fn):
+    return send_from_directory(app.static_folder, _normalize_static_request_path(fn))
+
+
+def start_confirm_watcher() -> None:
+    threading.Thread(target=_confirm_watcher, name="studio-confirm-watcher", daemon=True).start()
+
+
+def main(port: int = 19899, host: str = UI_SETTING.server_host) -> None:
+    start_confirm_watcher()
+    if host not in {"127.0.0.1", "::1", "localhost"} and not app.config.get("AUTH_TOKEN"):
+        raise ValueError("UI_SERVER_AUTH_TOKEN is required when binding the log server beyond localhost")
+    app.config["UI_SERVER_PORT"] = port
+    if app.config.get("AUTH_TOKEN"):
+        app.logger.info("Authentication enabled. Open /?token=<UI_SERVER_AUTH_TOKEN> to establish a secure session.")
+    if UI_SETTING.load_legacy_pickle_traces:
+        app.logger.warning("Loading legacy pickle traces. Only enable this for fully trusted trace directories.")
+        _load_existing_traces(log_folder_path)
+    app.run(debug=False, host=host, port=port)
+
+
+if __name__ == "__main__":
+    typer.run(main)

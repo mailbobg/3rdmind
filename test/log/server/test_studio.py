@@ -1,0 +1,1768 @@
+import json
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+import rdagent.log.server.app as server
+from rdagent.core.experiment import Experiment, FBWorkspace, Task
+from rdagent.log.server import studio as studio_module
+from rdagent.log.server.studio_worker import (
+    load_factor_frame,
+    require_signal_coverage,
+    trading_day_on_or_before,
+    validate_config,
+)
+from rdagent.log.ui.storage import WebStorage
+
+
+class _FactorTask(Task):
+    def __init__(self, name: str) -> None:
+        super().__init__(name=name, description="")
+        self.factor_name = name
+
+    def get_task_information(self) -> str:
+        return self.name
+
+
+class _ModelTask(Task):
+    def get_task_information(self) -> str:
+        return self.name
+
+
+def _experiment_with_workspaces(tmp_path: Path) -> Experiment:
+    tasks = [_FactorTask("STR_5"), _FactorTask("RVOL_20")]
+    exp = Experiment(sub_tasks=tasks)
+    exp.experiment_workspace = FBWorkspace()
+    exp.experiment_workspace.workspace_path = tmp_path / "exp"
+    for index, task in enumerate(tasks):
+        ws = FBWorkspace(target_task=task)
+        ws.workspace_path = tmp_path / f"factor{index}"
+        exp.sub_workspace_list[index] = ws
+    exp.result = pd.Series({"IC": 0.01})
+    return exp
+
+
+@pytest.mark.offline
+def test_metric_event_carries_workspaces(tmp_path: Path) -> None:
+    exp = _experiment_with_workspaces(tmp_path)
+    data = WebStorage(port=1, path=tmp_path)._obj_to_json(
+        obj=exp, tag="Loop_0.running", id="trace", timestamp="2026-09-14T00:00:00"
+    )
+    content = data["msg"]["content"]
+    assert data["msg"]["tag"] == "feedback.metric"
+    assert json.loads(content["result"]) == {"IC": 0.01}
+    assert content["workspaces"] == {
+        "experiment": str(tmp_path / "exp"),
+        "factors": [
+            {"name": "STR_5", "path": str(tmp_path / "factor0")},
+            {"name": "RVOL_20", "path": str(tmp_path / "factor1")},
+        ],
+    }
+
+
+@pytest.mark.offline
+def test_metric_event_without_sub_workspaces(tmp_path: Path) -> None:
+    exp = Experiment(sub_tasks=[])
+    exp.result = pd.Series({"IC": 0.0})
+    data = WebStorage(port=1, path=tmp_path)._obj_to_json(
+        obj=exp, tag="Loop_0.running", id="trace", timestamp="2026-09-14T00:00:00"
+    )
+    assert data["msg"]["content"]["workspaces"] == {"experiment": None, "factors": []}
+
+
+def _config(**overrides):
+    base = {
+        "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+        "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+        "factors": [{"name": "STR_5", "path": "/tmp/f0", "weight": 1}],
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.offline
+def test_validate_config_requires_named_paths() -> None:
+    assert validate_config(_config())["factors"][0]["path"] == "/tmp/f0"
+    for factors in (
+        [{"name": "", "path": "/tmp/f0", "weight": 1}],
+        [{"name": "STR_5", "path": "", "weight": 1}],
+        [{"name": "STR_5", "expression": "$close", "weight": 1}],
+        [{"name": "STR_5", "path": "/tmp/f0", "weight": 0}],
+    ):
+        with pytest.raises(ValueError):
+            validate_config(_config(factors=factors))
+
+
+@pytest.mark.offline
+def test_load_factor_frame_reads_first_column(tmp_path: Path) -> None:
+    index = pd.MultiIndex.from_tuples(
+        [(pd.Timestamp("2025-01-02"), "SH600000"), (pd.Timestamp("2025-01-03"), "SH600000")],
+        names=["datetime", "instrument"],
+    )
+    pd.DataFrame({"anything": [0.1, 0.2]}, index=index).to_hdf(tmp_path / "result.h5", key="data")
+    frame = load_factor_frame({"name": "STR_5", "path": str(tmp_path)}, pd.Timestamp("2025-01-03"), "2025-12-31")
+    assert list(frame.columns) == ["STR_5"]
+    assert frame.index.get_level_values("datetime").min() == pd.Timestamp("2025-01-03")
+
+
+@pytest.mark.offline
+def test_load_factor_frame_rejects_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="result.h5"):
+        load_factor_frame({"name": "X", "path": str(tmp_path)}, pd.Timestamp("2025-01-01"), "2025-12-31")
+
+
+def _task_with_metric(trace_folder: Path, trace_id: str, factor_dir: Path):
+    task = server._get_or_create_task(str(trace_folder / trace_id))
+    task.messages = [
+        {"tag": "research.hypothesis", "loop_id": 0, "timestamp": "t", "content": {"hypothesis": "h"}},
+        {
+            "tag": "feedback.metric", "loop_id": "0", "timestamp": "t",
+            "content": {
+                "result": json.dumps({"IC": 0.01, "Rank IC": 0.02}),
+                "workspaces": {"experiment": str(factor_dir / "exp"),
+                               "factors": [{"name": "STR_5", "path": str(factor_dir / "f0")}]},
+            },
+        },
+    ]
+    return task
+
+
+@pytest.fixture
+def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    trace_folder = tmp_path / "traces"
+    workspace_root = tmp_path / "ws"
+    (workspace_root / "f0").mkdir(parents=True)
+    (workspace_root / "f0" / "result.h5").write_bytes(b"")
+    monkeypatch.setattr(server, "log_folder_path", trace_folder)
+    monkeypatch.setitem(server.app.config, "LOG_FOLDER_PATH", trace_folder)
+    monkeypatch.setattr(studio_module, "TRACE_ROOT", trace_folder)
+    monkeypatch.setattr(studio_module, "ROOT", trace_folder / "studio_backtests")
+    monkeypatch.setattr(studio_module, "REFRESH_ROOT", trace_folder / "studio_refresh")
+    monkeypatch.setattr(studio_module, "STRATEGY_ROOT", trace_folder / "studio_strategies")
+    monkeypatch.setattr(studio_module, "INSTRUMENT_NAMES", trace_folder / "studio_data" / "instrument_names.json")
+    monkeypatch.setattr(studio_module, "LATEST_DATA", trace_folder / "studio_data" / "daily_pv_latest.h5")
+    monkeypatch.setattr(studio_module, "WORKSPACE_ROOT", workspace_root)
+    monkeypatch.setattr(studio_module.studio_llm, "_settings_path", trace_folder / "studio_data" / "llm.json")
+    monkeypatch.setattr(studio_module.subprocess, "Popen", lambda *a, **k: type("P", (), {"poll": lambda self: None})())
+    server.rdagent_processes.clear()
+    studio_module.studio_jobs.reset()
+    _task_with_metric(trace_folder, "Finance Data Building/demo", workspace_root)
+    return server.app.test_client()
+
+
+def wait_job(client, job_id: str, timeout: float = 5.0) -> dict:
+    """Poll /studio/jobs/<id> until the job finishes (tests run the work on a thread with fakes)."""
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/studio/jobs/{job_id}").get_json()
+        if job["status"] in ("completed", "failed"):
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} did not finish: {job}")
+
+
+@pytest.mark.offline
+def test_experiments_summarise_loaded_traces(studio_client) -> None:
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/second"))
+    task.messages = [
+        {"tag": "research.hypothesis", "loop_id": "0", "timestamp": "2026-09-01T10:00:00", "content": {"hypothesis": "first"}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "0", "timestamp": "2026-09-01T11:00:00", "content": {"decision": True}},
+        {"tag": "research.hypothesis", "loop_id": "1", "timestamp": "2026-09-02T10:00:00", "content": {"hypothesis": "second"}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "1", "timestamp": "2026-09-02T11:00:00", "content": {"decision": False}},
+        {"tag": "END", "loop_id": "1", "timestamp": "2026-09-02T12:00:00", "content": {"end_code": 0}},
+    ]
+    rows = {r["id"]: r for r in studio_client.get("/studio/experiments").get_json()}
+    assert rows["Finance Data Building/second"] == {
+        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1, "market": "csi300", "waiting": None, "confirm": {"mode": "hypothesis", "timeout_min": 30, "instruction": ""}, "auto_answered": 0,
+        "status": "completed", "updated": "2026-09-02T11:00:00", "hypothesis": "second", "messages": 5,
+    }
+    # The demo trace has events but no END and no live process: it ended without reporting.
+    assert rows["Finance Data Building/demo"]["status"] == "ended"
+    assert rows["Finance Data Building/demo"]["rounds"] == 1
+
+
+@pytest.mark.offline
+def test_prediction_coverage_reads_pred_pkl(studio_client, tmp_path: Path) -> None:
+    import pandas as pd
+
+    artifacts = tmp_path / "ws" / "exp" / "mlruns" / "0" / "run" / "artifacts"
+    artifacts.mkdir(parents=True)
+    index = pd.MultiIndex.from_product([pd.to_datetime(["2025-01-02", "2025-01-03", "2025-06-30"]), ["SH600000", "SZ000001"]],
+                                       names=["datetime", "instrument"])
+    pd.Series(range(6), index=index, name="score").to_pickle(artifacts / "pred.pkl")
+    response = studio_client.get("/studio/predictions/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "0"})
+    assert response.status_code == 200
+    assert response.get_json() == {"start": "2025-01-02", "end": "2025-06-30", "days": 3, "rows": 6}
+    missing = studio_client.get("/studio/predictions/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "7"})
+    assert missing.status_code == 400
+
+
+@pytest.mark.offline
+def test_factor_coverage_reads_result_h5(studio_client, tmp_path: Path) -> None:
+    import pandas as pd
+
+    index = pd.MultiIndex.from_product([pd.to_datetime(["2022-10-10", "2025-12-31"]), ["SH600000"]], names=["datetime", "instrument"])
+    pd.DataFrame({"STR_5": [1.0, 2.0]}, index=index).to_hdf(tmp_path / "ws" / "f0" / "result.h5", key="data")
+    response = studio_client.get("/studio/factors/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "0", "name": "STR_5"})
+    assert response.status_code == 200
+    assert response.get_json() == {"start": "2022-10-10", "end": "2025-12-31", "days": 2, "rows": 2}
+    assert studio_client.get("/studio/factors/coverage", query_string={"trace": "Finance Data Building/demo", "loop_id": "0", "name": "nope"}).status_code == 400
+
+
+@pytest.mark.offline
+def test_refresh_replaces_the_signal_source(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recomputed factor is what the library, coverage and backtests read afterwards."""
+    import pandas as pd
+
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print('factor')")
+
+    def fake_refresh(code_path: Path, name: str, out_dir: Path, market: str = "csi300"):
+        assert Path(code_path).read_text() == "print('factor')"
+        index = pd.MultiIndex.from_product([pd.to_datetime(["2022-10-10", "2026-09-11"]), ["SH600000"]], names=["datetime", "instrument"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({name: [1.0, 2.0]}, index=index).to_hdf(out_dir / "result.h5", key="data", mode="w")
+        meta = {"name": name, "start": "2022-10-10", "end": "2026-09-11", "rows": 2, "computed_at": "now",
+                "data": {"start": "2022-10-10", "end": "2026-09-11", "rows": 2}}
+        (out_dir / "meta.json").write_text(json.dumps(meta))
+        return {"status": "completed", **meta}
+
+    monkeypatch.setattr(studio_module, "run_refresh", fake_refresh)
+    ref = {"trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5"}
+    response = studio_client.post("/studio/factors/refresh", json=ref)
+    assert response.status_code == 202, response.get_json()
+    job = wait_job(studio_client, response.get_json()["job"])
+    assert job["status"] == "completed" and job["kind"] == "refresh" and job["result"]["end"] == "2026-09-11"
+    # Listed among the jobs, with its market and where it belongs.
+    listed = next(j for j in studio_client.get("/studio/jobs").get_json()["items"] if j["id"] == job["id"])
+    assert listed["link"]["name"] == "STR_5" and listed["market"] == "csi300"
+
+    entry = next(f for f in studio_client.get("/studio/factors").get_json() if f["name"] == "STR_5")
+    assert entry["refreshed"]["end"] == "2026-09-11"
+    assert entry["coverage"] == {"start": "2022-10-10", "end": "2026-09-11"}
+    coverage = studio_client.get("/studio/factors/coverage", query_string={**ref, "loop_id": "0"}).get_json()
+    assert coverage["end"] == "2026-09-11"
+    with server.app.app_context():
+        resolved = studio_module.resolve_factor_paths(ref["trace"], 0, [{"name": "STR_5", "weight": 1}])
+        assert Path(resolved[0]["path"]) == studio_module.refresh_dir(ref["trace"], 0, "STR_5")
+        original = studio_module.resolve_factor_paths(ref["trace"], 0, [{"name": "STR_5", "weight": 1}], prefer_refreshed=False)
+        assert Path(original[0]["path"]) == tmp_path / "ws" / "f0"
+
+
+@pytest.mark.offline
+def test_recorded_loops_counts_started_and_finished_rounds() -> None:
+    msgs = [
+        {"tag": "research.hypothesis", "loop_id": "0"}, {"tag": "feedback.hypothesis_feedback", "loop_id": "0"},
+        {"tag": "research.hypothesis", "loop_id": "1"}, {"tag": "feedback.hypothesis_feedback", "loop_id": 1},
+        {"tag": "research.hypothesis", "loop_id": "2"},
+    ]
+    assert server.recorded_loops(msgs) == (3, False)
+    assert server.recorded_loops(msgs[:4]) == (2, True)
+    assert server.recorded_loops([]) == (0, True)
+
+
+@pytest.mark.offline
+def test_resume_appends_to_the_same_trace(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """/resume restores the loop in place: same registry key, history kept, END dropped, loop_n = done + asked."""
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    trace_dir = trace_folder / "Finance Data Building/demo"
+    (trace_dir / "__session__" / "0").mkdir(parents=True)
+    previous = server.rdagent_processes[str(trace_dir)]
+    previous.messages = [
+        {"tag": "research.hypothesis", "loop_id": "0", "content": {"hypothesis": "h"}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "0", "content": {"decision": True}},
+        {"tag": "END", "content": {"end_code": 0}},
+    ]
+    started = []
+    monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
+    response = studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 2})
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json() == {"id": "Finance Data Building/demo", "loops": 2, "loop_n": 3}
+    task = server.rdagent_processes[str(trace_dir)]
+    assert task is started[0] and task.target_name == "resume"
+    assert task.kwargs == {"scenario": "Finance Data Building", "path": str(trace_dir), "loop_n": 3, "all_duration": None}
+    assert [m["tag"] for m in task.messages] == ["research.hypothesis", "feedback.hypothesis_feedback"]
+    # Guards: unknown scenario, missing session, bad loop count.
+    assert studio_client.post("/resume", json={"id": "General Model Implementation/x", "loops": 1}).status_code == 400
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/nosession", "loops": 1}).status_code == 404
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 0}).status_code == 400
+
+
+@pytest.mark.offline
+def test_signal_diagnosis_scores_each_signal_on_the_window() -> None:
+    import pandas as pd
+    from rdagent.log.server import studio_worker as worker
+
+    days = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])
+    index = pd.MultiIndex.from_product([days, ["A", "B", "C", "D"]], names=["datetime", "instrument"])
+    good = pd.Series([0.1, 0.2, 0.3, 0.4] * 3, index=index)          # aligned with the label
+    bad = pd.Series([0.4, 0.3, 0.2, 0.1] * 3, index=index)           # points the other way
+    label = pd.Series([-1.0, -0.3, 0.3, 1.0] * 3, index=index)
+    ranks = pd.concat([good.rename("good"), bad.rename("bad")], axis=1)
+    prepared = {"ranks": ranks, "label": label, "prior_day": days[0],
+                "factors": [{"name": "good", "weight": 1}, {"name": "bad", "weight": 1}]}
+    score = (good - bad) / 2
+    out = worker.signal_diagnosis(prepared, score)
+    by_name = {s["name"]: s for s in out["signals"]}
+    assert by_name["good"]["rank_ic"] == pytest.approx(1.0) and by_name["bad"]["rank_ic"] == pytest.approx(-1.0)
+    assert by_name["good"]["corr_with_score"] == pytest.approx(1.0) and by_name["bad"]["corr_with_score"] == pytest.approx(-1.0)
+    assert out["correlation"]["names"] == ["good", "bad"]
+    assert out["correlation"]["matrix"][0][1] == pytest.approx(-1.0)
+    assert out["correlation"]["days"] == 3
+
+
+@pytest.mark.offline
+def test_summarize_report_compounds_net_returns() -> None:
+    import pandas as pd
+    from rdagent.log.server import studio_worker as worker
+
+    report = pd.DataFrame({"return": [0.01, -0.02, 0.03], "cost": [0.001, 0.001, 0.001], "bench": [0.0, 0.01, 0.0],
+                           "turnover": [0.5, 0.5, 0.5], "account": [1e6, 1e6, 1e6]}, index=pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"]))
+    metrics, rows = worker.summarize_report(report)
+    assert metrics["total_return"] == pytest.approx((1.009 * 0.979 * 1.029) - 1)
+    assert metrics["benchmark_return"] == pytest.approx(0.01)
+    assert metrics["days"] == 3 and len(rows) == 3 and rows[-1]["date"] == "2025-01-06"
+
+
+@pytest.mark.offline
+def test_diagnose_route_starts_a_worker_for_completed_multi_signal_jobs(studio_client, tmp_path: Path) -> None:
+    folder = studio_module.ROOT / "11111111-1111-1111-1111-111111111111"
+    folder.mkdir(parents=True)
+    write = studio_module.write_json
+    write(folder / "config.json", {"factors": [{"name": "a"}, {"name": "b"}]})
+    write(folder / "result.json", {"status": "running"})
+    assert studio_client.post("/studio/backtests/11111111-1111-1111-1111-111111111111/diagnose").status_code == 409
+    write(folder / "result.json", {"status": "completed"})
+    response = studio_client.post("/studio/backtests/11111111-1111-1111-1111-111111111111/diagnose")
+    assert response.status_code == 202
+    assert json.loads((folder / "diagnosis.json").read_text()) == {"status": "queued"}
+    assert studio_client.get("/studio/backtests/11111111-1111-1111-1111-111111111111").get_json()["breakdown"] == {"status": "queued"}
+    write(folder / "config.json", {"factors": [{"name": "a"}]})
+    assert studio_client.post("/studio/backtests/11111111-1111-1111-1111-111111111111/diagnose").status_code == 400
+
+
+@pytest.mark.offline
+def test_split_window_keeps_a_validation_tail() -> None:
+    import pandas as pd
+    from rdagent.log.server.studio_worker import split_window
+
+    calendar = pd.bdate_range("2025-01-01", periods=300)
+    search, valid = split_window(calendar, "2025-01-01", str(calendar[-1].date()), 2 / 3)
+    assert search[0] == "2025-01-01" and valid[1] == str(calendar[-1].date())
+    assert pd.Timestamp(search[1]) < pd.Timestamp(valid[0])
+    assert (calendar <= pd.Timestamp(search[1])).sum() == 200
+    with pytest.raises(ValueError):
+        split_window(calendar, "2025-01-01", str(calendar[30].date()), 2 / 3)
+
+
+@pytest.mark.offline
+def test_validate_config_checks_the_search_block() -> None:
+    assert validate_config(_config(search={}))["search"] == {"objective": "sharpe", "split": pytest.approx(2 / 3)}
+    assert validate_config(_config(search={"objective": "total_return", "split": 0.5}))["search"]["objective"] == "total_return"
+    with pytest.raises(ValueError):
+        validate_config(_config(search={"objective": "alpha"}))
+    with pytest.raises(ValueError):
+        validate_config(_config(search={"split": 0.95}))
+    assert "search" not in validate_config(_config())
+
+
+@pytest.mark.offline
+def test_search_routes_start_and_list_jobs(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(studio_module, "SEARCH_ROOT", tmp_path / "traces" / "studio_searches")
+    (tmp_path / "ws" / "f1").mkdir(parents=True)
+    (tmp_path / "ws" / "f1" / "result.h5").write_bytes(b"")
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages[1]["content"]["workspaces"]["factors"].append({"name": "RVOL_20", "path": str(tmp_path / "ws" / "f1")})
+    body = {"factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0},
+                        {"name": "RVOL_20", "weight": -1, "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300", "benchmark": "SH000300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "search": {"objective": "total_return"}}
+    response = studio_client.post("/studio/searches", json=body)
+    assert response.status_code == 202, response.get_json()
+    job_id = response.get_json()["id"]
+    listed = studio_client.get("/studio/searches").get_json()
+    assert [j["id"] for j in listed] == [job_id] and listed[0]["status"] == "queued"
+    detail = studio_client.get(f"/studio/searches/{job_id}").get_json()
+    assert detail["status"] == "queued" and detail["config"]["search"]["objective"] == "total_return"
+    assert "path" not in detail["config"]["factors"][0]
+    one = dict(body, factors=body["factors"][:1])
+    assert studio_client.post("/studio/searches", json=one).status_code == 400
+
+
+@pytest.mark.offline
+def test_search_prefilter_is_on_by_default_and_reports_exclusions(
+    studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+
+    monkeypatch.setattr(studio_module, "SEARCH_ROOT", tmp_path / "traces" / "studio_searches")
+    days = pd.bdate_range("2025-01-01", periods=5)
+    stocks = ["A", "B", "C", "D"]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    rng = np.random.RandomState(0)
+    series = {
+        "F_A": pd.Series(np.arange(len(index), dtype=float), index=index),
+        "F_B": pd.Series(rng.randn(len(index)), index=index),
+        "F_DUP": pd.Series(np.arange(len(index), dtype=float) * 2.0, index=index),
+        "F_WEAK": pd.Series(rng.randn(len(index)), index=index),
+    }
+    ws = tmp_path / "ws"
+    for name, values in series.items():
+        folder = ws / name.lower()
+        folder.mkdir(parents=True)
+        values.to_frame("x").to_hdf(folder / "result.h5", key="data")
+
+    def cache(name, rank_ic, icir):
+        folder = ws / name.lower()
+        (folder / "studio_analysis.csi300.json").write_text(json.dumps({
+            "status": "completed", "source_mtime": (folder / "result.h5").stat().st_mtime,
+            "rank_ic": {"mean": rank_ic, "std": 0.1, "ir": icir, "positive_ratio": 0.6}}))
+
+    cache("F_A", 0.03, 0.5)
+    cache("F_B", 0.025, 0.45)
+    cache("F_DUP", 0.02, 0.4)
+    cache("F_WEAK", 0.001, 0.01)
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages[1]["content"]["workspaces"]["factors"].extend(
+        {"name": name, "path": str(ws / name.lower())} for name in series
+    )
+
+    def body(names, **search):
+        return {"factors": [{"name": n, "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0} for n in names],
+                "start": "2025-01-01", "end": "2025-06-30", "market": "csi300", "benchmark": "SH000300",
+                "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+                "search": {"objective": "sharpe", **search}}
+
+    # Default: prefilter on. F_WEAK is too weak, F_DUP duplicates F_A; F_A and F_B survive.
+    response = studio_client.post("/studio/searches", json=body(["F_A", "F_B", "F_DUP", "F_WEAK"]))
+    assert response.status_code == 202, response.get_json()
+    detail = studio_client.get(f"/studio/searches/{response.get_json()['id']}").get_json()
+    assert sorted(f["name"] for f in detail["config"]["factors"]) == ["F_A", "F_B"]
+    prefilter = detail["config"]["search"]["prefilter"]
+    assert prefilter["enabled"] is True
+    assert sorted(e["name"] for e in prefilter["excluded"]) == ["F_DUP", "F_WEAK"]
+    assert any("F_A" in e["reason"] for e in prefilter["excluded"] if e["name"] == "F_DUP")
+
+    # Opt-out: everything is kept.
+    response = studio_client.post("/studio/searches", json=body(["F_A", "F_B", "F_DUP", "F_WEAK"], prefilter=False))
+    assert response.status_code == 202, response.get_json()
+    detail = studio_client.get(f"/studio/searches/{response.get_json()['id']}").get_json()
+    assert len(detail["config"]["factors"]) == 4
+    assert detail["config"]["search"]["prefilter"] == {"enabled": False, "excluded": [], "flipped": []}
+
+    # Screening down to fewer than two candidates refuses to start, with reasons.
+    response = studio_client.post("/studio/searches", json=body(["F_A", "F_DUP", "F_WEAK"]))
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "F_WEAK" in payload["error"] and [e["name"] for e in payload["prefilter"]["excluded"]]
+
+
+@pytest.mark.offline
+def test_search_preview_reports_kept_and_excluded_without_starting(
+    studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+
+    monkeypatch.setattr(studio_module, "SEARCH_ROOT", tmp_path / "traces" / "studio_searches")
+    days = pd.bdate_range("2025-01-01", periods=5)
+    stocks = ["A", "B", "C", "D"]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    rng = np.random.RandomState(1)
+    series = {
+        "F_A": pd.Series(rng.randn(len(index)), index=index),
+        "F_WEAK": pd.Series(rng.randn(len(index)), index=index),
+    }
+    ws = tmp_path / "ws"
+    for name, values in series.items():
+        folder = ws / name.lower()
+        folder.mkdir(parents=True)
+        values.to_frame("x").to_hdf(folder / "result.h5", key="data")
+
+    def cache(name, rank_ic, icir):
+        folder = ws / name.lower()
+        (folder / "studio_analysis.csi300.json").write_text(json.dumps({
+            "status": "completed", "source_mtime": (folder / "result.h5").stat().st_mtime,
+            "rank_ic": {"mean": rank_ic, "std": 0.1, "ir": icir, "positive_ratio": 0.6}}))
+
+    cache("F_A", 0.03, 0.5)
+    cache("F_WEAK", 0.001, 0.01)
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages[1]["content"]["workspaces"]["factors"].extend(
+        {"name": name, "path": str(ws / name.lower())} for name in series
+    )
+    response = studio_client.post("/studio/searches/preview", json={
+        "factors": [{"name": n, "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0} for n in series]})
+    assert response.status_code == 200, response.get_json()
+    data = response.get_json()
+    assert [f["name"] for f in data["kept"]] == ["F_A"]
+    assert [e["name"] for e in data["excluded"]] == ["F_WEAK"]
+    assert data["excluded"][0]["trace"] == "Finance Data Building/demo"
+    # Nothing was launched: no job folder appeared.
+    assert list((tmp_path / "traces" / "studio_searches").glob("*/config.json")) == []
+    assert studio_client.post("/studio/searches/preview", json={"factors": []}).status_code == 400
+
+
+@pytest.mark.offline
+def test_validate_config_keeps_the_search_prefilter_block() -> None:
+    prefilter = {"enabled": True, "excluded": [{"name": "F_WEAK", "reason": "too weak"}], "flipped": []}
+    out = validate_config(_config(search={"prefilter": prefilter}))
+    assert out["search"]["prefilter"] == prefilter
+
+
+@pytest.mark.offline
+def test_strategies_are_saved_listed_updated_and_deleted(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Evidence backtest the strategy points at.
+    job = studio_module.ROOT / "22222222-2222-2222-2222-222222222222"
+    job.mkdir(parents=True)
+    studio_module.write_json(job / "config.json", {"start": "2025-01-02", "end": "2025-06-30", "factors": [{"name": "STR_5"}]})
+    studio_module.write_json(job / "result.json", {"status": "completed", "metrics": {"total_return": 0.05, "sharpe": 0.5, "max_drawdown": -0.1}})
+    body = {"name": "反转一号", "note": "验证通过", "factors": [{"name": "STR_5", "weight": -1, "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "model": {"method": "rank"}, "params": {"market": "csi300", "benchmark": "SH000300", "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015},
+            "evidence": {"backtest_id": "22222222-2222-2222-2222-222222222222", "start": "2025-01-02", "end": "2025-06-30"}}
+    created = studio_client.post("/studio/strategies", json=body)
+    assert created.status_code == 201, created.get_json()
+    strategy = created.get_json()
+    assert strategy["factors"][0]["weight"] == -1 and "path" not in strategy["factors"][0]
+    assert strategy["run_details"][0]["total_return"] == 0.05 and strategy["run_details"][0]["kind"] == "evidence"
+    listed = studio_client.get("/studio/strategies").get_json()
+    assert listed[0]["name"] == "反转一号" and listed[0]["latest"]["total_return"] == 0.05 and listed[0]["run_count"] == 1
+    renamed = studio_client.patch(f"/studio/strategies/{strategy['id']}", json={"name": "反转二号"})
+    assert renamed.get_json()["name"] == "反转二号" and renamed.get_json()["factors"] == strategy["factors"]
+    assert studio_client.post("/studio/strategies", json={**body, "name": ""}).status_code == 400
+
+    # 更新到最新: no refresh (no factor.py in the fixture), backtest launched from the evidence start to the given end.
+    monkeypatch.setattr(studio_module, "run_refresh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no qlib here")))
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print(1)")
+    updated = studio_client.post(f"/studio/strategies/{strategy['id']}/update", json={"end": "2025-12-31"})
+    assert updated.status_code == 202, updated.get_json()
+    job = wait_job(studio_client, updated.get_json()["job"])
+    assert job["status"] == "completed", job
+    payload = job["result"]
+    assert payload["start"] == "2025-01-02" and payload["end"] == "2025-12-31" and payload["failures"] and not payload["refreshed"]
+    detail = studio_client.get(f"/studio/strategies/{strategy['id']}").get_json()
+    assert [r["kind"] for r in detail["run_details"]] == ["evidence", "update"]
+    assert detail["run_details"][1]["status"] == "queued" and detail["run_details"][1]["end"] == "2025-12-31"
+    # 更新到最新 with its own window: the tracking run takes the given start too.
+    windowed = studio_client.post(f"/studio/strategies/{strategy['id']}/update", json={"start": "2025-03-03", "end": "2025-12-31", "refresh": False})
+    assert windowed.status_code == 202, windowed.get_json()
+    assert wait_job(studio_client, windowed.get_json()["job"])["result"]["start"] == "2025-03-03"
+    # Saving another backtest over this strategy replaces its portfolio and evidence and starts tracking over;
+    # id, creation time and note survive, the name stays when none is given.
+    studio_client.patch(f"/studio/strategies/{strategy['id']}", json={"note": "keep me"})
+    replaced = studio_client.post("/studio/strategies", json={**body, "name": "", "note": "", "replace": strategy["id"], "params": {**body["params"], "topk": 5},
+                                                              "evidence": {"backtest_id": "22222222-2222-2222-2222-222222222222", "start": "2025-02-03", "end": "2025-06-30"}})
+    assert replaced.status_code == 200, replaced.get_json()
+    r = replaced.get_json()
+    assert r["id"] == strategy["id"] and r["name"] == "反转二号" and r["note"] == "keep me" and r["created"] == strategy["created"]
+    assert r["params"]["topk"] == 5 and r["evidence"]["start"] == "2025-02-03" and [x["kind"] for x in r["run_details"]] == ["evidence"]
+    assert studio_client.post("/studio/strategies", json={**body, "replace": "00000000-0000-0000-0000-000000000000"}).status_code == 404
+    assert studio_client.delete(f"/studio/strategies/{strategy['id']}").status_code == 200
+    assert studio_client.get(f"/studio/strategies/{strategy['id']}").status_code == 404
+
+
+@pytest.mark.offline
+def test_latest_scores_ranks_the_last_day() -> None:
+    import pandas as pd
+    from rdagent.log.server.studio_worker import latest_scores
+
+    index = pd.MultiIndex.from_product([pd.to_datetime(["2025-06-27", "2025-06-30"]), ["A", "B", "C"]], names=["datetime", "instrument"])
+    score = pd.Series([0.1, 0.2, 0.3, 0.9, 0.1, 0.5], index=index)
+    out = latest_scores(score, topk=1)
+    assert out["date"] == "2025-06-30" and out["universe"] == 3
+    assert [(r["instrument"], r["rank"]) for r in out["scores"]] == [("A", 1), ("C", 2), ("B", 3)]
+
+
+@pytest.mark.offline
+def test_strategy_signal_exports_holdings_and_scores(studio_client, tmp_path: Path) -> None:
+    job = studio_module.ROOT / "33333333-3333-3333-3333-333333333333"
+    job.mkdir(parents=True)
+    studio_module.write_json(job / "config.json", {"start": "2025-01-02", "end": "2025-06-30", "market": "csi300", "topk": 2, "n_drop": 1, "factors": [{"name": "STR_5"}]})
+    studio_module.write_json(job / "result.json", {"status": "completed", "metrics": {"total_return": 0.01},
+        "holdings": {"positions": [{"instrument": "SH600000", "amount": 100, "price": 10.0, "value": 1000.0, "weight": 0.5}], "cash": 1000.0, "total": 2000.0},
+        "latest_signal": {"date": "2025-06-30", "universe": 300, "scores": [{"instrument": "SH600000", "score": 0.9, "rank": 1}, {"instrument": "SZ000001", "score": 0.8, "rank": 2}]}})
+    body = {"name": "导出测试", "factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "model": {"method": "rank"}, "params": {"market": "csi300", "benchmark": "SH000300", "topk": 2, "n_drop": 1, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015},
+            "evidence": {"backtest_id": "33333333-3333-3333-3333-333333333333", "start": "2025-01-02", "end": "2025-06-30"}}
+    strategy = studio_client.post("/studio/strategies", json=body).get_json()
+    payload = studio_client.get(f"/studio/strategies/{strategy['id']}/signal").get_json()
+    assert payload["as_of"] == "2025-06-30" and payload["cash"] == 1000.0
+    assert [(r["type"], r["instrument"]) for r in payload["rows"]] == [("holding", "SH600000"), ("score", "SH600000"), ("score", "SZ000001")]
+    assert payload["rows"][1]["held"] is True and payload["rows"][2]["held"] is False
+    csv_response = studio_client.get(f"/studio/strategies/{strategy['id']}/signal", query_string={"format": "csv"})
+    assert csv_response.status_code == 200 and csv_response.mimetype == "text/csv"
+    assert csv_response.headers["Content-Disposition"].encode("latin-1")  # non-ASCII names must be percent-encoded
+    lines = csv_response.get_data(as_text=True).strip().splitlines()
+    assert lines[0] == "date,type,instrument,name,weight,amount,price,value,score,rank,held" and len(lines) == 4
+    # A strategy whose runs are not completed has nothing to export yet.
+    studio_module.write_json(job / "result.json", {"status": "running"})
+    assert studio_client.get(f"/studio/strategies/{strategy['id']}/signal").status_code == 409
+
+
+@pytest.mark.offline
+def test_research_from_strategy_seeds_base_features(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print('STR_5')")
+    monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
+    monkeypatch.setattr(server, "universe_env", lambda market, build=True: {"QLIB_FACTOR_MARKET": market})
+    started = []
+    monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
+    body = {"name": "回流测试", "factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "model": {"method": "rank"}, "params": {"market": "csi300", "benchmark": "SH000300", "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}}
+    strategy = studio_client.post("/studio/strategies", json=body).get_json()
+    response = studio_client.post("/research/from-strategy", json={"strategy_id": strategy["id"], "loops": 2, "all_duration": 1})
+    assert response.status_code == 200, response.get_json()
+    payload = response.get_json()
+    assert payload["members"] == ["STR_5"] and payload["id"].startswith("Finance Data Building/") and payload["id"].endswith("-on-strategy")
+    assert "STR_5" in payload["instruction"] and "回流测试" in payload["instruction"]
+    task = started[0]
+    assert task.target_name == "fin_factor" and task.kwargs["loop_n"] == 2 and task.kwargs["all_duration"] == "1.0h"
+    assert {k: v for k, v in task.env.items() if not k.endswith("_N_JOBS")} == {"QLIB_FACTOR_MARKET": "csi300"}
+    base = Path(task.kwargs["base_features_path"])
+    assert (base / "STR_5.py").read_text() == "print('STR_5')"
+    assert studio_client.post("/research/from-strategy", json={"strategy_id": "nope"}).status_code == 404
+
+
+@pytest.mark.offline
+def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = tmp_path / "qlib"
+    (provider / "instruments").mkdir(parents=True)
+    for name in ("csi300", "csi1000", "all"):
+        (provider / "instruments" / f"{name}.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setattr(server.UI_SETTING, "trace_folder", str(tmp_path / "traces"))
+    assert server.available_universes() == ["csi300", "csi1000", "all"]
+    env = server.universe_env("csi300")
+    assert env["QLIB_FACTOR_MARKET"] == "csi300" and env["QLIB_MODEL_BENCHMARK"] == "SH000300" and "FACTOR_COSTEER_DATA_FOLDER" not in env
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        out = Path(cmd[6]); (out / "full").mkdir(parents=True, exist_ok=True); (out / "full" / "daily_pv.h5").write_bytes(b"")
+        return type("P", (), {"stdout": '{"status": "completed"}', "stderr": ""})()
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    env = server.universe_env("csi1000")
+    assert env["QLIB_FACTOR_MARKET"] == "csi1000" and env["QLIB_FACTOR_BENCHMARK"] == "SH000852"
+    assert env["QLIB_FACTOR_REGION"] == "cn" and env["QLIB_FACTOR_LIMIT_THRESHOLD"] == "0.095" and "QLIB_PROVIDER_URI" not in env
+    assert env["FACTOR_COSTEER_DATA_FOLDER"].endswith("universe/csi1000/full") and calls and calls[0][3] == "csi1000" and calls[0][-1] == "cn"
+    server.universe_env("csi1000")  # already built: no second subprocess
+    assert len(calls) == 1
+    with pytest.raises(ValueError):
+        server.universe_env("nasdaq")
+    # A sibling data directory declaring its universes (US data) joins the list with its own region and rules.
+    us = tmp_path / "us_ndx"
+    (us / "instruments").mkdir(parents=True)
+    (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "label": "美股", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100", "sp500": "S&P 500"}}))
+    assert server.available_universes() == ["csi300", "csi1000", "all", "nasdaq100"]  # sp500 has no instruments file
+    env = server.universe_env("nasdaq100")
+    assert env["QLIB_FACTOR_REGION"] == "us" and env["QLIB_FACTOR_BENCHMARK"] == "^ndx" and env["QLIB_FACTOR_LIMIT_THRESHOLD"] == "null"
+    assert env["QLIB_FACTOR_OPEN_COST"] == "0.0001" and env["QLIB_FACTOR_CLOSE_COST"] == "0.0001"
+    assert env["QLIB_PROVIDER_URI"] == env["QLIB_FACTOR_PROVIDER_URI"] == str(us)
+    assert calls[-1][2] == str(us) and calls[-1][3] == "nasdaq100" and calls[-1][-1] == "us"
+    from rdagent.log.server import studio_markets
+    record = studio_markets.universe("nasdaq100")
+    assert record["limit_threshold"] is None and record["min_cost"] == 1 and record["label"] == "纳斯达克 100"
+
+
+@pytest.mark.offline
+def test_universe_export_is_stale_only_when_the_window_can_grow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An export capped by QLIB_FACTOR_TEST_END is complete even when the Qlib calendar runs further; rebuilding it
+    would produce the same file and, with build=False, an endless 'not ready' answer (the nasdaq100 loop)."""
+    provider = tmp_path / "qlib"
+    (provider / "instruments").mkdir(parents=True)
+    (provider / "instruments" / "csi300.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    (provider / "calendars").mkdir()
+    (provider / "calendars" / "day.txt").write_text("2025-01-02\n2026-09-15\n")
+    (provider / "instruments" / "csi1000.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setenv("QLIB_FACTOR_TEST_END", "2025-12-31")
+    monkeypatch.setattr(server.UI_SETTING, "trace_folder", str(tmp_path / "traces"))
+    out = tmp_path / "traces" / "studio_data" / "universe" / "csi1000"
+    (out / "full").mkdir(parents=True); (out / "full" / "daily_pv.h5").write_bytes(b"")
+    (out / "meta.json").write_text(json.dumps({"market": "csi1000", "start": "2022-10-03", "end": "2025-12-31"}))
+    calls = []
+    monkeypatch.setattr(server.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or type("P", (), {"stdout": '{"status": "completed"}', "stderr": ""})())
+    env = server.universe_env("csi1000", build=False)  # complete up to the configured end: ready, no job
+    assert env["FACTOR_COSTEER_DATA_FOLDER"].endswith("csi1000/full") and not calls
+    monkeypatch.setenv("QLIB_FACTOR_TEST_END", "2030-12-31")  # window open-ended: the export stops at 2025-12-31 while data reaches 2026-09-15
+    with pytest.raises(server.UniverseNotReady):
+        server.universe_env("csi1000", build=False)
+    (out / "meta.json").write_text(json.dumps({"market": "csi1000", "start": "2022-10-03", "end": "2026-09-15"}))
+    assert server.universe_env("csi1000", build=False)["FACTOR_COSTEER_DATA_FOLDER"].endswith("csi1000/full")
+
+
+@pytest.mark.offline
+def test_upload_passes_the_universe_to_the_run(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
+    monkeypatch.setattr(server, "universe_env", lambda market, build=True: {"QLIB_FACTOR_MARKET": market, "FACTOR_COSTEER_DATA_FOLDER": "/data/" + market})
+    started = []
+    monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
+    response = studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "2", "all_duration": "1", "market": "csi1000"})
+    assert response.status_code == 200, response.get_json()
+    assert {k: v for k, v in started[0].env.items() if not k.endswith("_N_JOBS")} == {"QLIB_FACTOR_MARKET": "csi1000", "FACTOR_COSTEER_DATA_FOLDER": "/data/csi1000"}
+    assert started[0].kwargs["loop_n"] == 2
+
+
+@pytest.mark.offline
+def test_data_sync_status_settings_and_guards(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_sync
+
+    provider = tmp_path / "qlib"
+    (provider / "calendars").mkdir(parents=True)
+    (provider / "calendars" / "day.txt").write_text("2025-01-02\n2026-09-11\n")
+    (provider / "studio-data-source.json").write_text(json.dumps({"release": "2026-09-12", "downloaded_at": "x"}))
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setattr(studio_sync, "_settings_path", tmp_path / "sync.json")
+    status = studio_client.get("/studio/data/sync").get_json()
+    assert status["local"]["release"] == "2026-09-12" and status["local"]["calendar_end"] == "2026-09-11"
+    assert status["settings"]["auto"] is False and status["sync"]["running"] is False
+    saved = studio_client.put("/studio/data/sync/settings", json={"auto": True, "hour": 20}).get_json()
+    assert saved["auto"] is True and saved["hour"] == 20
+    assert studio_client.put("/studio/data/sync/settings", json={"hour": 99}).status_code == 400
+    # Already on the latest release: nothing to do; a running worker blocks the start.
+    monkeypatch.setattr(studio_sync, "check_remote", lambda max_age=900: {"release": "2026-09-12", "archive_url": "u", "archive_bytes": 1})
+    monkeypatch.setattr(studio_sync, "_busy_check", lambda: False)
+    response = studio_client.post("/studio/data/sync", json={})
+    assert response.status_code == 409 and "已是最新版" in response.get_json()["reason"]
+    monkeypatch.setattr(studio_sync, "_busy_check", lambda: True)
+    assert "正在运行" in studio_client.post("/studio/data/sync", json={"force": True}).get_json()["reason"]
+
+
+@pytest.mark.offline
+def test_sync_worker_swaps_directories_and_records_the_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import tarfile
+    from rdagent.log.server import studio_sync
+
+    provider = tmp_path / "qlib" / "cn_data"
+    (provider / "calendars").mkdir(parents=True)
+    (provider / "calendars" / "day.txt").write_text("2025-01-02\n")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setattr(studio_sync, "_busy_check", lambda: False)
+    # A fake archive with the layout of the real one: qlib_bin/calendars/day.txt ...
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, content in (("qlib_bin/calendars/day.txt", "2025-01-02\n2026-09-15\n"), ("qlib_bin/features/sh600000/close.day.bin", "x")):
+            info = tarfile.TarInfo(name); data = content.encode(); info.size = len(data); tar.addfile(info, io.BytesIO(data))
+    archive_bytes = buffer.getvalue()
+    monkeypatch.setattr(studio_sync, "_download", lambda url, target, expected: target.write_bytes(archive_bytes))
+    monkeypatch.setattr(studio_sync, "_get_json", lambda url, timeout=20: {"archive_sha256": "sha256:" + __import__("hashlib").sha256(archive_bytes).hexdigest()})
+    studio_sync._sync_worker({"release": "2026-09-15", "archive_url": "u", "archive_bytes": len(archive_bytes), "manifest_url": "m", "published_at": "p"})
+    assert (provider / "calendars" / "day.txt").read_text().splitlines()[-1] == "2026-09-15"
+    assert (provider / "features" / "sh600000" / "close.day.bin").is_file()
+    source = json.loads((provider / "studio-data-source.json").read_text())
+    assert source["release"] == "2026-09-15" and source["calendar_end"] == "2026-09-15"
+    assert not (provider.parent / "cn_data.old").exists() and not (provider.parent / "cn_data.new").exists()
+    assert studio_sync.status()["sync"]["phase"] == "done"
+
+
+@pytest.mark.offline
+def test_rounds_lists_factor_rounds(studio_client) -> None:
+    response = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"})
+    assert response.status_code == 200
+    assert response.get_json() == [{"loop_id": 0, "factors": ["STR_5"], "metrics": {"IC": 0.01, "Rank IC": 0.02}, "prediction": False}]
+    assert studio_client.get("/studio/rounds", query_string={"trace": "nope/none"}).status_code == 404
+
+
+@pytest.mark.offline
+def test_backtest_resolves_factor_paths(studio_client, tmp_path: Path) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0,
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    job = response.get_json()["id"]
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / job / "config.json").read_text())
+    assert config["factors"] == [{"name": "STR_5", "kind": "factor", "weight": 1.0, "path": str(tmp_path / "ws" / "f0"),
+                                  "trace": "Finance Data Building/demo", "loop_id": 0}]
+    assert config["trace"] == "Finance Data Building/demo"
+    assert config["region"] == "cn" and config["limit_threshold"] == 0.095 and config["min_cost"] == 5 and config["benchmark"] == "SH000300"
+
+    bad = dict(body, factors=[{"name": "UNKNOWN", "weight": 1}])
+    assert studio_client.post("/studio/backtests", json=bad).status_code == 400
+
+
+@pytest.mark.offline
+def test_backtest_rejects_paths_outside_workspace_root(studio_client, tmp_path: Path) -> None:
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages[1]["content"]["workspaces"]["factors"][0]["path"] = str(tmp_path / "elsewhere")
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0,
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 400
+    assert "workspace" in response.get_json()["error"].lower()
+
+
+@pytest.mark.offline
+def test_research_reports_route_removed(studio_client) -> None:
+    assert studio_client.get("/studio/research-reports").status_code == 404
+
+
+@pytest.mark.offline
+def test_backtest_accepts_string_loop_id(studio_client, tmp_path: Path) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": "0",
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    job = response.get_json()["id"]
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / job / "config.json").read_text())
+    assert config["loop_id"] == 0
+
+
+@pytest.mark.offline
+def test_backtest_rejects_non_numeric_loop_id(studio_client, tmp_path: Path) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": "x",
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 400
+    assert "loop_id" in response.get_json()["error"]
+
+
+@pytest.mark.offline
+def test_trace_messages_reads_registry_from_current_app(tmp_path: Path) -> None:
+    """trace_messages must go through current_app.config, not `import rdagent.log.server.app`.
+
+    A plain dotted import of that module is wrong at runtime: the real server process is
+    started with `python -m rdagent.log.server.app`, which binds the running module to
+    sys.modules["__main__"] and leaves a second, never-populated copy under its normal
+    dotted name. Push a task into app.config["RDAGENT_PROCESSES"] directly (bypassing
+    `server.rdagent_processes` as a plain module attribute) and confirm trace_messages
+    still finds it purely via the Flask application context.
+    """
+    trace_folder = tmp_path / "traces"
+    fake_task = type("FakeTask", (), {"messages": [{"tag": "feedback.metric"}]})()
+    registry = {}
+    with server.app.app_context():
+        original_registry = server.app.config["RDAGENT_PROCESSES"]
+        original_folder = server.app.config["LOG_FOLDER_PATH"]
+        server.app.config["RDAGENT_PROCESSES"] = registry
+        server.app.config["LOG_FOLDER_PATH"] = trace_folder
+        try:
+            registry[str(trace_folder / "some/trace")] = fake_task
+            assert studio_module.trace_messages("some/trace") == fake_task.messages
+            assert studio_module.trace_messages("missing/trace") is None
+        finally:
+            server.app.config["RDAGENT_PROCESSES"] = original_registry
+            server.app.config["LOG_FOLDER_PATH"] = original_folder
+
+
+@pytest.mark.offline
+def test_require_signal_coverage_rejects_window_past_signal_history() -> None:
+    dates = pd.DatetimeIndex(["2025-12-29", "2025-12-30", "2025-12-31"])
+    with pytest.raises(ValueError) as excinfo:
+        require_signal_coverage(dates, "2025-12-29", "2026-09-11")
+    message = str(excinfo.value)
+    assert "2025-12-29" in message
+    assert "2025-12-31" in message
+
+
+@pytest.mark.offline
+def test_require_signal_coverage_accepts_window_inside_signal_history() -> None:
+    dates = pd.DatetimeIndex(["2025-01-01", "2025-06-15", "2025-12-31"])
+    require_signal_coverage(dates, "2025-01-02", "2025-12-30")
+
+
+@pytest.mark.offline
+def test_trading_day_on_or_before_rolls_back_from_weekend() -> None:
+    calendar = pd.DatetimeIndex(["2025-01-01", "2025-01-02", "2025-01-03"])
+    # 2025-01-04 is a Saturday, one day after the last trading day above.
+    assert trading_day_on_or_before(calendar, "2025-01-04") == pd.Timestamp("2025-01-03")
+
+
+@pytest.mark.offline
+def test_trading_day_on_or_before_returns_exact_match() -> None:
+    calendar = pd.DatetimeIndex(["2025-01-01", "2025-01-02", "2025-01-03"])
+    assert trading_day_on_or_before(calendar, "2025-01-02") == pd.Timestamp("2025-01-02")
+
+
+@pytest.mark.offline
+def test_trading_day_on_or_before_rejects_date_before_calendar() -> None:
+    calendar = pd.DatetimeIndex(["2025-01-01", "2025-01-02", "2025-01-03"])
+    with pytest.raises(ValueError):
+        trading_day_on_or_before(calendar, "2024-12-31")
+
+
+@pytest.mark.offline
+def test_running_workspaces_only_include_factor_tasks(tmp_path: Path) -> None:
+    factor_task = _FactorTask("STR_5")
+    model_task = _ModelTask(name="LGBModel", description="")
+    exp = Experiment(sub_tasks=[factor_task, model_task])
+    exp.experiment_workspace = FBWorkspace()
+    exp.experiment_workspace.workspace_path = tmp_path / "exp"
+    for index, task in enumerate([factor_task, model_task]):
+        ws = FBWorkspace(target_task=task)
+        ws.workspace_path = tmp_path / f"ws{index}"
+        exp.sub_workspace_list[index] = ws
+    exp.result = pd.Series({"IC": 0.01})
+    data = WebStorage(port=1, path=tmp_path)._obj_to_json(
+        obj=exp, tag="Loop_0.running", id="trace", timestamp="2026-09-14T00:00:00"
+    )
+    factors = data["msg"]["content"]["workspaces"]["factors"]
+    assert [f["name"] for f in factors] == ["STR_5"]
+
+
+@pytest.mark.offline
+def test_metric_rounds_dedupes_keeping_latest_per_loop() -> None:
+    messages = [
+        {
+            "tag": "feedback.metric", "loop_id": 0, "timestamp": "t1",
+            "content": {"result": json.dumps({"IC": 0.01}),
+                        "workspaces": {"factors": [{"name": "OLD", "path": "/tmp/old"}]}},
+        },
+        {
+            "tag": "feedback.metric", "loop_id": 0, "timestamp": "t2",
+            "content": {"result": json.dumps({"IC": 0.02}),
+                        "workspaces": {"factors": [{"name": "NEW", "path": "/tmp/new"}]}},
+        },
+    ]
+    rounds = studio_module.metric_rounds(messages)
+    assert len(rounds) == 1
+    assert rounds[0]["factors"] == ["NEW"]
+    assert rounds[0]["metrics"] == {"IC": 0.02}
+
+
+@pytest.mark.offline
+def test_metric_rounds_excludes_bool_metrics() -> None:
+    messages = [
+        {
+            "tag": "feedback.metric", "loop_id": 0, "timestamp": "t1",
+            "content": {"result": json.dumps({"IC": 0.01, "ok": True}), "workspaces": {"factors": []}},
+        },
+    ]
+    rounds = studio_module.metric_rounds(messages)
+    assert rounds[0]["metrics"] == {"IC": 0.01}
+
+
+@pytest.mark.offline
+def test_resolve_factor_paths_rejects_non_dict_factor(studio_client) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0,
+            "factors": ["STR_5"],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 400
+    assert "object with name and weight" in response.get_json()["error"]
+
+
+@pytest.mark.offline
+def test_backtest_responses_omit_factor_paths(studio_client, tmp_path: Path) -> None:
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0,
+            "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    post_response = studio_client.post("/studio/backtests", json=body)
+    assert post_response.status_code == 202, post_response.get_json()
+    job = post_response.get_json()["id"]
+
+    for factor in studio_client.get("/studio/backtests").get_json()[0]["config"]["factors"]:
+        assert "path" not in factor
+    for factor in studio_client.get(f"/studio/backtests/{job}").get_json()["config"]["factors"]:
+        assert "path" not in factor
+
+
+@pytest.mark.offline
+def test_backtest_accepts_per_factor_rounds_without_request_defaults(studio_client, tmp_path: Path) -> None:
+    body = {"factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": "0"}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300", "benchmark": "SH000905",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / response.get_json()["id"] / "config.json").read_text())
+    assert config["factors"][0]["loop_id"] == 0
+    assert config["benchmark"] == "SH000905"
+    listed = studio_client.get("/studio/backtests").get_json()[0]["config"]["factors"][0]
+    assert listed == {"name": "STR_5", "kind": "factor", "weight": 1.0, "trace": "Finance Data Building/demo", "loop_id": 0}
+
+    unknown = dict(body, factors=[{"name": "STR_5", "weight": 1, "trace": "nope/none", "loop_id": 0}])
+    assert studio_client.post("/studio/backtests", json=unknown).status_code == 400
+
+
+@pytest.mark.offline
+def test_factor_library_lists_factors_with_code(studio_client, tmp_path: Path) -> None:
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages.insert(1, {"tag": "evolving.codes", "loop_id": "0", "timestamp": "t", "evo_id": 0,
+                             "content": [{"evo_id": 0, "target_task_name": "STR_5", "workspace": {"factor.py": "print(5)"}}]})
+    task.messages.insert(1, {"tag": "research.tasks", "loop_id": "0", "timestamp": "t",
+                             "content": [{"name": "STR_5", "description": "Short-term reversal", "formulation": "-r_5",
+                                          "variables": {"$close": "close"}}]})
+    task.messages.append({"tag": "feedback.hypothesis_feedback", "loop_id": "0", "timestamp": "t",
+                          "content": {"decision": True, "reason": "improves return"}})
+    response = studio_client.get("/studio/factors")
+    assert response.status_code == 200
+    assert response.get_json() == [{
+        "trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5", "market": "csi300",
+        "description": "Short-term reversal", "formulation": "-r_5", "variables": {"$close": "close"},
+        "hypothesis": "h", "decision": True, "reason": "improves return",
+        "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)", "analysis": None, "refreshed": None, "coverage": None,
+    }]
+
+
+@pytest.mark.offline
+def test_validate_config_checks_benchmark() -> None:
+    with pytest.raises(ValueError, match="同名因子 STR_5"):
+        validate_config(_config(factors=[{"name": "STR_5", "path": "/tmp/a", "weight": 1}, {"name": "STR_5", "path": "/tmp/b", "weight": 1}]))
+    assert validate_config(_config())["benchmark"] == "SH000300"
+    assert validate_config(_config(benchmark=" SH000905 "))["benchmark"] == "SH000905"
+    with pytest.raises(ValueError, match="benchmark"):
+        validate_config(_config(benchmark=""))
+
+
+@pytest.mark.offline
+def test_factor_library_falls_back_to_workspace_source(studio_client, tmp_path: Path) -> None:
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print('from disk')")
+    entry = studio_client.get("/studio/factors").get_json()[0]
+    assert entry["code"] == "print('from disk')"
+
+
+def _write_prediction(workspace_root: Path) -> Path:
+    artifacts = workspace_root / "exp" / "mlruns" / "1" / "run" / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    index = pd.MultiIndex.from_tuples(
+        [(pd.Timestamp("2025-01-02"), "SH600000"), (pd.Timestamp("2025-01-02"), "SH600009")],
+        names=["datetime", "instrument"],
+    )
+    path = artifacts / "pred.pkl"
+    pd.DataFrame({"score": [0.2, 0.1]}, index=index).to_pickle(path)
+    return path
+
+
+@pytest.mark.offline
+def test_rounds_report_prediction_availability(studio_client, tmp_path: Path) -> None:
+    assert studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"}).get_json()[0]["prediction"] is False
+    _write_prediction(tmp_path / "ws")
+    rounds = studio_client.get("/studio/rounds", query_string={"trace": "Finance Data Building/demo"}).get_json()
+    assert rounds[0]["prediction"] is True
+    assert "experiment" not in rounds[0] and "paths" not in rounds[0]
+
+
+@pytest.mark.offline
+def test_backtest_accepts_model_prediction_signal(studio_client, tmp_path: Path) -> None:
+    pred = _write_prediction(tmp_path / "ws")
+    (tmp_path / "qlib" / "calendars").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "qlib" / "calendars" / "day.txt").write_text("2025-01-02\n")
+    body = {"factors": [{"kind": "prediction", "name": "模型预测", "weight": 1,
+                         "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015,
+            "provider_uri": str(tmp_path / "qlib")}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / response.get_json()["id"] / "config.json").read_text())
+    assert config["factors"][0]["kind"] == "prediction"
+    assert config["factors"][0]["path"] == str(pred)
+    listed = studio_client.get("/studio/backtests").get_json()[0]["config"]["factors"][0]
+    assert listed["kind"] == "prediction" and "path" not in listed
+
+
+@pytest.mark.offline
+def test_backtest_rejects_prediction_when_round_has_none(studio_client, tmp_path: Path) -> None:
+    body = {"factors": [{"kind": "prediction", "name": "模型预测", "weight": 1,
+                         "trace": "Finance Data Building/demo", "loop_id": 0}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "csi300",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 400
+    assert "prediction" in response.get_json()["error"]
+
+
+@pytest.mark.offline
+def test_load_factor_frame_reads_prediction_pickle(tmp_path: Path) -> None:
+    pred = _write_prediction(tmp_path)
+    frame = load_factor_frame({"kind": "prediction", "name": "模型预测", "path": str(pred)},
+                              pd.Timestamp("2025-01-01"), "2025-12-31")
+    assert list(frame.columns) == ["模型预测"]
+    assert len(frame) == 2
+
+
+class _Metric:
+    def __init__(self, values):
+        self._values = values
+
+    def to_dict(self):
+        return dict(self._values)
+
+
+class _Indicator:
+    """Mimics qlib's NumpyOrderIndicator: get_index_data(metric).to_dict() -> {instrument: value}."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def get_index_data(self, metric):
+        return _Metric({r["instrument"]: r[metric] for r in self._rows})
+
+
+class _Position:
+    def __init__(self, book, cash):
+        self._book = book
+        self._cash = cash
+
+    def get_stock_list(self):
+        return list(self._book)
+
+    def get_stock_amount(self, code):
+        return self._book[code][0]
+
+    def get_stock_price(self, code):
+        return self._book[code][1]
+
+    def get_stock_weight(self, code):
+        return self._book[code][0] * self._book[code][1] / self.calculate_value()
+
+    def get_cash(self, include_settle=False):
+        return self._cash
+
+    def calculate_value(self):
+        return self._cash + sum(a * p for a, p in self._book.values())
+
+
+@pytest.mark.offline
+def test_trades_and_holdings_are_flattened_for_the_ui() -> None:
+    from rdagent.log.server.studio_worker import holdings_from_position, instrument_summary, trades_from_indicator
+
+    his = {
+        pd.Timestamp("2025-01-03"): _Indicator([
+            {"instrument": "SH600000", "deal_amount": 100, "trade_price": 10.0, "trade_value": 1000.0, "trade_cost": 1.0, "trade_dir": 1},
+            {"instrument": "SH600009", "deal_amount": 0, "trade_price": 0.0, "trade_value": 0.0, "trade_cost": 0.0, "trade_dir": 1},
+        ]),
+        pd.Timestamp("2025-01-06"): _Indicator([
+            {"instrument": "SH600000", "deal_amount": 50, "trade_price": 12.0, "trade_value": -600.0, "trade_cost": 1.5, "trade_dir": 0},
+        ]),
+    }
+    trades = trades_from_indicator(his)
+    assert trades == [
+        {"date": "2025-01-03", "instrument": "SH600000", "direction": "buy", "amount": 100.0, "price": 10.0, "value": 1000.0, "cost": 1.0},
+        {"date": "2025-01-06", "instrument": "SH600000", "direction": "sell", "amount": 50.0, "price": 12.0, "value": 600.0, "cost": 1.5},
+    ]
+    holdings = holdings_from_position(_Position({"SH600000": (50, 13.0)}, cash=397.5))
+    assert holdings["positions"] == [{"instrument": "SH600000", "amount": 50.0, "price": 13.0, "value": 650.0, "weight": 650.0 / 1047.5}]
+    assert holdings["cash"] == 397.5
+    summary = instrument_summary(trades, holdings)
+    assert summary == [{"instrument": "SH600000", "trades": 2, "buy_value": 1000.0, "sell_value": 600.0, "cost": 2.5,
+                        "holding_value": 650.0, "pnl": 247.5, "held": True}]
+    # Qlib's adjusted price and share count become the broker's real ones through $factor; values stay put.
+    from rdagent.log.server.studio_worker import unadjust_book
+
+    holdings["as_of"] = "2025-01-06"
+    trades, holdings = unadjust_book(trades, holdings, {("SH600000", "2025-01-03"): 0.5, ("SH600000", "2025-01-06"): 0.5})
+    assert trades[0]["price"] == 20.0 and trades[0]["amount"] == 50.0 and trades[0]["value"] == 1000.0
+    assert holdings["positions"][0] == {"instrument": "SH600000", "amount": 25.0, "price": 26.0, "value": 650.0, "weight": 650.0 / 1047.5}
+    assert instrument_summary(trades, holdings)[0]["pnl"] == 247.5
+    # A missing factor (instrument outside the data) leaves the row as Qlib produced it.
+    trades, _ = unadjust_book([{"date": "2025-01-03", "instrument": "SH600009", "amount": 1.0, "price": 2.0, "value": 2.0, "cost": 0.0}], {"positions": []}, {})
+    assert trades[0]["price"] == 2.0 and trades[0]["amount"] == 1.0
+
+
+@pytest.mark.offline
+def test_validate_model_defaults_to_rank_and_orders_lgbm_windows() -> None:
+    from rdagent.log.server.studio_worker import LGBM_DEFAULTS, validate_model
+
+    assert validate_model(None, "2025-01-02") == {"method": "rank"}
+    model = validate_model({"method": "lgbm", "train": ["2023-01-01", "2023-12-31"], "valid": ["2024-01-01", "2024-12-31"],
+                            "params": {"num_leaves": "31", "learning_rate": 0.1}}, "2025-01-02")
+    assert model["train"] == ["2023-01-01", "2023-12-31"] and model["valid"] == ["2024-01-01", "2024-12-31"]
+    assert model["params"]["num_leaves"] == 31 and model["params"]["learning_rate"] == 0.1
+    assert model["params"]["n_estimators"] == LGBM_DEFAULTS["n_estimators"]
+    for bad in (
+        {"method": "lgbm", "train": ["2023-01-01", "2024-06-30"], "valid": ["2024-01-01", "2024-12-31"]},  # overlap
+        {"method": "lgbm", "train": ["2023-01-01", "2023-12-31"], "valid": ["2024-01-01", "2025-03-31"]},  # leaks into backtest
+        {"method": "lgbm", "train": ["2023-01-01", "2023-12-31"], "valid": ["2024-01-01", "2024-12-31"], "params": {"num_leaves": 1}},
+        {"method": "lgbm", "train": ["2023-01-01", "2023-12-31"], "valid": ["2024-01-01", "2024-12-31"], "params": {"boosting": "dart"}},
+        {"method": "mlp"},
+    ):
+        with pytest.raises(ValueError):
+            validate_model(bad, "2025-01-02")
+
+
+@pytest.mark.offline
+def test_lgbm_signal_and_ic_on_synthetic_data() -> None:
+    import numpy as np
+    from rdagent.log.server.studio_worker import cross_sectional_zscore, information_coefficient, train_lgbm_signal
+
+    rng = np.random.default_rng(0)
+    days = pd.bdate_range("2024-01-01", periods=120)
+    stocks = [f"S{i:03d}" for i in range(40)]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    f1 = pd.Series(rng.normal(size=len(index)), index=index)
+    f2 = pd.Series(rng.normal(size=len(index)), index=index)
+    label_raw = 0.8 * f1 - 0.3 * f2 + 0.2 * rng.normal(size=len(index))
+    features = pd.concat([f1.rename("f1"), f2.rename("f2")], axis=1).groupby(level="datetime").rank(pct=True)
+    label = cross_sectional_zscore(pd.Series(label_raw, index=index))
+    assert abs(label.groupby(level="datetime").mean()).max() < 1e-9
+
+    model = {"method": "lgbm", "train": [str(days[0].date()), str(days[79].date())],
+             "valid": [str(days[80].date()), str(days[99].date())],
+             "params": {"learning_rate": 0.1, "num_leaves": 15, "max_depth": 4, "colsample_bytree": 1.0, "subsample": 1.0,
+                        "subsample_freq": 0, "lambda_l1": 0.0, "lambda_l2": 1.0, "n_estimators": 200, "early_stopping_rounds": 20}}
+    score, report = train_lgbm_signal(features, label, model, log=lambda *_: None)
+    assert report["train_rows"] == 80 * 40 and report["valid_rows"] == 20 * 40
+    assert set(report["feature_importance"]) == {"f1", "f2"}
+    test = score[score.index.get_level_values("datetime") >= days[100]]
+    ic, rank_ic = information_coefficient(test, label)
+    assert ic is not None and ic > 0.5 and rank_ic > 0.5
+
+
+@pytest.mark.offline
+def test_window_coverage_names_the_missing_signal() -> None:
+    from rdagent.log.server.studio_worker import require_window_coverage
+
+    days = pd.bdate_range("2024-01-01", periods=10)
+    index = pd.MultiIndex.from_product([days, ["A"]], names=["datetime", "instrument"])
+    features = pd.DataFrame({"f1": 1.0, "pred": [None] * 5 + [1.0] * 5}, index=index)
+    require_window_coverage(features, [str(days[5].date()), str(days[9].date())], "training")
+    with pytest.raises(ValueError, match="pred \\(2024-01-08 to 2024-01-12\\)"):
+        require_window_coverage(features, [str(days[0].date()), str(days[4].date())], "training")
+
+
+@pytest.mark.offline
+def test_factor_library_borrows_task_description_from_another_trace(studio_client, tmp_path: Path) -> None:
+    other = server._get_or_create_task(str(tmp_path / "traces" / "Finance Data Building/original"))
+    other.messages = [{"tag": "research.hypothesis", "loop_id": "0", "timestamp": "t", "content": {"hypothesis": "original idea"}},
+                      {"tag": "research.tasks", "loop_id": "0", "timestamp": "t",
+                       "content": [{"name": "STR_5", "description": "from the original run", "formulation": None, "variables": None}]}]
+    task = server.rdagent_processes[str(tmp_path / "traces" / "Finance Data Building/demo")]
+    task.messages = [m for m in task.messages if m["tag"] != "research.hypothesis"]
+    entry = next(e for e in studio_client.get("/studio/factors").get_json() if e["trace"] == "Finance Data Building/demo")
+    assert entry["description"] == "from the original run"
+    assert entry["hypothesis"] == "original idea"
+
+
+@pytest.mark.offline
+def test_factor_correlation_ranks_and_averages(studio_client, tmp_path: Path) -> None:
+    from rdagent.log.server.studio import factor_correlation
+
+    days = pd.bdate_range("2025-01-01", periods=5)
+    stocks = ["A", "B", "C", "D"]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    base = pd.Series(range(len(index)), index=index, dtype=float)
+    (tmp_path / "ws" / "f1").mkdir(parents=True)
+    (tmp_path / "ws" / "f2").mkdir(parents=True)
+    base.to_frame("x").to_hdf(tmp_path / "ws" / "f1" / "result.h5", key="data")
+    (-base).to_frame("y").to_hdf(tmp_path / "ws" / "f2" / "result.h5", key="data")
+    result = factor_correlation([("f1", tmp_path / "ws" / "f1"), ("f2", tmp_path / "ws" / "f2")])
+    assert result["names"] == ["f1", "f2"] and result["days"] == 5
+    assert result["matrix"][0][0] == pytest.approx(1.0) and result["matrix"][0][1] == pytest.approx(-1.0)
+
+
+@pytest.mark.offline
+def test_cached_analysis_is_invalidated_when_result_changes(tmp_path: Path) -> None:
+    from rdagent.log.server.studio import analysis_cache_path, cached_analysis
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "result.h5").write_bytes(b"x")
+    analysis_cache_path(ws, "csi300").write_text(json.dumps({"status": "completed", "source_mtime": (ws / "result.h5").stat().st_mtime, "days": 3}))
+    assert cached_analysis(ws, "csi300")["days"] == 3
+    analysis_cache_path(ws, "csi300").write_text(json.dumps({"status": "completed", "source_mtime": 0, "days": 3}))
+    assert cached_analysis(ws, "csi300") is None
+
+
+@pytest.mark.offline
+def test_analysis_summary_on_synthetic_ic() -> None:
+    from rdagent.log.server.studio_analysis import daily_ic, summarize
+
+    days = pd.bdate_range("2025-01-01", periods=30)
+    stocks = [f"S{i}" for i in range(20)]
+    index = pd.MultiIndex.from_product([days, stocks], names=["datetime", "instrument"])
+    factor = pd.Series([i % 20 for i in range(len(index))], index=index, dtype=float)
+    ic, rank_ic = daily_ic(factor, factor * 2)
+    summary = summarize(ic, rank_ic, days[0], days[-1], len(index))
+    assert summary["days"] == 30 and summary["ic"]["mean"] == pytest.approx(1.0) and summary["rank_ic"]["positive_ratio"] == 1.0
+    assert summary["monthly"][0]["month"] == "2025-01" and summary["coverage"] == {"start": "2025-01-01", "end": "2025-02-11"}
+
+
+@pytest.mark.offline
+def test_backtest_list_carries_total_return(studio_client, tmp_path: Path) -> None:
+    folder = tmp_path / "traces" / "studio_backtests" / "11111111-1111-1111-1111-111111111111"
+    folder.mkdir(parents=True)
+    (folder / "config.json").write_text(json.dumps({"factors": [], "start": "2025-01-01", "end": "2025-06-30"}))
+    (folder / "result.json").write_text(json.dumps({"status": "completed", "metrics": {"total_return": 0.05}}))
+    job = studio_client.get("/studio/backtests").get_json()[0]
+    assert job["total_return"] == 0.05
+
+
+@pytest.mark.offline
+def test_trace_status_distinguishes_unknown_and_loaded(studio_client) -> None:
+    assert studio_client.get("/studio/trace-status", query_string={"trace": "nope/none"}).get_json() == {"loaded": False, "alive": False, "messages": 0}
+    status = studio_client.get("/studio/trace-status", query_string={"trace": "Finance Data Building/demo"}).get_json()
+    assert status["loaded"] is True and status["alive"] is False and status["messages"] >= 2
+
+
+@pytest.mark.offline
+def test_llm_settings_save_env_and_test(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import types
+    from rdagent.log.server import studio_llm
+
+    monkeypatch.setattr(studio_llm, "_settings_path", tmp_path / "llm.json")
+    monkeypatch.setenv("CHAT_MODEL", "deepseek/deepseek-chat")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-12345678")
+    # Nothing saved yet: the UI sees what .env gave the server, without the key itself.
+    current = studio_client.get("/studio/llm").get_json()["current"]
+    assert current["source"] == "env" and current["provider"] == "deepseek" and current["model"] == "deepseek-chat"
+    assert current["has_key"] and current["key_hint"] == "…5678" and "sk-env" not in json.dumps(current)
+    assert studio_llm.env() == {}
+    # Validation.
+    assert studio_client.put("/studio/llm", json={"provider": "nope", "model": "x"}).status_code == 400
+    assert "Base URL" in studio_client.put("/studio/llm", json={"provider": "openai_compatible", "model": "x"}).get_json()["error"]
+    # Saving a provider with a key; the key file is private and the key never comes back.
+    saved = studio_client.put("/studio/llm", json={"provider": "anthropic", "model": "claude-sonnet-5", "api_key": "sk-ant-abcdefgh", "max_retry": 5}).get_json()
+    assert saved["current"] == {**saved["current"], "source": "studio", "provider": "anthropic", "key_hint": "…efgh", "has_key": True, "max_retry": 5}
+    assert "sk-ant" not in json.dumps(saved)
+    assert oct((tmp_path / "llm.json").stat().st_mode & 0o777) == "0o600"
+    env = studio_llm.env()
+    assert env["CHAT_MODEL"] == env["LITELLM_CHAT_MODEL"] == "anthropic/claude-sonnet-5"
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-abcdefgh" and env["MAX_RETRY"] == "5"
+    # A new research task inherits it beneath its own variables.
+    task = server.RDAgentTask("fin_factor", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False, env={"QLIB_FACTOR_MARKET": "csi500"})
+    assert task.env["ANTHROPIC_API_KEY"] == "sk-ant-abcdefgh" and task.env["QLIB_FACTOR_MARKET"] == "csi500"
+    # macOS runs train in-process (forked DataLoader workers segfault there) unless the run says otherwise.
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    task = server.RDAgentTask("fin_factor", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False, env={"QLIB_MODEL_N_JOBS": "4"})
+    assert task.env["QLIB_MODEL_N_JOBS"] == "4" and task.env["QLIB_FACTOR_N_JOBS"] == "0"
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    assert "QLIB_FACTOR_N_JOBS" not in server.RDAgentTask("fin_factor", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False).env
+    # Switching provider without a key keeps the other provider's key on file and reports no key for the new one.
+    switched = studio_client.put("/studio/llm", json={"provider": "openai", "model": "gpt-5"}).get_json()["current"]
+    assert switched["has_key"] is False and switched["saved_keys"] == {"anthropic": "…efgh"}
+    # Back on the .env provider without a stored key: the inherited key still counts, and is flagged as such.
+    back = studio_client.put("/studio/llm", json={"provider": "deepseek", "model": "deepseek-chat"}).get_json()["current"]
+    assert back["has_key"] and back["key_from_env"] and back["key_hint"] == "…5678"
+    assert studio_llm.env()["DEEPSEEK_API_KEY"] == "sk-env-12345678"
+    studio_client.put("/studio/llm", json={"provider": "openai", "model": "gpt-5"})
+    assert studio_client.get("/studio/environment").get_json()["chat_model"] == "openai/gpt-5"
+    # The connection test uses the form's key over the stored one and reports the model it called.
+    calls = []
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="OK"))])
+
+    monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(completion=fake_completion))
+    result = studio_client.post("/studio/llm/test", json={"provider": "openai_compatible", "model": "qwen-plus", "api_key": "k1", "base_url": "https://x/v1"}).get_json()
+    assert result["ok"] and result["reply"] == "OK" and result["model"] == "openai/qwen-plus"
+    assert calls[0]["api_key"] == "k1" and calls[0]["api_base"] == "https://x/v1"
+    assert studio_client.post("/studio/llm/test", json={"provider": "openai", "model": "gpt-5"}).status_code == 502
+
+
+@pytest.mark.offline
+def test_embedding_settings_share_keys_and_reach_the_run(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import sys
+    import types
+    from rdagent.log.server import studio_llm
+
+    monkeypatch.setattr(studio_llm, "_settings_path", tmp_path / "llm.json")
+    for var in ("OPENAI_API_KEY", "EMBEDDING_MODEL", "LITELLM_EMBEDDING_MODEL", "DASHSCOPE_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    # DeepSeek chat saved; nothing embeds yet: the UI sees an unconfigured embedding and the run gets no model.
+    studio_client.put("/studio/llm", json={"provider": "deepseek", "model": "deepseek-flash", "api_key": "sk-ds-12345678"})
+    status = studio_client.get("/studio/llm").get_json()
+    assert status["embedding"]["provider"] is None and not status["embedding"]["has_key"]
+    assert [p["id"] for p in status["providers"] if p["embeddings"]] == ["openai", "gemini", "dashscope", "ollama"]
+    assert studio_client.get("/studio/environment").get_json()["embedding_model"] == ""
+    assert "EMBEDDING_MODEL" not in studio_llm.env()
+    # Chat-only providers are refused; a provider with embeddings is saved with its own key.
+    assert "没有嵌入接口" in studio_client.put("/studio/llm/embedding", json={"provider": "deepseek", "model": "x"}).get_json()["error"]
+    saved = studio_client.put("/studio/llm/embedding", json={"provider": "dashscope", "model": "text-embedding-v4", "api_key": "sk-ali-abcdefgh"}).get_json()
+    assert saved["embedding"] == {**saved["embedding"], "provider": "dashscope", "model": "text-embedding-v4", "key_hint": "…efgh", "has_key": True, "source": "studio"}
+    assert saved["current"]["provider"] == "deepseek" and saved["current"]["saved_keys"] == {"deepseek": "…5678", "dashscope": "…efgh"}
+    env = studio_llm.env()
+    assert env["EMBEDDING_MODEL"] == env["LITELLM_EMBEDDING_MODEL"] == "dashscope/text-embedding-v4"
+    assert env["DASHSCOPE_API_KEY"] == "sk-ali-abcdefgh" and env["DEEPSEEK_API_KEY"] == "sk-ds-12345678"
+    assert studio_client.get("/studio/environment").get_json()["embedding_model"] == "dashscope/text-embedding-v4"
+    # Switching chat to OpenAI reuses the OpenAI key for embeddings without a second entry.
+    studio_client.put("/studio/llm", json={"provider": "openai", "model": "gpt-6-astra", "api_key": "sk-oa-11112222"})
+    e = studio_client.put("/studio/llm/embedding", json={"provider": "openai", "model": "text-embedding-3-small"}).get_json()["embedding"]
+    assert e["has_key"] and e["key_hint"] == "…2222"
+    # A compatible endpoint for embeddings while chat is OpenAI would fight over OPENAI_API_BASE: refused.
+    clash = studio_client.put("/studio/llm/embedding", json={"provider": "openai_compatible", "model": "BAAI/bge-m3", "base_url": "https://api.siliconflow.cn/v1", "api_key": "sf"})
+    assert clash.status_code == 400 and "OPENAI_API_KEY" in clash.get_json()["error"]
+    # Ollama needs no key; the model gets the provider prefix even when it carries a slash of its own.
+    e = studio_client.put("/studio/llm/embedding", json={"provider": "ollama", "model": "nomic-embed-text"}).get_json()["embedding"]
+    assert e["has_key"] and e["key_hint"] == ""
+    assert studio_llm.env()["EMBEDDING_MODEL"] == "ollama/nomic-embed-text"
+    studio_client.put("/studio/llm", json={"provider": "openai_compatible", "model": "qwen-plus", "base_url": "https://api.siliconflow.cn/v1", "api_key": "sf-1234567890"})
+    e = studio_client.put("/studio/llm/embedding", json={"provider": "openai_compatible", "model": "BAAI/bge-m3", "base_url": "https://api.siliconflow.cn/v1"}).get_json()["embedding"]
+    assert e["has_key"] and studio_llm.env()["EMBEDDING_MODEL"] == "openai/BAAI/bge-m3"
+    # The embedding test calls litellm.embedding with the form's key and reports the vector size.
+    calls = []
+
+    def fake_embedding(**kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(data=[{"embedding": [0.1, 0.2, 0.3]}])
+
+    monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(embedding=fake_embedding))
+    result = studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001", "api_key": "g1"}).get_json()
+    assert result["ok"] and result["dims"] == 3 and result["model"] == "gemini/gemini-embedding-001" and calls[0]["api_key"] == "g1"
+    assert studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001"}).status_code == 502
+    # A key with stray non-ASCII characters (a pasted hint, full-width letters) is named instead of a codec error.
+    bad = studio_client.post("/studio/llm/embedding/test", json={"provider": "gemini", "model": "gemini-embedding-001", "api_key": "sk-abc 已保存…"}).get_json()
+    assert not bad["ok"] and "非 ASCII" in bad["error"] and "第 8 位" in bad["error"]
+    assert "非 ASCII" in studio_client.put("/studio/llm/embedding", json={"provider": "gemini", "model": "x", "api_key": "ｓｋ-full-width"}).get_json()["error"]
+    assert "非 ASCII" in studio_client.put("/studio/llm", json={"provider": "openai", "model": "x", "base_url": "https://中转.example/v1"}).get_json()["error"]
+    # Clearing the record removes it and leaves the keys alone.
+    cleared = studio_client.put("/studio/llm/embedding", json={"provider": ""}).get_json()
+    assert cleared["embedding"]["provider"] is None and "dashscope" in cleared["current"]["saved_keys"]
+    # Listing embedding models keeps the embedding ids (and, for Gemini, the embedContent models).
+    class FakeResponse(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=20):
+        if "googleapis" in req.full_url:
+            body = {"models": [{"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                               {"name": "models/gemini-embedding-001", "supportedGenerationMethods": ["embedContent"]}]}
+        elif "11434" in req.full_url:
+            body = {"models": [{"name": "nomic-embed-text:latest"}, {"name": "qwen3:8b"}]}
+        else:
+            body = {"data": [{"id": "gpt-6-astra"}, {"id": "text-embedding-3-large"}, {"id": "text-embedding-3-small"}]}
+        return FakeResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr(studio_llm.urllib.request, "urlopen", fake_urlopen)
+    assert studio_client.post("/studio/llm/models", json={"provider": "openai", "api_key": "k", "kind": "embedding"}).get_json()["models"] == ["text-embedding-3-small", "text-embedding-3-large"]
+    assert studio_client.post("/studio/llm/models", json={"provider": "gemini", "api_key": "g", "kind": "embedding"}).get_json()["models"] == ["gemini-embedding-001"]
+    assert studio_client.post("/studio/llm/models", json={"provider": "ollama", "kind": "embedding"}).get_json()["models"] == ["nomic-embed-text:latest"]
+
+
+@pytest.mark.offline
+def test_llm_model_listing_filters_chat_models(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    from rdagent.log.server import studio_llm
+
+    monkeypatch.setattr(studio_llm, "_settings_path", tmp_path / "llm.json")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    seen = {}
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=20):
+        seen["url"] = req.full_url; seen["headers"] = dict(req.header_items())
+        if "googleapis" in req.full_url:
+            body = {"models": [{"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                               {"name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"]}]}
+        else:
+            body = {"data": [{"id": "gpt-5.6-sol"}, {"id": "text-embedding-3-small"}, {"id": "whisper-1"}, {"id": "gpt-6-astra"}]}
+        return FakeResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr(studio_llm.urllib.request, "urlopen", fake_urlopen)
+    assert "API Key" in studio_client.post("/studio/llm/models", json={"provider": "openai"}).get_json()["error"]
+    result = studio_client.post("/studio/llm/models", json={"provider": "openai", "api_key": "k"}).get_json()
+    assert result["ok"] and result["models"] == ["gpt-6-astra", "gpt-5.6-sol"]
+    assert seen["headers"]["Authorization"] == "Bearer k" and seen["url"] == "https://api.openai.com/v1/models"
+    result = studio_client.post("/studio/llm/models", json={"provider": "gemini", "api_key": "g"}).get_json()
+    assert result["models"] == ["gemini-3.8-flash"] and "key=g" in seen["url"] and "key" not in result["source"]
+    result = studio_client.post("/studio/llm/models", json={"provider": "openai_compatible", "api_key": "k", "base_url": "https://relay/v1/"}).get_json()
+    assert result["ok"] and seen["url"] == "https://relay/v1/models"
+
+
+@pytest.mark.offline
+def test_sync_remote_check_falls_back_when_the_api_is_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+    from rdagent.log.server import studio_sync
+
+    monkeypatch.setattr(studio_sync, "_remote_cache", {"checked_at": 0.0, "release": None})
+
+    def limited(url, timeout=20):
+        raise urllib.error.HTTPError(url, 403, "rate limit exceeded", {}, None)
+
+    monkeypatch.setattr(studio_sync, "_get_json", limited)
+    monkeypatch.setattr(studio_sync, "_latest_tag_by_redirect", lambda timeout=20: "2026-09-15")
+    release = studio_sync.check_remote(max_age=0)
+    assert release["release"] == "2026-09-15" and release["archive_bytes"] is None
+    assert release["archive_url"] == f"https://github.com/{studio_sync.REPO}/releases/download/2026-09-15/{studio_sync.ARCHIVE}"
+    # Both routes down: the cached answer is served; with no cache the error names the rate limit.
+    monkeypatch.setattr(studio_sync, "_latest_tag_by_redirect", lambda timeout=20: (_ for _ in ()).throw(RuntimeError("offline")))
+    assert studio_sync.check_remote(max_age=0)["release"] == "2026-09-15"
+    monkeypatch.setattr(studio_sync, "_remote_cache", {"checked_at": 0.0, "release": None})
+    with pytest.raises(RuntimeError, match="限流"):
+        studio_sync.check_remote(max_age=0)
+    # Other HTTP errors still surface as they are.
+    monkeypatch.setattr(studio_sync, "_get_json", lambda url, timeout=20: (_ for _ in ()).throw(urllib.error.HTTPError(url, 500, "boom", {}, None)))
+    with pytest.raises(urllib.error.HTTPError):
+        studio_sync.check_remote(max_age=0)
+
+
+@pytest.mark.offline
+def test_backtest_on_a_us_universe_takes_its_data_region_and_rules(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cn = tmp_path / "qlib_data" / "cn_data"
+    (cn / "instruments").mkdir(parents=True)
+    (cn / "instruments" / "csi300.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    us = tmp_path / "qlib_data" / "us_ndx"
+    (us / "instruments").mkdir(parents=True)
+    (us / "calendars").mkdir()
+    (us / "calendars" / "day.txt").write_text("2025-01-02\n")
+    (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "label": "美股", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100"}}))
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(cn))
+    body = {"trace": "Finance Data Building/demo", "loop_id": 0, "factors": [{"name": "STR_5", "weight": 1}],
+            "start": "2025-01-01", "end": "2025-06-30", "market": "nasdaq100",
+            "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+    response = studio_client.post("/studio/backtests", json=body)
+    assert response.status_code == 202, response.get_json()
+    config = json.loads((tmp_path / "traces" / "studio_backtests" / response.get_json()["id"] / "config.json").read_text())
+    assert config["provider_uri"] == str(us) and config["region"] == "us"
+    assert config["benchmark"] == "^ndx" and config["limit_threshold"] is None and config["min_cost"] == 1
+    # Commissions given by the caller are kept; a body without them gets the market's defaults.
+    assert config["open_cost"] == 0.0005 and config["close_cost"] == 0.0015
+    slim = {k: v for k, v in body.items() if k not in ("open_cost", "close_cost")}
+    job = studio_client.post("/studio/backtests", json=slim).get_json()["id"]
+    defaults = json.loads((tmp_path / "traces" / "studio_backtests" / job / "config.json").read_text())
+    assert defaults["open_cost"] == 0.0001 and defaults["close_cost"] == 0.0001
+    assert studio_client.post("/studio/backtests", json=dict(body, market="sp500")).status_code == 400
+
+
+@pytest.mark.offline
+def test_lists_are_scoped_by_region(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cn = tmp_path / "qlib_data" / "cn_data"
+    (cn / "instruments").mkdir(parents=True)
+    (cn / "calendars").mkdir()
+    (cn / "calendars" / "day.txt").write_text("2025-01-02\n2025-06-30\n")
+    (cn / "instruments" / "csi300.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    us = tmp_path / "qlib_data" / "us_ndx"
+    (us / "instruments").mkdir(parents=True)
+    (us / "calendars").mkdir()
+    (us / "calendars" / "day.txt").write_text("2007-01-03\n2026-09-15\n")
+    (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100"}}))
+    (us / "instrument_names.json").write_text(json.dumps({"source": "nasdaq", "names": {"AAPL": {"name": "APPLE INC."}}}))
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(cn))
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    # A second experiment marked as a NASDAQ-100 run.
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/us-run"))
+    task.messages = [{"tag": "research.hypothesis", "loop_id": "0", "timestamp": "2026-09-01T10:00:00", "content": {"hypothesis": "us"}}]
+    (trace_folder / "Finance Data Building/us-run").mkdir(parents=True, exist_ok=True)
+    (trace_folder / "Finance Data Building/us-run" / "studio-run.json").write_text(json.dumps({"market": "nasdaq100"}))
+    ids = lambda rows: sorted(r["id"] for r in rows)  # noqa: E731
+    assert ids(studio_client.get("/studio/experiments").get_json()) == ["Finance Data Building/demo", "Finance Data Building/us-run"]
+    assert ids(studio_client.get("/studio/experiments?region=us").get_json()) == ["Finance Data Building/us-run"]
+    assert ids(studio_client.get("/studio/experiments?region=cn").get_json()) == ["Finance Data Building/demo"]
+    # Factors follow their experiment's market; the demo factor is an A-share one.
+    assert [f["name"] for f in studio_client.get("/studio/factors?region=cn").get_json()] == ["STR_5"]
+    assert studio_client.get("/studio/factors?region=us").get_json() == []
+    # Backtests are scoped by their config's market.
+    for market in ("csi300", "nasdaq100"):
+        body = {"trace": "Finance Data Building/demo", "loop_id": 0, "factors": [{"name": "STR_5", "weight": 1}],
+                "start": "2025-01-03", "end": "2025-06-30", "market": market, "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015}
+        assert studio_client.post("/studio/backtests", json=body).status_code == 202
+    assert [j["config"]["market"] for j in studio_client.get("/studio/backtests?region=us").get_json()] == ["nasdaq100"]
+    assert [j["config"]["market"] for j in studio_client.get("/studio/backtests?region=cn").get_json()] == ["csi300"]
+    assert len(studio_client.get("/studio/backtests").get_json()) == 2
+    # Workspaces, per-region environment and names.
+    regions = {r["region"]: r for r in studio_client.get("/studio/regions").get_json()}
+    assert regions["cn"]["ready"] and regions["us"]["ready"] and regions["us"]["end"] == "2026-09-15" and regions["us"]["markets"] == ["nasdaq100"]
+    env = studio_client.get("/studio/environment?region=us").get_json()
+    assert env["provider_uri"] == str(us) and env["start"] == "2007-01-03"
+    assert studio_client.get("/studio/environment").get_json()["end"] == "2025-06-30"
+    assert studio_client.get("/studio/instruments/names?region=us").get_json()["names"]["AAPL"]["name"] == "APPLE INC."
+    assert studio_client.get("/studio/instruments/names").get_json()["names"] == {}
+    # Without any US data the workspace is still listed, not ready.
+    (us / "studio-universe.json").unlink()
+    regions = {r["region"]: r for r in studio_client.get("/studio/regions").get_json()}
+    assert regions["us"]["ready"] is False and regions["us"]["markets"] == []
+
+
+@pytest.mark.offline
+def test_trace_ids_are_scoped_by_region(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cn = tmp_path / "qlib_data" / "cn_data"
+    (cn / "instruments").mkdir(parents=True)
+    (cn / "instruments" / "csi300.txt").write_text("SH600000\t2020-01-01\t2030-01-01\n")
+    us = tmp_path / "qlib_data" / "us_ndx"
+    (us / "instruments").mkdir(parents=True)
+    (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100"}}))
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(cn))
+    root = server.app.config["LOG_FOLDER_PATH"]
+    for name, market in (("us-run", "nasdaq100"), ("cn-run", "csi300"), ("old-run", None)):
+        folder = root / "Finance Data Building" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "debug_tpl").mkdir(exist_ok=True)
+        (folder / "debug_tpl" / "x.pkl").write_bytes(b"")  # what marks a folder as a trace
+        if market:
+            (folder / "studio-run.json").write_text(json.dumps({"market": market}))
+    every = set(studio_client.get("/traces").get_json())
+    assert {"Finance Data Building/us-run", "Finance Data Building/cn-run", "Finance Data Building/old-run"} <= every
+    assert studio_client.get("/traces?region=us").get_json() == ["Finance Data Building/us-run"]
+    cn_ids = set(studio_client.get("/traces?region=cn").get_json())
+    assert "Finance Data Building/us-run" not in cn_ids and {"Finance Data Building/cn-run", "Finance Data Building/old-run"} <= cn_ids
+
+
+@pytest.mark.offline
+def test_trace_tail_returns_cleaned_last_lines(studio_client) -> None:
+    root = server.app.config["LOG_FOLDER_PATH"]
+    (root / "Finance Data Building").mkdir(parents=True, exist_ok=True)
+    log = root / "Finance Data Building" / "demo.log"
+    log.write_text(
+        "2026-09-16 22:33:08.455 | INFO     | rdagent.utils.workflow.loop:_run_step:216 - Start Loop 0, Step 3: feedback\n"
+        "2026/09/16 22:32:54 INFO mlflow.agent.hint: Load the \n"
+        "Workflow Progress:  60%|██████    | 3/5 [03:12<02:08, 64.21s/step]\n"
+        "\x1b[32mUsing chat model\x1b[0m deepseek/deepseek-flash\n"
+        "Training until validation scores don't improve for 50 rounds\n"
+    )
+    payload = studio_client.get("/studio/trace-tail", query_string={"trace": "Finance Data Building/demo", "lines": 3}).get_json()
+    assert payload["lines"] == ["22:33:08 Start Loop 0, Step 3: feedback", "Using chat model deepseek/deepseek-flash", "Training until validation scores don't improve for 50 rounds"]
+    assert payload["updated"] and payload["size"] > 0
+    assert studio_client.get("/studio/trace-tail", query_string={"trace": "Finance Data Building/nothing"}).get_json()["lines"] == []
+    assert studio_client.get("/studio/trace-tail", query_string={"trace": "../etc"}).status_code == 400
+
+
+@pytest.mark.offline
+def test_attention_lists_unanswered_requests_of_live_runs(studio_client) -> None:
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/waiting"))
+    task.messages = [
+        {"tag": "research.hypothesis", "loop_id": "0", "timestamp": "2026-09-17T01:00:00", "content": {"hypothesis": "h"}},
+        {"tag": "user_interaction.request", "timestamp": "2026-09-17T01:00:05", "content": {"hypothesis": "h", "reason": "r"}},
+    ]
+    # Not alive: nothing pending.
+    assert studio_client.get("/studio/attention").get_json() == []
+    task.is_alive = lambda: True  # type: ignore[method-assign]
+    task.process = object()  # type: ignore[assignment]
+    items = studio_client.get("/studio/attention").get_json()
+    assert items == [{"trace": "Finance Data Building/waiting", "market": "csi300", "kind": "hypothesis", "since": "2026-09-17T01:00:05", "round": 1}]
+    assert studio_client.get("/studio/attention?region=us").get_json() == []
+    summary = next(e for e in studio_client.get("/studio/experiments").get_json() if e["id"].endswith("waiting"))
+    assert summary["waiting"] == "hypothesis"
+    # Answering marks it done even before the process emits anything new.
+    task.user_response_q = type("Q", (), {"put": lambda self, *a, **k: None})()
+    assert studio_client.post("/user_interaction/submit", json={"id": "Finance Data Building/waiting", "payload": {"hypothesis": "h"}}).status_code == 200
+    assert studio_client.get("/studio/attention").get_json() == []
+    # A feedback request is classified as such, and stays pending even when log events arrive after it.
+    task.messages.append({"tag": "user_interaction.request", "timestamp": "2026-09-17T01:20:00", "content": {"decision": True, "reason": "ok"}})
+    task.messages.append({"tag": "research.hypothesis", "loop_id": "1", "timestamp": "2026-09-17T01:20:01", "content": {"hypothesis": "late"}})
+    assert studio_client.get("/studio/attention").get_json()[0]["kind"] == "feedback"
+    # Submitting twice: the second is refused instead of queueing a stray payload.
+    assert studio_client.post("/user_interaction/submit", json={"id": "Finance Data Building/waiting", "payload": {"decision": True}}).status_code == 200
+    assert studio_client.post("/user_interaction/submit", json={"id": "Finance Data Building/waiting", "payload": {"decision": True}}).status_code == 409
+
+
+@pytest.mark.offline
+def test_confirm_policy_answers_requests_by_mode_and_timeout(studio_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/policy"))
+    replies = []
+    task.user_response_q = type("Q", (), {"put": lambda self, payload, **k: replies.append(payload)})()
+    task.is_alive = lambda: True  # type: ignore[method-assign]
+    task.process = object()  # type: ignore[assignment]
+    fresh = datetime.now(timezone.utc).isoformat()
+
+    def request(content, ts=fresh):
+        task.messages.append({"tag": "user_interaction.request", "timestamp": ts, "content": content})
+
+    # Default policy (hypothesis only): instruction, features and verdicts pass as proposed, a hypothesis waits.
+    task.confirm = server.parse_confirm(None, None, "focus on volume")
+    request({"user_instruction": None})
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"user_instruction": "focus on volume"} and task.messages[-1]["tag"] == "user_interaction.auto"
+    request({"features": {"A": "$close"}, "feature_validation_msg": ""})
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"A": "$close"}
+    request({"hypothesis": "h", "reason": "r"})
+    server.apply_confirm_policy(task)
+    assert len(replies) == 2 and task.messages[-1]["tag"] == "user_interaction.request"
+    assert studio_client.get("/studio/attention").get_json()[0]["kind"] == "hypothesis"
+    # ... until the timeout passes.
+    task.messages[-1]["timestamp"] = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat()
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"hypothesis": "h", "reason": "r"} and task.messages[-1]["content"] == {"kind": "hypothesis", "why": "timeout"}
+    assert studio_client.get("/studio/attention").get_json() == []
+    # "all" waits on everything and never times out with timeout 0; "auto" waits on nothing.
+    task.confirm = server.parse_confirm("all", 0)
+    request({"decision": True, "reason": "ok"}, (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat())
+    server.apply_confirm_policy(task)
+    assert len(replies) == 3
+    task.confirm = server.parse_confirm("auto", 0)
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"decision": True, "reason": "ok"}
+    with pytest.raises(ValueError):
+        server.parse_confirm("sometimes", 5)
+    with pytest.raises(ValueError):
+        server.parse_confirm("all", 5000)
+
+
+@pytest.mark.offline
+def test_upload_and_resume_carry_the_confirm_policy(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "upload_folder_path", tmp_path / "uploads")
+    monkeypatch.setattr(server, "universe_env", lambda market, build=True: {})
+    started = []
+    monkeypatch.setattr(server.RDAgentTask, "start", lambda self: started.append(self))
+    response = studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "1", "all_duration": "1", "confirm_mode": "auto", "confirm_timeout": "0", "objective": "vol"})
+    assert response.status_code == 200, response.get_json()
+    assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "vol"}
+    assert studio_client.post("/upload", data={"scenario": "Finance Data Building", "loops": "1", "confirm_mode": "never"}).status_code == 400
+    # Resume: the previous run's policy is inherited unless the request names a new one.
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    (trace_folder / "Finance Data Building" / "demo" / "__session__").mkdir(parents=True, exist_ok=True)
+    previous = server._get_or_create_task(str(trace_folder / "Finance Data Building/demo"))
+    previous.confirm = {"mode": "all", "timeout_min": 0, "instruction": "old"}
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1}).status_code == 200
+    assert started[-1].confirm == {"mode": "all", "timeout_min": 0, "instruction": "old"}
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1, "confirm_mode": "auto", "confirm_timeout": 0}).status_code == 200
+    assert started[-1].confirm == {"mode": "auto", "timeout_min": 0, "instruction": "old"}
+    assert studio_client.post("/resume", json={"id": "Finance Data Building/demo", "loops": 1, "confirm_mode": "never"}).status_code == 400
+
+
+@pytest.mark.offline
+def test_recent_lists_round_and_run_completions_after_a_cursor(studio_client) -> None:
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server._get_or_create_task(str(trace_folder / "Finance Data Building/recent"))
+    task.messages = [
+        {"tag": "feedback.metric", "loop_id": "0", "timestamp": "2026-09-17T02:00:00", "content": {"result": json.dumps({"IC": 0.031}), "workspaces": {"factors": [{"name": "F1"}, {"name": "F2"}]}}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "0", "timestamp": "2026-09-17T02:01:00", "content": {"decision": True}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "1", "timestamp": "2026-09-17T02:20:00", "content": {"decision": False}},
+        {"tag": "END", "timestamp": "2026-09-17T02:21:00", "content": {"end_code": 0}},
+    ]
+    everything = studio_client.get("/studio/recent").get_json()
+    kinds = [(i["kind"], i.get("round"), i.get("decision"), i.get("ic"), i.get("factors"), i.get("status")) for i in everything["items"] if i["trace"].endswith("recent")]
+    assert kinds == [("round_done", 1, True, 0.031, ["F1", "F2"], None), ("round_done", 2, False, None, [], None), ("run_done", None, None, None, None, "completed")]
+    later = studio_client.get("/studio/recent", query_string={"since": "2026-09-17T02:10:00"}).get_json()["items"]
+    assert [i["kind"] for i in later if i["trace"].endswith("recent")] == ["round_done", "run_done"]
+    assert everything["now"]
+    assert [i for i in studio_client.get("/studio/recent?region=us").get_json()["items"] if i["trace"].endswith("recent")] == []
+
+
+@pytest.mark.offline
+def test_correlation_names_the_factors_that_do_not_overlap(tmp_path: Path) -> None:
+    import pandas as pd
+    from rdagent.log.server.studio import factor_correlation
+
+    def write(folder: Path, name: str, dates: list[str], codes: list[str]):
+        folder.mkdir(parents=True, exist_ok=True)
+        index = pd.MultiIndex.from_product([pd.to_datetime(dates), codes], names=["datetime", "instrument"])
+        pd.DataFrame({name: range(len(index))}, index=index, dtype="float64").to_hdf(folder / "result.h5", key="data", mode="w")
+
+    write(tmp_path / "a", "A", ["2025-01-02", "2025-01-03"], ["SH600000", "SZ000001"])
+    write(tmp_path / "b", "B", ["2026-09-14", "2026-09-15"], ["AAPL", "MSFT"])
+    with pytest.raises(ValueError) as error:
+        factor_correlation([("A", tmp_path / "a"), ("B", tmp_path / "b")])
+    message = str(error.value)
+    assert "A 2025-01-02→2025-01-03（如 SH600000）" in message and "B 2026-09-14→2026-09-15（如 AAPL）" in message
+    with pytest.raises(ValueError, match="没有 result.h5"):
+        factor_correlation([("A", tmp_path / "a"), ("C", tmp_path / "c")])

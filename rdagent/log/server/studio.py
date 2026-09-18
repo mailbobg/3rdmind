@@ -1,0 +1,1616 @@
+"""Local, persisted backtest jobs on top of RD-Agent research output. Registered under the server's auth gate."""
+import hashlib
+import json
+import re
+import os
+import subprocess
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from flask import Blueprint, Response, current_app, jsonify, request
+from rdagent.core.conf import RD_AGENT_SETTINGS
+from rdagent.log.ui.conf import UI_SETTING
+from rdagent.log.server import studio_jobs, studio_llm, studio_markets, studio_sync
+from rdagent.log.server.studio_worker import validate_config, write_json
+
+studio = Blueprint("studio", __name__, url_prefix="/studio")
+PROCESSES = {}
+TRACE_ROOT = Path(UI_SETTING.trace_folder).resolve()
+ROOT = TRACE_ROOT / "studio_backtests"
+SEARCH_ROOT = TRACE_ROOT / "studio_searches"
+STRATEGY_ROOT = TRACE_ROOT / "studio_strategies"
+# Factors recomputed on the latest data ("重算到最新") live here, one folder per (trace, round, name),
+# beside the shared daily_pv the recomputation reads.
+REFRESH_ROOT = TRACE_ROOT / "studio_refresh"
+LATEST_DATA = TRACE_ROOT / "studio_data" / "daily_pv_latest.h5"
+# Instrument code → {name, industry}; a JSON file the user refreshes from their own listing source.
+INSTRUMENT_NAMES = TRACE_ROOT / "studio_data" / "instrument_names.json"
+WORKSPACE_ROOT = Path(RD_AGENT_SETTINGS.workspace_path).resolve()
+
+# Cheap pre-search filter ("预筛"): same cutoffs as the Studio's 自动挑候选 button, so a search
+# launched from any client skips the obviously useless candidates before any backtest runs.
+# Factors without a cached single-factor analysis are never excluded for weakness (their indicators
+# simply have not been computed yet); they only lose to a near-duplicate with a known stronger ICIR.
+PREFILTER_NOISE_RANK_IC = 0.005
+PREFILTER_NOISE_ICIR = 0.05
+PREFILTER_DUPLICATE_CORR = 0.7
+
+
+def job_folder(job_id):
+    uuid.UUID(job_id)
+    return ROOT / job_id
+
+
+def trace_messages(trace_id):
+    """Messages of a loaded trace, or None when the server has not loaded it.
+
+    Reached via flask.current_app rather than `import rdagent.log.server.app`: the
+    server is launched with `python -m rdagent.log.server.app`, which binds that
+    module to sys.modules["__main__"]; importing it by its normal dotted name here
+    would create a second, empty copy of the module (and an empty rdagent_processes
+    registry), so /studio endpoints would never see the loaded trace.
+    """
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    task = registry.get(str(Path(current_app.config["LOG_FOLDER_PATH"]) / trace_id))
+    return None if task is None else task.messages
+
+
+def normalize_loop_id(value):
+    """Coerce a loop_id to int; accepts int (not bool) or a string of digits (after strip).
+
+    Persisted trace events (see extract_loopid_func_name in rdagent/log/ui/storage.py) always carry
+    loop_id as a string, while live in-memory events may carry it as an int. Both /studio/rounds and
+    /studio/backtests must agree on one representation or `round_["loop_id"] == loop_id` silently
+    fails on a type mismatch (e.g. int 0 vs string "0").
+    """
+    if not isinstance(value, bool) and isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    raise ValueError("loop_id must be an integer")
+
+
+def metric_rounds(messages):
+    """One entry per loop_id, in first-seen order; a repeated loop_id keeps its LATEST metric event."""
+    order = []
+    by_loop = {}
+    for message in messages:
+        if message.get("tag") != "feedback.metric":
+            continue
+        content = message.get("content", {})
+        try:
+            metrics = json.loads(content["result"]) if isinstance(content.get("result"), str) else content.get("result") or {}
+        except (ValueError, TypeError):
+            metrics = {}
+        raw_loop_id = message.get("loop_id")
+        try:
+            loop_id = normalize_loop_id(raw_loop_id)
+        except ValueError:
+            loop_id = raw_loop_id
+        if loop_id not in by_loop:
+            order.append(loop_id)
+        workspaces = content.get("workspaces", {}) or {}
+        by_loop[loop_id] = {
+            "loop_id": loop_id,
+            "factors": [f["name"] for f in workspaces.get("factors", [])],
+            "paths": {f["name"]: f["path"] for f in workspaces.get("factors", [])},
+            "experiment": workspaces.get("experiment"),
+            "metrics": {k: v for k, v in metrics.items() if isinstance(v, (int, float)) and not isinstance(v, bool)},
+        }
+    return [by_loop[loop_id] for loop_id in order]
+
+
+def prediction_file(experiment_path):
+    """The newest Qlib ``pred.pkl`` recorded under an experiment workspace, or None."""
+    if not experiment_path:
+        return None
+    root = Path(experiment_path).resolve()
+    if WORKSPACE_ROOT not in root.parents:
+        return None
+    candidates = sorted(root.glob("mlruns/*/*/artifacts/pred.pkl"), key=lambda p: p.stat().st_mtime)
+    return candidates[-1] if candidates else None
+
+
+def factor_code(messages, loop_id, name):
+    """The generated factor.py for ``name`` in round ``loop_id``, or None when the trace has no code event for it."""
+    code = None
+    for message in messages:
+        if message.get("tag") != "evolving.codes":
+            continue
+        try:
+            if normalize_loop_id(message.get("loop_id")) != loop_id:
+                continue
+        except ValueError:
+            continue
+        for task in message.get("content") or []:
+            if task.get("target_task_name") == name and isinstance(task.get("workspace"), dict):
+                code = task["workspace"].get("factor.py", code)
+    return code
+
+
+def round_context(messages):
+    """Per loop_id: the agent's hypothesis, its verdict, and each task's description/formulation/variables."""
+    context = {}
+    for message in messages:
+        try:
+            loop_id = normalize_loop_id(message.get("loop_id"))
+        except ValueError:
+            continue
+        entry = context.setdefault(loop_id, {"hypothesis": None, "decision": None, "reason": None, "tasks": {}})
+        tag, content = message.get("tag"), message.get("content") or {}
+        if tag == "research.hypothesis" and isinstance(content, dict):
+            entry["hypothesis"] = content.get("hypothesis")
+        elif tag == "feedback.hypothesis_feedback" and isinstance(content, dict):
+            entry["decision"] = content.get("decision")
+            entry["reason"] = content.get("reason") or content.get("hypothesis_evaluation")
+        elif tag == "research.tasks":
+            for task in content if isinstance(content, list) else [content]:
+                if isinstance(task, dict) and task.get("name"):
+                    entry["tasks"][task["name"]] = {k: task.get(k) for k in ("description", "formulation", "variables")}
+    return context
+
+
+def task_fallback(registry, name):
+    """A resumed run replays no task/hypothesis events; borrow them from any loaded trace that proposed ``name``.
+
+    Returns the task detail plus the hypothesis of the round that proposed it (under "hypothesis").
+    """
+    for task in registry.values():
+        for entry in round_context(task.messages).values():
+            if name in entry["tasks"] and entry["tasks"][name].get("description"):
+                return {**entry["tasks"][name], "hypothesis": entry["hypothesis"]}
+    return {}
+
+
+def wanted_region():
+    """The workspace a list request is scoped to (``?region=``), or None for everything."""
+    region = (request.args.get("region") or "").strip().lower()
+    return region or None
+
+
+def in_region(market, region) -> bool:
+    return region is None or studio_markets.region_of(market) == region
+
+
+def run_market(trace) -> str:
+    """The universe a trace was researched on (studio-run.json written at start), csi300 for older runs."""
+    path = TRACE_ROOT / trace / "studio-run.json"
+    if path.is_file():
+        try:
+            market = json.loads(path.read_text()).get("market")
+            if isinstance(market, str) and market:
+                return market
+        except ValueError:
+            pass
+    return "csi300"
+
+
+def analysis_cache_path(workspace, market):
+    return Path(workspace) / f"studio_analysis.{market}.json"
+
+
+def cached_analysis(workspace, market):
+    """The stored single-factor analysis, or None when absent or older than result.h5."""
+    path = analysis_cache_path(workspace, market)
+    source = Path(workspace) / "result.h5"
+    if not path.is_file() or not source.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except ValueError:
+        return None
+    if data.get("source_mtime") != source.stat().st_mtime or data.get("status") != "completed":
+        return None
+    return data
+
+
+def refresh_dir(trace, loop_id, name):
+    return REFRESH_ROOT / hashlib.sha1(f"{trace}#{loop_id}#{name}".encode()).hexdigest()[:16]
+
+
+def refreshed_meta(trace, loop_id, name):
+    """meta.json of a recomputed factor, or None when it has never been recomputed."""
+    folder = refresh_dir(trace, loop_id, name)
+    if not (folder / "result.h5").is_file() or not (folder / "meta.json").is_file():
+        return None
+    try:
+        return json.loads((folder / "meta.json").read_text())
+    except ValueError:
+        return None
+
+
+def signal_workspace(trace, loop_id, name, workspace):
+    """Where a factor's result.h5 is read from: the recomputed copy when there is one, else RD-Agent's workspace."""
+    return refresh_dir(trace, loop_id, name) if refreshed_meta(trace, loop_id, name) else Path(workspace)
+
+
+def latest_data_path(market):
+    """The shared latest-data file for a universe (the CSI300 one keeps its original name)."""
+    return LATEST_DATA if market == "csi300" else LATEST_DATA.with_name(f"daily_pv_latest.{market}.h5")
+
+
+def run_refresh(code_path, name, out_dir, market="csi300"):
+    """Recompute one factor on the latest data of its universe in a subprocess; returns its meta on success."""
+    record = studio_markets.universe(market)
+    start = os.environ.get("STUDIO_REFRESH_START", "2022-10-10")
+    completed = subprocess.run(
+        [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_refresh.py")),
+         record["provider_uri"], str(latest_data_path(record["market"])), start, str(code_path), name, str(out_dir),
+         record["market"], record["region"]],
+        capture_output=True, text=True, timeout=1500,
+    )
+    line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    try:
+        data = json.loads(line)
+    except ValueError:
+        raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "refresh produced no output")
+    if data.get("status") != "completed":
+        raise RuntimeError(data.get("error") or "refresh failed")
+    return data
+
+
+def factor_library(registry, log_folder):
+    """Every factor with a workspace across all loaded traces, newest trace first."""
+    root = Path(log_folder)
+    entries = []
+    for key, task in registry.items():
+        try:
+            trace = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            continue
+        context = round_context(task.messages)
+        market = run_market(trace)
+        for round_ in metric_rounds(task.messages):
+            round_ctx = context.get(round_["loop_id"], {"hypothesis": None, "decision": None, "reason": None, "tasks": {}})
+            for name in round_["factors"]:
+                code = factor_code(task.messages, round_["loop_id"], name)
+                workspace = Path(round_["paths"].get(name, "")).resolve()
+                if code is None and WORKSPACE_ROOT in workspace.parents and (workspace / "factor.py").is_file():
+                    # A resumed run replays no code events; fall back to the factor.py left in its workspace.
+                    code = (workspace / "factor.py").read_text(errors="replace")
+                detail = round_ctx["tasks"].get(name) or task_fallback(registry, name)
+                refreshed = refreshed_meta(trace, round_["loop_id"], name)
+                effective = refresh_dir(trace, round_["loop_id"], name) if refreshed else workspace
+                analysis = cached_analysis(effective, market) if refreshed or WORKSPACE_ROOT in workspace.parents else None
+                entries.append({
+                    "trace": trace, "loop_id": round_["loop_id"], "name": name, "market": market,
+                    "description": detail.get("description"), "formulation": detail.get("formulation"),
+                    "variables": detail.get("variables"),
+                    "hypothesis": round_ctx["hypothesis"] or detail.get("hypothesis"),
+                    "decision": round_ctx["decision"], "reason": round_ctx["reason"],
+                    "metrics": round_["metrics"], "code": code,
+                    "analysis": analysis,
+                    "refreshed": refreshed,
+                    "coverage": ({"start": refreshed["start"], "end": refreshed["end"]} if refreshed
+                                 else analysis.get("coverage") if analysis else None),
+                })
+    return entries
+
+
+def factor_workspace(trace, loop_id, name):
+    """Resolve one library factor to its workspace path, with the same guards as a backtest request."""
+    resolved = resolve_factor_paths(trace, loop_id, [{"name": name, "weight": 1}])
+    return Path(resolved[0]["path"])
+
+
+def analyze_factor(workspace, market):
+    """Run (or reuse) the single-factor analysis for ``workspace`` inside ``market``."""
+    cached = cached_analysis(workspace, market)
+    if cached is not None:
+        return cached
+    record = studio_markets.universe(market)
+    output = analysis_cache_path(workspace, market)
+    completed = subprocess.run(
+        [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_analysis.py")),
+         str(workspace), record["provider_uri"], market, str(output), record["region"]],
+        capture_output=True, text=True, timeout=300,
+    )
+    if not output.is_file():
+        raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "analysis produced no output")
+    data = json.loads(output.read_text())
+    if data.get("status") != "completed":
+        raise RuntimeError(data.get("error") or "analysis failed")
+    data["source_mtime"] = (Path(workspace) / "result.h5").stat().st_mtime
+    output.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False))
+    return data
+
+
+def factor_correlation(workspaces):
+    """Mean daily cross-sectional Spearman correlation between factors, over the dates they all share."""
+    import pandas as pd
+
+    frames = []
+    for name, workspace in workspaces:
+        path = Path(workspace) / "result.h5"
+        if not path.is_file():
+            raise ValueError(f"{name} 没有 result.h5（它的研究可能没跑完）")
+        frame = pd.read_hdf(path)
+        if isinstance(frame, pd.Series):
+            frame = frame.to_frame()
+        frames.append(frame.iloc[:, 0].rename(name))
+    joined = pd.concat(frames, axis=1).dropna()
+    if joined.empty:
+        # Say what each factor covers, so the user can see which one does not belong (another market, a
+        # window that never overlaps) instead of a bare "no overlap".
+        spans = []
+        for series in frames:
+            dates = series.dropna().index.get_level_values("datetime")
+            codes = series.dropna().index.get_level_values("instrument")
+            sample = str(codes[0]) if len(codes) else "?"
+            spans.append(f"{series.name} {dates.min().date() if len(dates) else '?'}→{dates.max().date() if len(dates) else '?'}（如 {sample}）")
+        raise ValueError("这些因子没有共同的观测，无法算相关性：" + "；".join(spans) + "。把它们重算到同一份最新数据，或移除不同市场 / 不同区间的因子。")
+    ranks = joined.groupby(level="datetime").rank(pct=True)
+    days = ranks.index.get_level_values("datetime").unique()
+    # Averaging per-day correlation matrices is O(days); sampling every k-th day keeps large baskets responsive.
+    step = max(1, len(days) // 250)
+    sampled = ranks[ranks.index.get_level_values("datetime").isin(days[::step])]
+    matrix = sampled.groupby(level="datetime").corr().groupby(level=1).mean()
+    names = [name for name, _ in workspaces]
+    matrix = matrix.loc[names, names]
+    return {"names": names, "matrix": [[float(v) for v in row] for row in matrix.values], "days": int(len(days))}
+
+
+def apply_search_prefilter(resolved):
+    """Cheap pre-search filter over resolved factors (no backtest, no LLM call).
+
+    ``resolved`` are the factor dicts from resolve_factor_paths (each carries name, weight,
+    path, trace, loop_id). Returns ``(kept, excluded)`` where ``kept`` keeps the input
+    shape (weights possibly sign-flipped to each factor's Rank IC) and ``excluded`` holds
+    ``{name, reason}`` entries for the page to display. Factors without a cached analysis
+    are kept; only near-duplicates (|rho| >= PREFILTER_DUPLICATE_CORR) of a stronger kept
+    factor are dropped.
+    """
+    scored = []
+    for factor in resolved:
+        market = run_market(factor.get("trace") or "")
+        analysis = cached_analysis(Path(factor["path"]), market)
+        rank_ic = (analysis.get("rank_ic") or {}).get("mean") if analysis else None
+        icir = (analysis.get("rank_ic") or {}).get("ir") if analysis else None
+        scored.append({"factor": factor, "rank_ic": rank_ic, "icir": 0.0 if icir is None else abs(icir),
+                       "analyzed": analysis is not None})
+    # Weak-signal test first, so the reason names the real problem even for a factor that
+    # would also duplicate a stronger one.
+    candidates, excluded = [], []
+
+    def ref(factor):
+        return {"name": factor["name"], "trace": factor.get("trace"), "loop_id": factor.get("loop_id"),
+                "kind": factor.get("kind", "factor")}
+
+    for entry in scored:
+        if not entry["analyzed"]:
+            candidates.append(entry)
+            continue
+        if abs(entry["rank_ic"] or 0) < PREFILTER_NOISE_RANK_IC or entry["icir"] < PREFILTER_NOISE_ICIR:
+            excluded.append({**ref(entry["factor"]),
+                             "reason": f"信号太弱（Rank IC {entry['rank_ic']:.4f}，ICIR {entry['icir']:.3f}）：先在因子库看单因子分析，达标再参与搜索"})
+            continue
+        candidates.append(entry)
+    # Strongest first, so a duplicate always loses to the better factor.
+    candidates.sort(key=lambda e: (-e["icir"], e["factor"]["name"]))
+    try:
+        corr = factor_correlation([(e["factor"]["name"], Path(e["factor"]["path"])) for e in candidates])
+    except Exception:  # noqa: BLE001 -- unreadable workspaces just skip the duplicate check
+        corr = None
+    index = {name: i for i, name in enumerate(corr["names"])} if corr else {}
+    kept, flipped = [], []
+    for entry in candidates:
+        clash = None
+        if corr is not None:
+            i = index.get(entry["factor"]["name"])
+            for done in kept:
+                j = index.get(done["name"])
+                if i is not None and j is not None and abs(corr["matrix"][i][j]) >= PREFILTER_DUPLICATE_CORR:
+                    clash = (done["name"], corr["matrix"][i][j])
+                    break
+        if clash is not None:
+            excluded.append({**ref(entry["factor"]),
+                             "reason": f"与 {clash[0]} 相关 {clash[1]:.2f}：两个基本是同一个信号，只留 ICIR 更高的那个"})
+            continue
+        factor = dict(entry["factor"])
+        if entry["rank_ic"] is not None and entry["rank_ic"] != 0 and (factor.get("weight", 1) > 0) != (entry["rank_ic"] > 0):
+            factor["weight"] = -abs(factor.get("weight", 1)) if entry["rank_ic"] < 0 else abs(factor.get("weight", 1))
+            flipped.append({"name": factor["name"],
+                            "reason": f"方向为负（Rank IC {entry['rank_ic']:.4f}）：权重已反向，不算淘汰"})
+        kept.append(factor)
+    return kept, excluded, flipped
+
+
+def resolve_factor_paths(default_trace, default_loop_id, factors, prefer_refreshed=True):
+    """Attach workspace paths to the requested factors.
+
+    Each factor may name its own ``trace``/``loop_id`` (a basket built from several rounds); otherwise the
+    request-level defaults apply. Unknown names, unloaded traces, paths outside the workspace root and
+    missing result.h5 files are all rejected.
+    """
+    resolved = []
+    for factor in factors:
+        if not isinstance(factor, dict):
+            raise ValueError("Each factor must be an object with name and weight")
+        name = factor.get("name")
+        trace = factor.get("trace") or default_trace
+        loop_id = normalize_loop_id(factor.get("loop_id", default_loop_id))
+        messages = trace_messages(str(trace or ""))
+        if messages is None:
+            raise ValueError(f"Trace {trace!r} is not loaded on this server")
+        round_ = next((r for r in metric_rounds(messages) if r["loop_id"] == loop_id), None)
+        if round_ is None:
+            raise ValueError(f"Round {loop_id} of {trace} has no evaluation")
+        kind = factor.get("kind", "factor")
+        if kind == "prediction":
+            # The round's Qlib model predictions (pred.pkl) used directly as the signal.
+            path = prediction_file(round_["experiment"])
+            if path is None:
+                raise ValueError(f"Round {loop_id} of {trace} recorded no model prediction")
+        elif kind == "factor":
+            paths = round_["paths"]
+            if name not in paths:
+                raise ValueError(f"Unknown factor {name!r} in round {loop_id} of {trace}")
+            path = Path(paths[name]).resolve()
+            if WORKSPACE_ROOT not in path.parents:
+                raise ValueError(f"Factor {name} lives outside the RD-Agent workspace root")
+            if prefer_refreshed:
+                path = signal_workspace(trace, loop_id, name, path)
+            if not (path / "result.h5").is_file():
+                raise ValueError(f"Factor {name} has no result.h5")
+        else:
+            raise ValueError(f"Unknown signal kind {kind!r}")
+        resolved.append({"name": name, "kind": kind, "weight": float(factor.get("weight", 1)), "path": str(path),
+                         "trace": trace, "loop_id": loop_id})
+    return resolved
+
+
+def public_config(config):
+    """A copy of ``config`` with each factor's on-disk workspace ``path`` stripped for API responses."""
+    public = dict(config)
+    public["factors"] = [{k: f[k] for k in ("name", "kind", "weight", "trace", "loop_id") if k in f} for f in config.get("factors", [])]
+    return public
+
+
+@studio.get("/regions")
+def regions():
+    """The market workspaces: region, label, data directory, calendar span, markets, ready."""
+    return jsonify(studio_markets.regions())
+
+
+@studio.get("/environment")
+def environment():
+    """Data status of one workspace (``?region=``, A-shares by default) plus the LLM in use."""
+    provider = studio_markets.provider_for(wanted_region() or "cn") or Path(os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data")).expanduser()
+    calendar = provider / "calendars" / "day.txt"
+    dates = calendar.read_text().splitlines() if calendar.is_file() else []
+    llm = studio_llm.resolve()
+    return jsonify({"chat_model": llm["model"] if llm else os.environ.get("LITELLM_CHAT_MODEL", os.environ.get("CHAT_MODEL", "")),
+                    "embedding_model": studio_llm.effective_embedding_model(),
+                    "provider_uri": str(provider), "data_ready": bool(dates),
+                    "start": dates[0] if dates else None, "end": dates[-1] if dates else None,
+                    "python": os.environ.get("STUDIO_PYTHON", sys.executable)})
+
+
+@studio.get("/strategy")
+def strategy_source():
+    return jsonify({"name": "studio_worker.py", "code": Path(__file__).with_name("studio_worker.py").read_text()})
+
+
+@studio.get("/trace-status")
+def trace_status():
+    """Whether a trace is known to this server and whether its RD-Agent process is still running.
+
+    A freshly launched run has no events for a while; the UI uses this to tell "starting" apart from
+    "not loaded" and "finished without events".
+    """
+    trace_id = request.args.get("trace", "")
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    task = registry.get(str(Path(current_app.config["LOG_FOLDER_PATH"]) / trace_id)) if trace_id else None
+    if task is None:
+        return jsonify({"loaded": False, "alive": False, "messages": 0})
+    alive = task.process is not None and task.is_alive()
+    return jsonify({"loaded": True, "alive": bool(alive), "messages": len(task.messages)})
+
+
+def summarize_task(trace_id, task):
+    """One row of the experiment list: what a user needs to pick a run without loading it.
+
+    Everything comes from the messages already held in memory, so this is cheap enough to compute
+    for every loaded trace on each request.
+    """
+    loops, accepted, hypothesis, end, updated, ended_at = set(), 0, None, None, "", ""
+    for message in task.messages:
+        try:
+            loops.add(normalize_loop_id(message.get("loop_id")))
+        except ValueError:
+            pass
+        tag, content = message.get("tag") or "", message.get("content") or {}
+        if tag == "research.hypothesis" and isinstance(content, dict):
+            hypothesis = content.get("hypothesis") or hypothesis
+        elif tag == "feedback.hypothesis_feedback" and isinstance(content, dict) and content.get("decision") is True:
+            accepted += 1
+        timestamp = str(message.get("timestamp") or "")
+        if tag.lower() == "end":
+            # The END event of a trace read back from disk is stamped when the server loads it, not when
+            # the run finished, so it only stands in for "updated" when nothing else is there.
+            end, ended_at = (content if isinstance(content, dict) else {}), max(ended_at, timestamp)
+        else:
+            updated = max(updated, timestamp)
+    process = getattr(task, "process", None)
+    alive = process is not None and task.is_alive()
+    if end is not None:
+        code = end.get("end_code")
+        status = "completed" if code == 0 else "stopped" if code == -1 else "failed"
+    elif alive:
+        status = "running" if task.messages else "starting"
+    else:
+        status = "ended"
+    pending = pending_request(task)
+    return {
+        "id": trace_id, "scenario": trace_id.split("/")[0], "rounds": len(loops), "accepted": accepted, "market": run_market(trace_id),
+        "status": status, "updated": updated or ended_at or None, "hypothesis": hypothesis, "messages": len(task.messages),
+        "waiting": pending["kind"] if pending else None,
+        "confirm": getattr(task, "confirm", None),
+        "auto_answered": sum(1 for m in task.messages if m.get("tag") == "user_interaction.auto"),
+    }
+
+
+def pending_request(task):
+    """The unanswered user-interaction request a live task is blocked on, or None."""
+    process = getattr(task, "process", None)
+    if process is None or not task.is_alive():
+        return None
+    last = next((m for m in reversed(task.messages) if m.get("tag") == "user_interaction.request"), None)
+    if not last or last.get("answered"):
+        return None
+    content = last.get("content") if isinstance(last.get("content"), dict) else {}
+    kind = ("features" if "features" in content else "instruction" if "user_instruction" in content
+            else "hypothesis" if "hypothesis" in content and "decision" not in content else "feedback" if "decision" in content else "other")
+    loops = set()
+    for m in task.messages:
+        try:
+            loops.add(normalize_loop_id(m.get("loop_id")))
+        except ValueError:
+            pass
+    return {"kind": kind, "since": last.get("timestamp"), "round": (max(loops) + 1) if loops else None}
+
+
+@studio.get("/attention")
+def attention():
+    """Runs waiting on the user right now (unanswered interaction requests of live processes), for the rail
+    badge, the banner and notifications. ``?region=`` scopes it like the other lists."""
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    root = Path(current_app.config["LOG_FOLDER_PATH"])
+    region = wanted_region()
+    items = []
+    for key, task in list(registry.items()):
+        if task is None:
+            continue
+        pending = pending_request(task)
+        if not pending:
+            continue
+        try:
+            trace_id = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            trace_id = key
+        market = run_market(trace_id)
+        if not in_region(market, region):
+            continue
+        items.append({"trace": trace_id, "market": market, **pending})
+    items.sort(key=lambda i: i.get("since") or "")
+    return jsonify(items)
+
+
+def _metric_ic(content) -> float | None:
+    """The IC from a feedback.metric event's result (a JSON string or dict), or None."""
+    result = content.get("result") if isinstance(content, dict) else None
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+        value = (data or {}).get("IC")
+        return float(value) if isinstance(value, (int, float)) else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+@studio.get("/recent")
+def recent():
+    """Notable happenings across runs after ``?since=`` (ISO time): a round finished (with its verdict, IC and
+    factor names) or a run ended. The UI turns these into toasts; ``?region=`` scopes like the other lists."""
+    since = str(request.args.get("since") or "")
+    region = wanted_region()
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    root = Path(current_app.config["LOG_FOLDER_PATH"])
+    items = []
+    for key, task in list(registry.items()):
+        if task is None:
+            continue
+        try:
+            trace_id = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            trace_id = key
+        market = run_market(trace_id)
+        if not in_region(market, region):
+            continue
+        metrics_by_loop: dict[str, dict] = {}
+        for m in task.messages:
+            if m.get("tag") == "feedback.metric":
+                metrics_by_loop[str(m.get("loop_id"))] = m.get("content") or {}
+        for m in task.messages:
+            stamp = str(m.get("timestamp") or "")
+            if not stamp or stamp <= since:
+                continue
+            tag = str(m.get("tag") or "")
+            if tag == "feedback.hypothesis_feedback":
+                content = m.get("content") if isinstance(m.get("content"), dict) else {}
+                metric = metrics_by_loop.get(str(m.get("loop_id")), {})
+                factors = [f.get("name") for f in ((metric.get("workspaces") or {}).get("factors") or []) if isinstance(f, dict) and f.get("name")]
+                try:
+                    round_no = normalize_loop_id(m.get("loop_id")) + 1
+                except ValueError:
+                    round_no = None
+                items.append({"kind": "round_done", "trace": trace_id, "market": market, "timestamp": stamp, "round": round_no,
+                              "decision": bool(content.get("decision")), "ic": _metric_ic(metric), "factors": factors})
+            elif tag.lower() == "end":
+                content = m.get("content") if isinstance(m.get("content"), dict) else {}
+                code = content.get("end_code")
+                items.append({"kind": "run_done", "trace": trace_id, "market": market, "timestamp": stamp,
+                              "status": "completed" if code == 0 else "stopped" if code == -1 else "failed"})
+    items.sort(key=lambda i: i["timestamp"])
+    return jsonify({"items": items[-20:], "now": datetime.now(timezone.utc).isoformat()})
+
+
+@studio.get("/experiments")
+def experiments():
+    """Summaries of every trace this server has loaded (running or read back from disk)."""
+    registry = current_app.config["RDAGENT_PROCESSES"]
+    root = Path(current_app.config["LOG_FOLDER_PATH"])
+    rows = []
+    for key, task in list(registry.items()):
+        if task is None:
+            continue
+        try:
+            trace_id = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            trace_id = key
+        rows.append(summarize_task(trace_id, task))
+    region = wanted_region()
+    return jsonify([r for r in rows if in_region(r.get("market"), region)])
+
+
+@studio.get("/rounds")
+def rounds():
+    trace_id = request.args.get("trace", "")
+    messages = trace_messages(trace_id) if trace_id else None
+    if messages is None:
+        return jsonify({"error": "Trace is not loaded on this server"}), 404
+    return jsonify([
+        {**{k: v for k, v in r.items() if k not in ("paths", "experiment")},
+         "prediction": prediction_file(r["experiment"]) is not None}
+        for r in metric_rounds(messages)
+    ])
+
+
+@studio.get("/factors")
+def factors():
+    region = wanted_region()
+    library = factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"])
+    return jsonify([f for f in library if in_region(f.get("market"), region)])
+
+
+@studio.get("/factors/analysis")
+def factor_analysis():
+    market = request.args.get("market") or run_market(request.args.get("trace", ""))
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", market or ""):
+        return jsonify({"error": "Unsupported instrument universe"}), 400
+    try:
+        workspace = factor_workspace(request.args.get("trace", ""), request.args.get("loop_id"), request.args.get("name", ""))
+        return jsonify(analyze_factor(workspace, market))
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        return jsonify({"error": str(error)}), 500
+
+
+def frame_coverage(frame):
+    """First/last date and size of a signal frame, so the UI can warn before a backtest window misses it."""
+    import pandas as pd
+
+    level = "datetime" if "datetime" in (frame.index.names or []) else 0
+    dates = pd.DatetimeIndex(frame.index.get_level_values(level))
+    return {"start": str(dates.min().date()), "end": str(dates.max().date()), "days": int(dates.nunique()), "rows": int(len(frame))}
+
+
+def prediction_coverage(path):
+    import pandas as pd
+
+    return frame_coverage(pd.read_pickle(path))
+
+
+def factor_coverage(workspace):
+    """Coverage of a factor's result.h5 without running the full single-factor analysis."""
+    import pandas as pd
+
+    return frame_coverage(pd.read_hdf(workspace / "result.h5"))
+
+
+@studio.get("/predictions/coverage")
+def predictions_coverage():
+    try:
+        resolved = resolve_factor_paths(request.args.get("trace", ""), request.args.get("loop_id"),
+                                        [{"name": "prediction", "kind": "prediction"}])
+        return jsonify(prediction_coverage(Path(resolved[0]["path"])))
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.post("/factors/refresh")
+def factors_refresh():
+    """Recompute a factor's signal on the latest Qlib data; the copy then replaces the workspace result.h5 for Studio use."""
+    body = request.get_json() or {}
+    trace, name = str(body.get("trace") or ""), str(body.get("name") or "")
+    try:
+        loop_id = normalize_loop_id(body.get("loop_id"))
+        original = Path(resolve_factor_paths(trace, loop_id, [{"name": name, "weight": 1}], prefer_refreshed=False)[0]["path"])
+        code_path = original / "factor.py"
+        if not code_path.is_file():
+            code = factor_code(trace_messages(trace), loop_id, name)
+            if not code:
+                raise ValueError(f"No factor.py recorded for {name}")
+            code_path = REFRESH_ROOT / "code" / f"{refresh_dir(trace, loop_id, name).name}.py"
+            code_path.parent.mkdir(parents=True, exist_ok=True)
+            code_path.write_text(code)
+        out = refresh_dir(trace, loop_id, name)
+        market = str(body.get("market") or run_market(trace))
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    existing = studio_jobs.find("refresh", trace=trace, loop_id=loop_id, name=name)
+    if existing:
+        return jsonify({"job": existing["id"]}), 202
+
+    def work(job):
+        for stale in out.glob("studio_analysis.*.json"):
+            stale.unlink()
+        studio_jobs.update(job["id"], message="在最新数据上重算")
+        return run_refresh(code_path, name, out, market)
+
+    job = studio_jobs.run("refresh", f"重算 {name}", in_app(work), market=market, link={"page": "factors", "trace": trace, "loop_id": loop_id, "name": name})
+    return jsonify({"job": job["id"]}), 202
+
+
+@studio.get("/factors/coverage")
+def factors_coverage():
+    try:
+        workspace = factor_workspace(request.args.get("trace", ""), request.args.get("loop_id"), request.args.get("name", ""))
+        return jsonify(factor_coverage(workspace))
+    except (ValueError, TypeError, KeyError, OSError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.post("/factors/correlation")
+def factors_correlation():
+    body = request.get_json() or {}
+    try:
+        refs = body.get("factors") or []
+        if not isinstance(refs, list) or not 2 <= len(refs) <= 20:
+            raise ValueError("Select 2 to 20 factors")
+        workspaces = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                raise ValueError("Each factor must be an object")
+            workspaces.append((ref.get("name"), factor_workspace(ref.get("trace", ""), ref.get("loop_id"), ref.get("name", ""))))
+        if len({name for name, _ in workspaces}) != len(workspaces):
+            raise ValueError("Factor names in a basket must be unique")
+        return jsonify(factor_correlation(workspaces))
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.route("/backtests", methods=["GET", "POST"])
+def backtests():
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if request.method == "GET":
+        region = wanted_region()
+        jobs = []
+        for path in sorted(ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
+            result_path = path.parent / "result.json"
+            result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
+            config = public_config(json.loads(path.read_text()))
+            if not in_region(config.get("market"), region):
+                continue
+            jobs.append({"id": path.parent.name, "config": config, "status": result["status"],
+                         "total_return": (result.get("metrics") or {}).get("total_return"),
+                         "created": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()})
+        return jsonify(jobs)
+    body = request.get_json() or {}
+    try:
+        config = prepare_backtest_config(body)
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    try:
+        job_id = launch_backtest(config)
+    except OSError as error:
+        return jsonify({"error": str(error)}), 500
+    return jsonify({"id": job_id}), 202
+
+
+def prepare_backtest_config(body):
+    """Resolve factor paths and validate a backtest request body into a worker config."""
+    body = dict(body)
+    # Request-level trace/loop_id are defaults for factors that do not name their own round.
+    default_trace = str(body.get("trace") or "") or None
+    default_loop = body.get("loop_id")
+    if default_trace and trace_messages(default_trace) is None:
+        raise ValueError("Trace is not loaded on this server")
+    if default_loop is not None:
+        body["loop_id"] = normalize_loop_id(default_loop)
+    body["factors"] = resolve_factor_paths(default_trace, body.get("loop_id"), body.get("factors") or [])
+    # The universe decides the data directory, region and exchange rules; a caller-given benchmark wins,
+    # otherwise the universe's own index is used.
+    record = studio_markets.universe(str(body.get("market") or "csi300"))
+    if not body.get("benchmark"):
+        body["benchmark"] = record["benchmark"]
+    for key in ("open_cost", "close_cost"):
+        if body.get(key) is None:
+            body[key] = record[key]
+    config = validate_config(body)
+    config["provider_uri"] = str(Path(config.get("provider_uri") or record["provider_uri"]).expanduser())
+    config["region"] = record["region"]
+    config["limit_threshold"] = record["limit_threshold"]
+    config["min_cost"] = record["min_cost"]
+    if not (Path(config["provider_uri"]) / "calendars" / "day.txt").is_file():
+        raise ValueError("Qlib data not found. Configure a local Qlib daily data directory first.")
+    return config
+
+
+def in_app(fn):
+    """Run a job function inside this Flask app's context (jobs run on threads; route helpers read current_app)."""
+    app = current_app._get_current_object()
+
+    def wrapped(job):
+        with app.app_context():
+            return fn(job)
+    return wrapped
+
+
+def _result_poll(path, *, running_key=None, label_done=None):
+    """A poll callable for jobs whose worker writes ``{"status": ...}`` to ``path``."""
+    def poll():
+        if not path.is_file():
+            return {"status": "queued"}
+        try:
+            data = json.loads(path.read_text())
+        except ValueError:
+            return {"status": "running"}
+        status = data.get("status") or "running"
+        state = {"status": "completed" if status == "completed" else "failed" if status == "failed" else "running" if status == "running" else "queued",
+                 "error": data.get("error")}
+        if data.get("total"):
+            state["progress"] = {"done": int(data.get("done") or 0), "total": int(data["total"])}
+        if status == "completed" and label_done:
+            state["result"] = label_done(data)
+        # A worker that died without writing a final status shows as failed once its process is gone.
+        if state["status"] in ("queued", "running") and running_key is not None:
+            process = PROCESSES.get(running_key)
+            if process is not None and process.poll() is not None:
+                state = {"status": "failed", "error": data.get("error") or f"worker exited with code {process.returncode}"}
+        return state
+    return poll
+
+
+def launch_backtest(config):
+    """Write a job folder and start the worker; returns the job id. Raises OSError when the worker cannot start."""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    job_id = str(uuid.uuid4())
+    folder = job_folder(job_id)
+    folder.mkdir()
+    write_json(folder / "config.json", config)
+    write_json(folder / "result.json", {"status": "queued"})
+    try:
+        with (folder / "stdout.log").open("w") as log:
+            PROCESSES[job_id] = subprocess.Popen(
+                [os.environ.get("STUDIO_PYTHON", sys.executable),
+                 str(Path(__file__).with_name("studio_worker.py")), str(folder)],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+    except OSError as error:
+        write_json(folder / "result.json", {"status": "failed", "error": str(error)})
+        raise
+    names = [f["name"] for f in config.get("factors", [])]
+    studio_jobs.track("backtest", f"回测 {' + '.join(names[:2])}{f' +{len(names) - 2}' if len(names) > 2 else ''}",
+                      _result_poll(folder / "result.json", running_key=job_id, label_done=lambda d: {"total_return": (d.get("metrics") or {}).get("total_return")}),
+                      market=config.get("market"), link={"page": "backtest", "id": job_id}, job_id=job_id)
+    return job_id
+
+
+def search_folder(job_id):
+    uuid.UUID(job_id)
+    return SEARCH_ROOT / job_id
+
+
+@studio.post("/searches/preview")
+def search_preview():
+    """Dry-run of the pre-search screen: which candidates would enter the search, and why not for the rest.
+
+    Same factor shape as a search request, but launches nothing. The page shows this first so the user
+    ticks the final list and confirms; the confirmed search then runs with ``prefilter: false``.
+    """
+    body = request.get_json() or {}
+    try:
+        if not body.get("factors"):
+            raise ValueError("Preview needs at least one candidate factor")
+        resolved = resolve_factor_paths(str(body.get("trace") or "") or None, body.get("loop_id"),
+                                        body.get("factors") or [])
+        kept, excluded, flipped = apply_search_prefilter(resolved)
+        public = [{k: f[k] for k in ("name", "kind", "weight", "trace", "loop_id") if k in f} for f in kept]
+        return jsonify({"kept": public, "excluded": excluded, "flipped": flipped,
+                        "thresholds": {"noise_rank_ic": PREFILTER_NOISE_RANK_IC,
+                                       "noise_icir": PREFILTER_NOISE_ICIR,
+                                       "duplicate_corr": PREFILTER_DUPLICATE_CORR}})
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.route("/searches", methods=["GET", "POST"])
+def searches():
+    """Greedy portfolio searches: same request shape as a backtest plus a `search` block (objective, split, prefilter)."""
+    SEARCH_ROOT.mkdir(parents=True, exist_ok=True)
+    if request.method == "GET":
+        region = wanted_region()
+        jobs = []
+        for path in sorted(SEARCH_ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
+            result_path = path.parent / "result.json"
+            result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
+            config = public_config(json.loads(path.read_text()))
+            if not in_region(config.get("market"), region):
+                continue
+            jobs.append({"id": path.parent.name, "status": result["status"], "config": config,
+                         "created": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+                         "recommended": (result.get("recommended") or {}).get("members"),
+                         "validation_return": ((result.get("recommended") or {}).get("validation") or {}).get("total_return")})
+        return jsonify(jobs)
+    body = request.get_json() or {}
+    try:
+        body.setdefault("search", {})
+        prefilter = body["search"].get("prefilter", True)
+        config = prepare_backtest_config(body)
+        if len(config["factors"]) < 2:
+            raise ValueError("Search needs at least two candidate signals")
+        if prefilter:
+            kept, excluded, flipped = apply_search_prefilter(config["factors"])
+            config["search"]["prefilter"] = {"enabled": True, "excluded": excluded, "flipped": flipped,
+                                             "requested": [f["name"] for f in config["factors"]],
+                                             "thresholds": {"noise_rank_ic": PREFILTER_NOISE_RANK_IC,
+                                                            "noise_icir": PREFILTER_NOISE_ICIR,
+                                                            "duplicate_corr": PREFILTER_DUPLICATE_CORR}}
+            config["factors"] = kept
+            if len(kept) < 2:
+                details = "；".join(f"{e['name']}：{e['reason']}" for e in excluded) or "候选不足两个"
+                return jsonify({"error": f"预筛后候选不足两个，搜索未启动：{details}",
+                                "prefilter": config["search"]["prefilter"]}), 400
+        else:
+            config["search"]["prefilter"] = {"enabled": False, "excluded": [], "flipped": []}
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    job_id = str(uuid.uuid4())
+    folder = search_folder(job_id)
+    folder.mkdir()
+    write_json(folder / "config.json", config)
+    write_json(folder / "result.json", {"status": "queued"})
+    try:
+        with (folder / "stdout.log").open("w") as log:
+            PROCESSES[f"search:{job_id}"] = subprocess.Popen(
+                [os.environ.get("STUDIO_PYTHON", sys.executable),
+                 str(Path(__file__).with_name("studio_worker.py")), str(folder), "--search"],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+    except OSError as error:
+        write_json(folder / "result.json", {"status": "failed", "error": str(error)})
+        return jsonify({"error": str(error)}), 500
+    studio_jobs.track("search", f"组合搜索 {len(config['factors'])} 个候选",
+                      _result_poll(folder / "result.json", running_key=f"search:{job_id}", label_done=lambda d: {"recommended": (d.get("recommended") or {}).get("members")}),
+                      market=config.get("market"), link={"page": "search", "id": job_id}, job_id=f"search:{job_id}")
+    return jsonify({"id": job_id}), 202
+
+
+@studio.get("/searches/<job_id>")
+def search_result(job_id):
+    try:
+        folder = search_folder(job_id)
+    except ValueError:
+        return jsonify({"error": "Invalid job ID"}), 400
+    if not (folder / "result.json").exists():
+        return jsonify({"error": "Job not found"}), 404
+    result = json.loads((folder / "result.json").read_text())
+    process = PROCESSES.get(f"search:{job_id}")
+    if process is not None and process.poll() is not None:
+        if result["status"] in ("running", "queued"):
+            result = {"status": "failed", "error": "Worker exited without a result; inspect execution log."}
+            write_json(folder / "result.json", result)
+        PROCESSES.pop(f"search:{job_id}", None)
+    log = folder / "stdout.log"
+    if log.exists():
+        with log.open("rb") as stream:
+            stream.seek(max(0, log.stat().st_size - 16000))
+            result["log"] = stream.read().decode("utf-8", errors="replace")
+    result.pop("config", None)
+    return jsonify({"id": job_id, "config": public_config(json.loads((folder / "config.json").read_text())), **result})
+
+
+@studio.get("/backtests/<job_id>")
+def backtest_result(job_id):
+    try:
+        folder = job_folder(job_id)
+    except ValueError:
+        return jsonify({"error": "Invalid job ID"}), 400
+    if not (folder / "result.json").exists():
+        return jsonify({"error": "Job not found"}), 404
+    result = json.loads((folder / "result.json").read_text())
+    process = PROCESSES.get(job_id)
+    if process is not None and process.poll() is not None:
+        if result["status"] in ("running", "queued"):
+            result = {"status": "failed", "error": "Worker exited without a result; inspect execution log."}
+            write_json(folder / "result.json", result)
+        PROCESSES.pop(job_id, None)
+    log = folder / "stdout.log"
+    if log.exists():
+        with log.open("rb") as stream:
+            stream.seek(max(0, log.stat().st_size - 16000))
+            result["log"] = stream.read().decode("utf-8", errors="replace")
+    result["breakdown"] = diagnosis_state(job_id, folder)
+    return jsonify({"id": job_id, "config": public_config(json.loads((folder / "config.json").read_text())), **result})
+
+
+def diagnosis_state(job_id, folder):
+    """The take-apart diagnosis of a backtest (diagnosis.json), with a dead worker turned into a failure."""
+    path = folder / "diagnosis.json"
+    if not path.exists():
+        return None
+    state = json.loads(path.read_text())
+    process = PROCESSES.get(f"{job_id}:diagnose")
+    if process is not None and process.poll() is not None:
+        if state.get("status") in ("running", "queued"):
+            state = {"status": "failed", "error": "Diagnosis worker exited without a result; inspect execution log."}
+            write_json(path, state)
+        PROCESSES.pop(f"{job_id}:diagnose", None)
+    return state
+
+
+@studio.post("/backtests/<job_id>/diagnose")
+def backtest_diagnose(job_id):
+    """Start the take-apart diagnosis: every signal alone and the portfolio without each one, same window."""
+    try:
+        folder = job_folder(job_id)
+    except ValueError:
+        return jsonify({"error": "Invalid job ID"}), 400
+    if not (folder / "result.json").exists():
+        return jsonify({"error": "Job not found"}), 404
+    result = json.loads((folder / "result.json").read_text())
+    if result.get("status") != "completed":
+        return jsonify({"error": "Diagnose a completed backtest"}), 409
+    if len(json.loads((folder / "config.json").read_text()).get("factors") or []) < 2:
+        return jsonify({"error": "Diagnosis needs at least two signals"}), 400
+    running = PROCESSES.get(f"{job_id}:diagnose")
+    if running is not None and running.poll() is None:
+        return jsonify({"status": "running"}), 202
+    write_json(folder / "diagnosis.json", {"status": "queued"})
+    try:
+        with (folder / "diagnosis.log").open("w") as log:
+            PROCESSES[f"{job_id}:diagnose"] = subprocess.Popen(
+                [os.environ.get("STUDIO_PYTHON", sys.executable),
+                 str(Path(__file__).with_name("studio_worker.py")), str(folder), "--diagnose"],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+    except OSError as error:
+        write_json(folder / "diagnosis.json", {"status": "failed", "error": str(error)})
+        return jsonify({"error": str(error)}), 500
+    studio_jobs.track("diagnose", f"拆开回测 {job_id[:8]}", _result_poll(folder / "diagnosis.json", running_key=f"{job_id}:diagnose"),
+                      market=json.loads((folder / "config.json").read_text()).get("market"), link={"page": "backtest", "id": job_id}, job_id=f"{job_id}:diagnose")
+    return jsonify({"status": "queued"}), 202
+
+
+# ---- Strategies: a named factor portfolio with its evidence and its tracking runs -----------------------
+
+STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost")
+
+
+def strategy_path(strategy_id):
+    uuid.UUID(strategy_id)
+    return STRATEGY_ROOT / f"{strategy_id}.json"
+
+
+def load_strategy(strategy_id):
+    path = strategy_path(strategy_id)
+    if not path.is_file():
+        raise FileNotFoundError(strategy_id)
+    return json.loads(path.read_text())
+
+
+def save_strategy(strategy):
+    STRATEGY_ROOT.mkdir(parents=True, exist_ok=True)
+    strategy["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    write_json(strategy_path(strategy["id"]), strategy)
+    return strategy
+
+
+def run_summary(job_id):
+    """Status, window and headline metrics of one backtest job the strategy points at."""
+    try:
+        folder = job_folder(job_id)
+    except ValueError:
+        return {"id": job_id, "status": "missing"}
+    if not (folder / "config.json").is_file():
+        return {"id": job_id, "status": "missing"}
+    config = json.loads((folder / "config.json").read_text())
+    result = json.loads((folder / "result.json").read_text()) if (folder / "result.json").is_file() else {"status": "queued"}
+    metrics = result.get("metrics") or {}
+    return {"id": job_id, "status": result.get("status"), "start": config.get("start"), "end": config.get("end"),
+            "total_return": metrics.get("total_return"), "sharpe": metrics.get("sharpe"), "max_drawdown": metrics.get("max_drawdown"),
+            "benchmark_return": metrics.get("benchmark_return"), "error": result.get("error"),
+            "created": datetime.fromtimestamp((folder / "config.json").stat().st_mtime, tz=timezone.utc).isoformat()}
+
+
+def strategy_view(strategy):
+    runs = [run_summary(r["backtest_id"]) | {"kind": r.get("kind", "update")} for r in strategy.get("runs", [])]
+    return {**strategy, "run_details": runs}
+
+
+def validate_strategy_body(body, existing=None):
+    """Name, note, factors, model and parameters of a strategy; factors are resolved like a backtest request."""
+    name = str(body.get("name", existing["name"] if existing else "")).strip()
+    if not 1 <= len(name) <= 80:
+        raise ValueError("策略名称需要 1 到 80 个字符")
+    note = str(body.get("note", existing["note"] if existing else "") or "")[:2000]
+    if existing is not None and "factors" not in body:
+        return {**existing, "name": name, "note": note}
+    factors = body.get("factors") or []
+    resolved = resolve_factor_paths(None, None, factors)
+    if not resolved:
+        raise ValueError("策略至少需要一个信号")
+    model = body.get("model") or {"method": "rank"}
+    if not isinstance(model, dict) or model.get("method") not in ("rank", "lgbm"):
+        raise ValueError("Unsupported signal method")
+    params = {k: body.get("params", {}).get(k, body.get(k)) for k in STRATEGY_PARAMS}
+    if any(params[k] is None for k in ("market", "topk", "n_drop")):
+        raise ValueError("策略缺少市场或持仓参数")
+    return {"name": name, "note": note, "model": model, "params": params,
+            "factors": [{"name": f["name"], "kind": f["kind"], "weight": f["weight"], "trace": f["trace"], "loop_id": f["loop_id"]} for f in resolved]}
+
+
+@studio.route("/strategies", methods=["GET", "POST"])
+def strategies():
+    STRATEGY_ROOT.mkdir(parents=True, exist_ok=True)
+    if request.method == "GET":
+        region = wanted_region()
+        items = []
+        for path in sorted(STRATEGY_ROOT.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                strategy = json.loads(path.read_text())
+            except ValueError:
+                continue
+            if not in_region((strategy.get("params") or {}).get("market"), region):
+                continue
+            latest = run_summary(strategy["runs"][-1]["backtest_id"]) if strategy.get("runs") else None
+            items.append({k: strategy.get(k) for k in ("id", "name", "note", "created", "updated", "factors", "model", "params", "evidence")} | {"latest": latest, "run_count": len(strategy.get("runs", []))})
+        return jsonify(items)
+    body = request.get_json() or {}
+    # ``replace``: overwrite an existing strategy with this portfolio. Members, weights, synthesis, parameters
+    # and evidence are replaced and the tracking history starts over (the old runs no longer describe this
+    # portfolio); id, creation time and note stay, and the name stays unless a new one is given.
+    existing = None
+    if body.get("replace"):
+        try:
+            existing = load_strategy(str(body["replace"]))
+        except (ValueError, FileNotFoundError):
+            return jsonify({"error": "Strategy to replace not found"}), 404
+        body = {**body, "name": body.get("name") or existing["name"]}
+    try:
+        fields = validate_strategy_body(body)
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    evidence = body.get("evidence") or {}
+    runs = []
+    if evidence.get("backtest_id"):
+        try:
+            job_folder(str(evidence["backtest_id"]))
+            runs.append({"backtest_id": str(evidence["backtest_id"]), "kind": "evidence"})
+        except ValueError:
+            return jsonify({"error": "Invalid evidence backtest id"}), 400
+    record = {"id": str(uuid.uuid4()), "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              **fields, "evidence": {k: evidence.get(k) for k in ("backtest_id", "search_id", "start", "end") if evidence.get(k)},
+              "runs": runs}
+    if existing is not None:
+        record.update({"id": existing["id"], "created": existing["created"], "note": fields["note"] or existing.get("note", ""),
+                       "replaced": (existing.get("replaced") or 0) + 1})
+    strategy = save_strategy(record)
+    return jsonify(strategy_view(strategy)), (200 if existing is not None else 201)
+
+
+@studio.route("/strategies/<strategy_id>", methods=["GET", "PATCH", "DELETE"])
+def strategy_item(strategy_id):
+    try:
+        strategy = load_strategy(strategy_id)
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    if request.method == "GET":
+        return jsonify(strategy_view(strategy))
+    if request.method == "DELETE":
+        strategy_path(strategy_id).unlink()
+        return jsonify({"deleted": strategy_id})
+    body = request.get_json() or {}
+    try:
+        fields = validate_strategy_body(body, existing=strategy)
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    return jsonify(strategy_view(save_strategy({**strategy, **fields})))
+
+
+@studio.post("/strategies/<strategy_id>/update")
+def strategy_update(strategy_id):
+    """更新到最新: recompute every member factor on the latest data, then backtest the strategy from its evidence
+    start (or the given start) to the last day of market data, and append the run to its history. Runs as a
+    job; the response names it and the job's result carries backtest_id, refreshed, failures, start, end."""
+    try:
+        strategy = load_strategy(strategy_id)
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    body = request.get_json() or {}
+    existing = studio_jobs.find("strategy_update", id=strategy_id)
+    if existing:
+        return jsonify({"job": existing["id"]}), 202
+    members = [f for f in strategy["factors"] if f.get("kind", "factor") == "factor"] if body.get("refresh", True) else []
+    market = str((strategy.get("params") or {}).get("market") or "csi300")
+
+    def work(job):
+        refreshed, failures = [], []
+        for i, f in enumerate(members):
+            studio_jobs.update(job["id"], done=i, total=len(members) + 1, message=f"重算 {f['name']}")
+            try:
+                original = Path(resolve_factor_paths(f["trace"], f["loop_id"], [{"name": f["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
+                code_path = original / "factor.py"
+                if not code_path.is_file():
+                    raise ValueError("no factor.py")
+                out = refresh_dir(f["trace"], f["loop_id"], f["name"])
+                for stale in out.glob("studio_analysis.*.json"):
+                    stale.unlink()
+                run_refresh(code_path, f["name"], out, str((strategy.get("params") or {}).get("market") or run_market(f["trace"])))
+                refreshed.append(f["name"])
+            except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+                failures.append(f"{f['name']}: {error}")
+        studio_jobs.update(job["id"], done=len(members), total=len(members) + 1, message="启动跟踪回测")
+        end = str(body.get("end") or "")
+        if not end:
+            calendar = Path(studio_markets.universe(market)["provider_uri"]) / "calendars" / "day.txt"
+            end = calendar.read_text().strip().splitlines()[-1]
+        start = str(body.get("start") or (strategy.get("evidence") or {}).get("start") or "")
+        if not start:
+            raise ValueError("No start date: pass one or save the strategy with its evidence window")
+        request_body = {"factors": strategy["factors"], "model": strategy["model"], **strategy["params"], "start": start, "end": end}
+        config = prepare_backtest_config(request_body)
+        backtest_id = launch_backtest(config)
+        current = load_strategy(strategy_id)
+        current.setdefault("runs", []).append({"backtest_id": backtest_id, "kind": "update"})
+        save_strategy(current)
+        return {"backtest_id": backtest_id, "refreshed": refreshed, "failures": failures, "start": start, "end": end}
+
+    job = studio_jobs.run("strategy_update", f"更新策略 {strategy.get('name') or strategy_id[:8]}", in_app(work), market=market,
+                          link={"page": "strategies", "id": strategy_id}, total=len(members) + 1)
+    return jsonify({"job": job["id"]}), 202
+
+
+def signal_export(strategy):
+    """Target holdings and the latest ranking from the strategy's newest completed run, as rows for CSV/JSON.
+
+    The holdings are the book TopkDropoutStrategy ends the run with, i.e. what it would hold going into the
+    next trading day; the scores are the last signal day's ranking that the next rebalance will read.
+    """
+    for entry in reversed(strategy.get("runs", [])):
+        try:
+            folder = job_folder(entry["backtest_id"])
+        except ValueError:
+            continue
+        if not (folder / "result.json").is_file():
+            continue
+        result = json.loads((folder / "result.json").read_text())
+        if result.get("status") != "completed":
+            continue
+        config = json.loads((folder / "config.json").read_text())
+        holdings = result.get("holdings") or {}
+        signal = result.get("latest_signal") or {}
+        rows = []
+        for row in holdings.get("positions", []):
+            rows.append({"date": signal.get("date") or config.get("end"), "type": "holding", "instrument": row["instrument"], "weight": row.get("weight"),
+                         "amount": row.get("amount"), "price": row.get("price"), "value": row.get("value"), "score": None, "rank": None})
+        held = {row["instrument"] for row in holdings.get("positions", [])}
+        for row in signal.get("scores", []):
+            rows.append({"date": signal.get("date"), "type": "score", "instrument": row["instrument"], "weight": None, "amount": None, "price": None,
+                         "value": None, "score": row["score"], "rank": row["rank"], "held": row["instrument"] in held})
+        return {"strategy": strategy["name"], "strategy_id": strategy["id"], "backtest_id": entry["backtest_id"],
+                "as_of": signal.get("date") or config.get("end"), "market": config.get("market"), "topk": config.get("topk"), "n_drop": config.get("n_drop"),
+                "cash": holdings.get("cash"), "total": holdings.get("total"), "rows": rows}
+    raise ValueError("这个策略还没有跑完的回测；先点“更新到最新”")
+
+
+@studio.get("/strategies/<strategy_id>/signal")
+def strategy_signal(strategy_id):
+    """?format=csv for the file execution systems read; JSON otherwise."""
+    try:
+        strategy = load_strategy(strategy_id)
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    try:
+        payload = signal_export(strategy)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 409
+    if request.args.get("format") != "csv":
+        return jsonify(payload)
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    names = instrument_names(studio_markets.region_of((strategy.get("params") or {}).get("market")))["names"]
+    fields = ["date", "type", "instrument", "name", "weight", "amount", "price", "value", "score", "rank", "held"]
+    writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in payload["rows"]:
+        row = {**row, "name": (names.get(row["instrument"]) or {}).get("name", "")}
+        writer.writerow({k: ("" if row.get(k) is None else row.get(k)) for k in fields})
+    from urllib.parse import quote
+
+    # Header values must be latin-1: ASCII fallback plus the RFC 5987 percent-encoded UTF-8 name.
+    filename = f"signal-{payload['as_of']}-{strategy['name']}.csv".replace("/", "_")
+    disposition = f"attachment; filename=\"signal-{payload['as_of']}.csv\"; filename*=UTF-8''{quote(filename)}"
+    return Response(buffer.getvalue(), mimetype="text/csv", headers={"Content-Disposition": disposition})
+
+
+def instrument_names(region="cn"):
+    """The code → {name, industry} map: studio_data/instrument_names.json for A-shares, else the
+    instrument_names.json inside the region's data directory; an empty map when there is none."""
+    path = INSTRUMENT_NAMES
+    if region != "cn":
+        provider = studio_markets.provider_for(region)
+        path = provider / "instrument_names.json" if provider else None
+    if path is None or not path.is_file():
+        return {"source": None, "names": {}}
+    try:
+        data = json.loads(path.read_text())
+    except ValueError:
+        return {"source": None, "names": {}}
+    return {"source": data.get("source"), "names": data.get("names") or {}}
+
+
+@studio.get("/instruments/names")
+def instruments_names():
+    return jsonify(instrument_names(wanted_region() or "cn"))
+
+
+# ---- Data sync: keep the Qlib snapshot current, by hand or on a daily schedule ------------------------
+
+def workers_busy(app):
+    """True while any backtest/search/diagnosis worker or RD-Agent experiment process is alive."""
+    if any(p.poll() is None for p in PROCESSES.values()):
+        return True
+    registry = app.config.get("RDAGENT_PROCESSES") or {}
+    return any(getattr(task, "process", None) is not None and task.is_alive() for task in registry.values())
+
+
+@studio.record_once
+def _configure_sync(state):
+    app = state.app
+    studio_sync.configure(TRACE_ROOT / "studio_data" / "sync.json", lambda: workers_busy(app))
+    studio_llm.configure(TRACE_ROOT / "studio_data" / "llm.json")
+
+
+@studio.get("/data/sync")
+def data_sync_status():
+    payload = studio_sync.status()
+    if request.args.get("check") == "1":
+        try:
+            payload["remote"] = studio_sync.check_remote(max_age=0 if request.args.get("fresh") == "1" else 900)
+            payload["remote_error"] = None
+        except Exception as error:  # noqa: BLE001
+            payload["remote_error"] = str(error)
+    return jsonify(payload)
+
+
+@studio.post("/data/sync")
+def data_sync_start():
+    body = request.get_json() or {}
+    result = studio_sync.run_sync(force=bool(body.get("force")))
+    return jsonify(result), (202 if result.get("started") else 409)
+
+
+@studio.route("/data/sync/settings", methods=["PUT"])
+def data_sync_settings():
+    body = request.get_json() or {}
+    values = {}
+    if "auto" in body:
+        values["auto"] = bool(body["auto"])
+    if "hour" in body:
+        try:
+            hour = int(body["hour"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "hour must be 0–23"}), 400
+        if not 0 <= hour <= 23:
+            return jsonify({"error": "hour must be 0–23"}), 400
+        values["hour"] = hour
+    return jsonify(studio_sync.save_settings(values))
+
+
+# ---- LLM settings: provider, model and key for research runs ------------------------------------------
+
+@studio.get("/llm")
+def llm_settings():
+    return jsonify(studio_llm.status())
+
+
+@studio.route("/llm", methods=["PUT"])
+def llm_save():
+    try:
+        return jsonify(studio_llm.save(request.get_json() or {}))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.post("/llm/test")
+def llm_test():
+    result = studio_llm.test_connection(request.get_json() or {})
+    return jsonify(result), (200 if result.get("ok") else 502)
+
+
+@studio.post("/llm/models")
+def llm_models():
+    result = studio_llm.list_models(request.get_json() or {})
+    return jsonify(result), (200 if result.get("ok") else 502)
+
+
+@studio.route("/llm/embedding", methods=["PUT"])
+def llm_embedding_save():
+    try:
+        return jsonify(studio_llm.save_embedding(request.get_json() or {}))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+
+@studio.post("/llm/embedding/test")
+def llm_embedding_test():
+    result = studio_llm.test_embedding(request.get_json() or {})
+    return jsonify(result), (200 if result.get("ok") else 502)
+
+
+# ---- US data build: run scripts/build-us-data.py in the background and report its progress -----------------
+
+BUILD_LOG = TRACE_ROOT / "studio_data" / "build_us.log"
+
+
+def _build_process():
+    return PROCESSES.get("build:us")
+
+
+@studio.get("/data/build")
+def data_build_status():
+    process = _build_process()
+    running = process is not None and process.poll() is None
+    lines = BUILD_LOG.read_text(errors="replace").splitlines()[-30:] if BUILD_LOG.is_file() else []
+    return jsonify({"running": running, "exit_code": None if running or process is None else process.returncode,
+                    "log": lines, "started": BUILD_LOG.is_file(),
+                    "finished_at": datetime.fromtimestamp(BUILD_LOG.stat().st_mtime, tz=timezone.utc).isoformat() if BUILD_LOG.is_file() and not running else None})
+
+
+@studio.post("/data/build")
+def data_build_start():
+    """Build (or rebuild) the US data directory from Yahoo Finance; refused while anything else is running."""
+    if _build_process() is not None and _build_process().poll() is None:
+        return jsonify({"started": False, "reason": "已经在构建中"}), 409
+    if workers_busy(current_app):
+        return jsonify({"started": False, "reason": "有回测或研究正在运行，等它们结束再构建"}), 409
+    script = Path(__file__).resolve().parents[3] / "scripts" / "build-us-data.py"
+    if not script.is_file():
+        return jsonify({"started": False, "reason": f"找不到 {script}"}), 500
+    BUILD_LOG.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with BUILD_LOG.open("w") as log:
+            PROCESSES["build:us"] = subprocess.Popen(
+                [os.environ.get("STUDIO_PYTHON", sys.executable), str(script)],
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True, cwd=str(script.parents[1]),
+            )
+    except OSError as error:
+        return jsonify({"started": False, "reason": str(error)}), 500
+    return jsonify({"started": True}), 202
+
+
+# ---- Live log tail of a research run: what the process printed last, and when ------------------------------
+
+_LOG_NOISE = re.compile(r"mlflow\.agent\.hint|instrumenting-with-mlflow-tracing|MLFLOW_DISABLE_AGENT_HINT|^\s*$|Workflow Progress|it/s\]|ModuleNotFoundError\. .* skipped|fitz. API is deprecated|Load the$|before writing any tracing|ow/assistant/skills|^`instrumenting|^any tracing code")
+
+
+@studio.get("/trace-tail")
+def trace_tail():
+    """The last lines of a run's stdout (noise such as progress bars and mlflow hints dropped) plus the file's
+    last-modified time, so the UI can show what the agent is doing and how long it has been quiet."""
+    trace = request.args.get("trace", "")
+    if not trace or ".." in trace.split("/"):
+        return jsonify({"error": "trace required"}), 400
+    path = (TRACE_ROOT / trace).with_suffix(".log")
+    if not path.is_file():
+        return jsonify({"lines": [], "updated": None, "size": 0})
+    try:
+        lines = int(request.args.get("lines") or 12)
+    except ValueError:
+        lines = 12
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - 64 * 1024))
+        chunk = handle.read().decode("utf-8", "replace")
+    kept = []
+    for raw in chunk.splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", raw).rstrip()
+        # Loguru lines: keep the time and the message, drop the module path in between.
+        m = re.match(r"^\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+ \| (\w+)\s+\| [^-]+ - (.*)$", line)
+        if m:
+            line = f"{m.group(1)} {m.group(3)}"
+        if _LOG_NOISE.search(line):
+            continue
+        kept.append(line[:240])
+    return jsonify({"lines": kept[-max(1, min(lines, 60)):], "size": size,
+                    "updated": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()})
+
+
+# ---- Jobs: one list of everything running in the background --------------------------------------------
+
+def _research_jobs(registry, root, region):
+    """Live research runs as jobs (progress: rounds started), so the unified list covers them too."""
+    out = []
+    for key, task in list(registry.items()):
+        if task is None or getattr(task, "process", None) is None or not task.is_alive():
+            continue
+        try:
+            trace_id = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            trace_id = key
+        market = run_market(trace_id)
+        if not in_region(market, region):
+            continue
+        summary = summarize_task(trace_id, task)
+        loop_n = (getattr(task, "kwargs", {}) or {}).get("loop_n")
+        out.append({"id": f"research:{trace_id}", "kind": "research", "label": f"研究 {trace_id.split('/')[-1]}", "status": "running",
+                    "progress": {"done": summary["rounds"], "total": loop_n} if loop_n else None,
+                    "message": "等你确认" if summary.get("waiting") else f"第 {summary['rounds'] or 1} 轮", "market": market,
+                    "link": {"page": "research", "id": trace_id}, "started": None, "finished": None, "error": None, "result": None})
+    return out
+
+
+def _sync_job():
+    state = studio_sync.status().get("sync") or {}
+    if not state.get("running"):
+        return None
+    progress = state.get("progress")
+    return {"id": "sync:cn", "kind": "sync", "label": "同步 A 股数据", "status": "running",
+            "progress": {"done": int(progress * 100), "total": 100} if progress is not None else None,
+            "message": state.get("phase") or "", "market": "csi300", "link": {"page": "sync"}, "started": state.get("started_at"),
+            "finished": None, "error": None, "result": None}
+
+
+def _build_job():
+    process = PROCESSES.get("build:us")
+    if process is None or process.poll() is not None:
+        return None
+    return {"id": "build:us", "kind": "build", "label": "重建美股数据", "status": "running", "progress": None, "message": "",
+            "market": "nasdaq100", "link": {"page": "build"}, "started": None, "finished": None, "error": None, "result": None}
+
+
+@studio.get("/jobs")
+def jobs():
+    """Everything running in the background for this workspace, plus what finished after ``?since=``."""
+    region = wanted_region()
+    since = request.args.get("since") or None
+    items = [j for j in studio_jobs.list_jobs(since=since) if in_region(j.get("market"), region)]
+    items += _research_jobs(current_app.config["RDAGENT_PROCESSES"], Path(current_app.config["LOG_FOLDER_PATH"]), region)
+    for extra in (_sync_job(), _build_job()):
+        if extra and in_region(extra["market"], region):
+            items.append(extra)
+    return jsonify({"items": items, "now": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+
+
+@studio.get("/jobs/<job_id>")
+def job_detail(job_id):
+    job = studio_jobs.get(job_id)
+    if job is None:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(job)
