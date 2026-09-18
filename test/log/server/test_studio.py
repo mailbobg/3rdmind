@@ -1998,16 +1998,16 @@ def test_attention_lists_unanswered_requests_of_live_runs(studio_client) -> None
 def test_gate_judges_factors_by_t_duplication_and_replication() -> None:
     from rdagent.log.server import studio_gate
 
-    def analysis(t, residual=True, horizon=5):
+    def analysis(t, residual=True, horizon=5, ic=0.03):
         key = "residual_rank_ic" if residual else "rank_ic"
-        return {"days": 400, "rank_ic": {"mean": 0.02, "ir": 0.1}, "horizons": [{"days": 1, key: {"t": t / 2}}, {"days": horizon, key: {"t": t}}]}
+        return {"days": 400, "rank_ic": {"mean": 0.02, "ir": 0.1}, "horizons": [{"days": 1, key: {"t": t / 2, "mean": ic / 2}}, {"days": horizon, key: {"t": t, "mean": ic}}]}
 
     assert studio_gate.best_t(analysis(3.5)) == (3.5, 5)
     assert studio_gate.best_t({"days": 400, "rank_ic": {"mean": 0.02, "ir": 0.1}}) == (pytest.approx(2.0), 1)
     assert studio_gate.best_t({}) == (None, None)
-    analyses = {"NEW": analysis(4.0), "COPY": analysis(6.0), "WEAK": analysis(2.4), "DEAD": analysis(0.8), "LOCAL": analysis(-3.6)}
+    analyses = {"NEW": analysis(4.0), "COPY": analysis(6.0), "WEAK": analysis(2.4), "DEAD": analysis(0.8), "LOCAL": analysis(-3.6), "TINY": analysis(5.0, ic=0.012)}
     others = {"csi1000": {"NEW": analysis(2.7), "LOCAL": analysis(0.3)}}
-    corr = {"NEW": 0.31, "COPY": 0.92, "WEAK": 0.1, "DEAD": 0.0, "LOCAL": -0.55}
+    corr = {"NEW": 0.31, "COPY": 0.92, "WEAK": 0.1, "DEAD": 0.0, "LOCAL": -0.55, "TINY": 0.2}
 
     def correlate(pairs):
         names = [n for n, _ in pairs]
@@ -2018,10 +2018,12 @@ def test_gate_judges_factors_by_t_duplication_and_replication() -> None:
     kw = {"analyze": lambda path, market: analyses[Path(path).name], "correlate": correlate, "replicate": lambda name, path, second: others[second][name]}
     gate = studio_gate.gate_round([(n, f"/ws/{n}") for n in analyses], "csi300", library, **kw)
     levels = {f["name"]: f["level"] for f in gate["factors"]}
-    assert levels == {"NEW": "signal", "COPY": "duplicate", "WEAK": "weak", "DEAD": "noise", "LOCAL": "unreplicated"}
+    assert levels == {"NEW": "signal", "COPY": "duplicate", "WEAK": "weak", "DEAD": "noise", "LOCAL": "unreplicated", "TINY": "weak"}
+    tiny = next(f for f in gate["factors"] if f["name"] == "TINY")
+    assert tiny["ic"] == 0.012 and "量级不到 0.02" in "；".join(tiny["reasons"])  # real (t 5) but too small to pay for turnover
     assert gate["decision"] is True and gate["second_market"] == "csi1000"
     new = next(f for f in gate["factors"] if f["name"] == "NEW")
-    assert new["t"] == 4.0 and new["horizon"] == 5 and new["t2"] == 2.7 and new["replicated"] is True and new["corr"] == 0.31
+    assert new["t"] == 4.0 and new["horizon"] == 5 and new["ic"] == 0.03 and new["t2"] == 2.7 and new["replicated"] is True and new["corr"] == 0.31
     local = next(f for f in gate["factors"] if f["name"] == "LOCAL")
     assert local["replicated"] is False and "增量有限" in "；".join(local["reasons"])
     assert "COPY ≈ RVOL_20" in gate["hint"] and "WEAK、DEAD" in gate["hint"] and "RVOL_20" in gate["hint"] and "通过" in gate["summary"]

@@ -13,6 +13,7 @@ import math
 
 T_SIGNAL = 3.0  # |t| of the size-neutral Rank IC at the best horizon on the run's market
 T_WEAK = 2.0  # below this the factor is indistinguishable from zero
+IC_SIGNAL = 0.02  # |Rank IC| at that horizon: a real but smaller signal cannot pay for its own turnover
 T_REPLICATE = 2.0  # same sign, at least this |t| on the second market
 DUPLICATE_CORR = 0.7  # rank correlation with a library factor from which it counts as the same signal
 RELATED_CORR = 0.5  # from which the overlap is worth mentioning
@@ -29,18 +30,24 @@ def best_t(analysis, key="residual_rank_ic"):
     Prefers the size-neutral residual Rank IC; falls back to the raw Rank IC of a horizon, then to the
     whole-run ICIR × √days of an analysis without horizons. (None, None) when nothing is usable.
     """
-    best = (None, None)
+    t, horizon, _ = best_stats(analysis, key)
+    return t, horizon
+
+
+def best_stats(analysis, key="residual_rank_ic"):
+    """(t, horizon, mean Rank IC) at the horizon with the largest |t|; see best_t."""
+    best = (None, None, None)
     for horizon in analysis.get("horizons") or []:
         stats = horizon.get(key) or horizon.get("rank_ic") or {}
         t = stats.get("t")
         if t is not None and (best[0] is None or abs(t) > abs(best[0])):
-            best = (float(t), int(horizon["days"]))
+            best = (float(t), int(horizon["days"]), stats.get("mean"))
     if best[0] is None:
         stats = analysis.get("rank_ic") or {}
         if stats.get("t") is not None:
-            best = (float(stats["t"]), 1)
+            best = (float(stats["t"]), 1, stats.get("mean"))
         elif stats.get("ir") is not None and analysis.get("days"):
-            best = (float(stats["ir"]) * math.sqrt(int(analysis["days"])), 1)
+            best = (float(stats["ir"]) * math.sqrt(int(analysis["days"])), 1, stats.get("mean"))
     return best
 
 
@@ -51,15 +58,15 @@ def judge_factor(name, path, market, library, *, analyze, correlate, replicate):
     correlation matrix ``{"names", "matrix"}``; ``replicate(name, path, market)`` the analysis of the same
     code recomputed on another market. ``library`` is ``[(name, path), ...]`` of the factors already kept.
     """
-    out = {"name": name, "level": "noise", "t": None, "horizon": None, "nearest": None, "corr": None,
+    out = {"name": name, "level": "noise", "t": None, "horizon": None, "ic": None, "nearest": None, "corr": None,
            "second_market": SECOND_MARKET.get(market), "t2": None, "replicated": None, "reasons": []}
     try:
         analysis = analyze(path, market)
     except Exception as error:  # noqa: BLE001 - the message is the diagnosis
         out.update(level="error", reasons=[f"分析失败：{error}"])
         return out
-    t, horizon = best_t(analysis)
-    out.update(t=t, horizon=horizon)
+    t, horizon, ic = best_stats(analysis)
+    out.update(t=t, horizon=horizon, ic=ic)
     # A copy of a library factor is not new information, however strong it is; check that first.
     others = [(n, p) for n, p in library if n != name]
     if others:
@@ -88,7 +95,11 @@ def judge_factor(name, path, market, library, *, analyze, correlate, replicate):
         out["level"] = "weak"
         out["reasons"].append(f"t 值 {t:.2f}（{horizon} 日），在 2 到 3 之间，样本不足以确认")
         return out
-    out["reasons"].append(f"t 值 {t:.2f}（{horizon} 日）")
+    if ic is not None and abs(ic) < IC_SIGNAL:
+        out["level"] = "weak"
+        out["reasons"].append(f"t 值 {t:.2f}（{horizon} 日）但 Rank IC 只有 {ic:+.4f}，量级不到 {IC_SIGNAL}，付不起自己的换手")
+        return out
+    out["reasons"].append(f"t 值 {t:.2f}，Rank IC {ic:+.4f}（{horizon} 日）" if ic is not None else f"t 值 {t:.2f}（{horizon} 日）")
     second = out["second_market"]
     if second:
         try:
@@ -165,5 +176,5 @@ def next_hint(verdicts, families, existing=None):
         lines.append("库里已有的独立信号族（各列一个代表；新假设与它们的相关要低于 0.5）：" + "、".join(families[:12]))
     if existing:
         lines.append(f"库里已有 {len(existing)} 个因子，不要再提同名或同定义的：" + "、".join(existing))
-    lines.append("验收标准：市值中性 Rank IC 在 1/5/10/20 日中最好期限的 |t| ≥ 3，与库里任一因子的秩相关 < 0.7，并在同区域另一个股票池上同号复现（|t| ≥ 2）。请提出机制不同的假设，而不是同一族的新参数。")
+    lines.append("验收标准：市值中性 Rank IC 在 1/5/10/20 日中最好期限的 |t| ≥ 3 且 |Rank IC| ≥ 0.02，与库里任一因子的秩相关 < 0.7，并在同区域另一个股票池上同号复现（|t| ≥ 2）。请提出机制不同的假设，而不是同一族的新参数。")
     return "\n".join(lines)
