@@ -1,6 +1,6 @@
 import type { RecentContext, RecentHorizon, StyleName } from "../api/studio";
 import { Note } from "./minimal";
-import { Hint, Signed, percent } from "./widgets";
+import { Hint, Signed } from "./widgets";
 import { t } from "../i18n";
 
 /**
@@ -14,7 +14,8 @@ const STYLE_LABELS: Record<StyleName, string> = { momentum: "动量（20 日）"
 const HORIZON_LABELS = { week: "最近一周", month: "最近一月" };
 
 const pct = (v: number) => `${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
-const ordinal = (p: number) => Math.round(p * 100);
+// Floored so the number agrees with the rule ("below 10" reads as 9, never 10).
+const ordinal = (p: number) => Math.floor(p * 100);
 
 function readingText(h: RecentHorizon) {
   const p = ordinal(h.percentile), n = h.days;
@@ -80,10 +81,10 @@ function Attribution({ h }: { h: RecentHorizon }) {
 }
 
 export function RecentPerformance({ data, dataEnd }: { data: RecentContext; dataEnd?: string | null }) {
-  const stale = !!dataEnd && data.as_of < dataEnd;
+  const stale = !!dataEnd && (data.window_end || data.as_of) < dataEnd;
   return (
     <div className="flex flex-col gap-3">
-      {stale && <Note tone="warn">{t("证据日期停在 {0}，行情数据已到 {1}。下面的数字是截至 {0} 的；先点“更新到最新”，再判断最近表现。", [data.as_of, dataEnd])}</Note>}
+      {stale && <Note tone="warn">{t("证据日期停在 {0}，行情数据已到 {1}。下面的数字是截至 {0} 的；先点“更新到最新”，再判断最近表现。", [data.window_end || data.as_of, dataEnd])}</Note>}
       {data.horizons.map((h) => (
         <div key={h.key} className="pulse">
           <div className="pulse__head">

@@ -274,7 +274,11 @@ export interface RecentHorizon {
   attribution?: { actual: number; alpha: number; market: number; styles: Record<StyleName, number>; residual: number };
   reading: RecentReading;
 }
-export interface RecentContext { as_of: string; start: string; days: number; horizons: RecentHorizon[]; backtest_id: string; run_kind: string; has_ic: boolean; has_attribution: boolean }
+export interface RecentContext {
+  as_of: string; start: string; days: number; horizons: RecentHorizon[]; backtest_id: string; run_kind: string;
+  /** The end the run was asked for; `as_of` is one trading day short of it because a backtest cannot end on the calendar's last day. */
+  window_end?: string | null; has_ic: boolean; has_attribution: boolean;
+}
 export const strategyRecent = (id: string) => api<RecentContext>(`/studio/strategies/${id}/recent`);
 export const strategySignalCsvUrl = (id: string) => `/studio/strategies/${id}/signal?format=csv`;
 /** Start a factor-research run whose base features are the strategy's members. */

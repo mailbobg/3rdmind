@@ -1351,7 +1351,10 @@ def strategy_recent(strategy_id):
         context = recent_context(result)
         if context is None:
             break
-        return jsonify({**context, "backtest_id": entry["backtest_id"], "run_kind": entry.get("kind", "update"),
+        # The window the run was asked for: a backtest cannot end on the calendar's last day, so ``as_of`` is
+        # one trading day short of a fresh update and the UI compares this against the data's end instead.
+        config = json.loads((folder / "config.json").read_text()) if (folder / "config.json").is_file() else {}
+        return jsonify({**context, "backtest_id": entry["backtest_id"], "run_kind": entry.get("kind", "update"), "window_end": config.get("end"),
                         "has_ic": bool(result.get("ic_rows")), "has_attribution": bool(result.get("attribution"))})
     return jsonify({"error": "这个策略还没有跑完的回测，或回测太短"}), 409
 

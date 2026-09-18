@@ -697,7 +697,7 @@ def test_strategy_recent_reads_the_newest_completed_run(studio_client, tmp_path:
     assert recent.status_code == 200, recent.get_json()
     payload = recent.get_json()
     assert payload["backtest_id"] == "55555555-5555-5555-5555-555555555555" and payload["run_kind"] == "evidence"
-    assert payload["has_ic"] is False and [h["key"] for h in payload["horizons"]] == ["week", "month"]
+    assert payload["has_ic"] is False and payload["window_end"] == "2025-03-01" and [h["key"] for h in payload["horizons"]] == ["week", "month"]
     assert payload["horizons"][0]["reading"] == "needs_update"
     studio_module.write_json(job / "result.json", {"status": "running"})
     assert studio_client.get(f"/studio/strategies/{strategy['id']}/recent").status_code == 409
