@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
-import type { BacktestResult, SignalExport, Strategy, StrategyRun } from "../api/studio";
+import type { BacktestResult, RecentContext, SignalExport, Strategy, StrategyRun } from "../api/studio";
 import { shortTime } from "../hooks/experiments";
 import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
 import { persistStudioState } from "../hooks/studioStorage";
@@ -9,6 +9,7 @@ import { PageFrame } from "../components/PageFrame";
 import { Section } from "../components/Section";
 import { DateInput } from "../components/DateInput";
 import { BacktestResultView } from "../components/BacktestResultView";
+import { RecentPerformance } from "../components/RecentPerformance";
 import { Block, Btn, Empty, Field, Note, Num, NumberInput, P, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { CurveOverlay, DataTable, Hint, Instrument, MetricGrid, Mono, Signed, money, percent } from "../components/widgets";
 import { t } from "../i18n";
@@ -31,6 +32,7 @@ export function StrategiesPage() {
   const [detail, setDetail] = useState<Strategy | null>(null);
   const [latestRun, setLatestRun] = useState<BacktestResult | null>(null);
   const [signal, setSignal] = useState<SignalExport | null>(null);
+  const [recent, setRecent] = useState<RecentContext | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const [filter, setFilter] = useState("all");
@@ -62,7 +64,7 @@ export function StrategiesPage() {
   // The newest run's full report; polled while it is still running.
   const lastRunId = detail?.run_details?.length ? detail.run_details[detail.run_details.length - 1].id : "";
   useEffect(() => {
-    setLatestRun(null); setSignal(null);
+    setLatestRun(null); setSignal(null); setRecent(null);
     if (!lastRunId) return;
     let stop = false;
     const tick = async () => {
@@ -70,7 +72,10 @@ export function StrategiesPage() {
         const r = await studio.backtest(lastRunId);
         if (stop) return;
         setLatestRun(r);
-        if (r.status === "completed" && selectedId) studio.strategySignal(selectedId).then((sig) => { if (!stop) setSignal(sig); }).catch(() => { if (!stop) setSignal(null); });
+        if (r.status === "completed" && selectedId) {
+          studio.strategySignal(selectedId).then((sig) => { if (!stop) setSignal(sig); }).catch(() => { if (!stop) setSignal(null); });
+          studio.strategyRecent(selectedId).then((ctx) => { if (!stop) setRecent(ctx); }).catch(() => { if (!stop) setRecent(null); });
+        }
         if (r.status === "queued" || r.status === "running") setTimeout(tick, 3000);
         else if (detail && selectedId) { studio.strategy(selectedId).then((s) => { if (!stop) setDetail(s); }).catch(() => {}); load(); }
       } catch (e) { if (!stop) setError(errorText(e)); }
@@ -214,6 +219,11 @@ export function StrategiesPage() {
                   <span key="h" className={`text-[11px] ${r.held ? "text-success" : "text-muted"}`}>{r.held ? t("持有中") : (r.rank ?? 0) <= signal.topk ? t("待买入") : ""}</span>,
                 ] }))} />
               <Hint>{t("排名跌出前 {0} 的持仓标红：按 TopkDropout 规则它们是下一次调仓最先被换出的候选。", [signal.topk])}</Hint>
+            </Section>
+          )}
+          {recent && latestRun?.status === "completed" && (
+            <Section title={t("近期表现在历史中的位置")} note={t("截至 {0} · 对照这次回测 {1} 个交易日的历史", [recent.as_of, recent.days])}>
+              <RecentPerformance data={recent} dataEnd={env?.end} />
             </Section>
           )}
           {latestRun?.metrics && (

@@ -13,7 +13,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.server import studio_jobs, studio_llm, studio_markets, studio_sync
-from rdagent.log.server.studio_worker import validate_config, write_json
+from rdagent.log.server.studio_worker import recent_context, validate_config, write_json
 
 studio = Blueprint("studio", __name__, url_prefix="/studio")
 PROCESSES = {}
@@ -1325,6 +1325,35 @@ def signal_export(strategy):
                 "as_of": signal.get("date") or config.get("end"), "market": config.get("market"), "topk": config.get("topk"), "n_drop": config.get("n_drop"),
                 "cash": holdings.get("cash"), "total": holdings.get("total"), "rows": rows}
     raise ValueError("这个策略还没有跑完的回测；先点“更新到最新”")
+
+
+@studio.get("/strategies/<strategy_id>/recent")
+def strategy_recent(strategy_id):
+    """近期表现在历史中的位置: the newest finished run's last week and month against that run's own history.
+
+    Runs saved before daily IC and style spreads were stored still get the return percentiles; the IC and
+    attribution parts appear after the next 更新到最新.
+    """
+    try:
+        strategy = load_strategy(strategy_id)
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
+    for entry in reversed(strategy.get("runs", [])):
+        try:
+            folder = job_folder(entry["backtest_id"])
+        except ValueError:
+            continue
+        if not (folder / "result.json").is_file():
+            continue
+        result = json.loads((folder / "result.json").read_text())
+        if result.get("status") != "completed":
+            continue
+        context = recent_context(result)
+        if context is None:
+            break
+        return jsonify({**context, "backtest_id": entry["backtest_id"], "run_kind": entry.get("kind", "update"),
+                        "has_ic": bool(result.get("ic_rows")), "has_attribution": bool(result.get("attribution"))})
+    return jsonify({"error": "这个策略还没有跑完的回测，或回测太短"}), 409
 
 
 @studio.get("/strategies/<strategy_id>/signal")

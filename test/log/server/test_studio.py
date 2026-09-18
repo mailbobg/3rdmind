@@ -602,6 +602,108 @@ def test_strategy_signal_exports_holdings_and_scores(studio_client, tmp_path: Pa
     assert studio_client.get(f"/studio/strategies/{strategy['id']}/signal").status_code == 409
 
 
+def _report_rows(returns, bench):
+    equity = benchmark = 1.0
+    rows = []
+    for i, (r, b) in enumerate(zip(returns, bench)):
+        equity *= 1 + r
+        benchmark *= 1 + b
+        rows.append({"date": str(pd.Timestamp("2025-01-01") + pd.Timedelta(days=i)), "equity": equity, "benchmark": benchmark,
+                     "drawdown": 0.0, "return": r, "cost": 0.0, "turnover": 0.0, "account": equity})
+    for row in rows:
+        row["date"] = row["date"][:10]
+    return rows
+
+
+@pytest.mark.offline
+def test_style_spreads_take_top_minus_bottom_quintile_by_prior_value() -> None:
+    from rdagent.log.server.studio_worker import STYLES, style_spreads
+
+    names = [f"S{i}" for i in range(10)]
+    index = pd.MultiIndex.from_product([pd.to_datetime(["2025-01-02", "2025-01-03"]), names], names=["datetime", "instrument"])
+    frame = pd.DataFrame(index=index)
+    frame["ret"] = [i / 100 for i in range(10)] * 2                  # return rises with the name's index
+    for name in STYLES:
+        frame[name] = [float(i) for i in range(10)] * 2               # every style ranks the names the same way
+    frame.loc[(pd.Timestamp("2025-01-03"), slice(None)), "liquidity"] = float("nan")
+    rows = style_spreads(frame)
+    assert rows[0]["date"] == "2025-01-02" and rows[0]["momentum"] == pytest.approx((0.08 + 0.09) / 2 - (0.0 + 0.01) / 2)
+    assert rows[1]["liquidity"] is None and rows[1]["reversal"] == rows[0]["reversal"]
+
+
+@pytest.mark.offline
+def test_fit_exposures_recovers_the_betas_and_bench_returns_undo_the_curve() -> None:
+    import numpy as np
+    from rdagent.log.server.studio_worker import STYLES, bench_returns, fit_exposures
+
+    rng = np.random.default_rng(0)
+    bench = rng.normal(0, 0.01, 60)
+    styles = [{"date": f"2025-01-{i + 1:02d}", **{name: float(rng.normal(0, 0.005)) for name in STYLES}} for i in range(60)]
+    for i in range(60):
+        styles[i]["date"] = str((pd.Timestamp("2025-01-01") + pd.Timedelta(days=i)).date())
+    returns = [0.0005 + 0.8 * bench[i] + 0.5 * styles[i]["momentum"] - 0.3 * styles[i]["reversal"] for i in range(60)]
+    rows = _report_rows(returns, bench)
+    assert bench_returns(rows) == pytest.approx(list(bench))
+    fit = fit_exposures(rows, styles)
+    assert fit["days"] == 60 and fit["r2"] == pytest.approx(1.0)
+    assert fit["betas"]["alpha"] == pytest.approx(0.0005) and fit["betas"]["market"] == pytest.approx(0.8)
+    assert fit["betas"]["momentum"] == pytest.approx(0.5) and fit["betas"]["reversal"] == pytest.approx(-0.3) and fit["betas"]["volatility"] == pytest.approx(0.0, abs=1e-9)
+    assert fit_exposures(rows[:10], styles) is None
+
+
+@pytest.mark.offline
+def test_recent_context_places_the_last_week_in_the_runs_history() -> None:
+    from rdagent.log.server.studio_worker import STYLES, recent_context
+
+    # 60 quiet days, then a week that loses 1% a day while the benchmark loses 1.2% a day.
+    returns = [0.001] * 55 + [-0.01] * 5
+    bench = [0.0005] * 55 + [-0.012] * 5
+    result = {"rows": _report_rows(returns, bench)}
+    context = recent_context(result)
+    week, month = context["horizons"]
+    assert week["key"] == "week" and week["days"] == 5 and context["as_of"] == result["rows"][-1]["date"]
+    assert week["return"] == pytest.approx((1 - 0.01) ** 5 - 1) and week["excess"] > 0
+    assert week["percentile"] < 0.02 and week["windows"] == 56 and week["reading"] == "needs_update"
+    assert month["percentile"] < 0.05 and "ic" not in week and "attribution" not in week
+    # With daily IC and exposures stored, the week is explained: a normal IC and a market beta of 1 make it "market".
+    result["ic_rows"] = [{"date": r["date"], "ic": 0.02, "rank_ic": 0.02} for r in result["rows"]]
+    result["style_rows"] = [{"date": r["date"], **{name: 0.0 for name in STYLES}} for r in result["rows"]]
+    result["attribution"] = {"betas": {"alpha": 0.0, "market": 1.0, **{name: 0.0 for name in STYLES}}, "r2": 0.9, "days": 60}
+    week = recent_context(result)["horizons"][0]
+    assert week["ic"]["recent"] == pytest.approx(0.02) and week["ic"]["percentile"] == pytest.approx(0.5)
+    assert week["attribution"]["market"] == pytest.approx(-0.06) and week["attribution"]["residual"] == pytest.approx(0.01)
+    assert week["reading"] == "market"
+    # A collapsing IC over the same week reads as drift instead.
+    for row in result["ic_rows"][-5:]:
+        row["ic"] = -0.05
+    assert recent_context(result)["horizons"][0]["reading"] == "drift"
+    # A normal week is normal whatever else is stored.
+    result["rows"] = _report_rows([0.001] * 60, [0.0005] * 60)
+    assert recent_context(result)["horizons"][0]["reading"] == "normal"
+    assert recent_context({"rows": result["rows"][:8]}) is None
+
+
+@pytest.mark.offline
+def test_strategy_recent_reads_the_newest_completed_run(studio_client, tmp_path: Path) -> None:
+    job = studio_module.ROOT / "55555555-5555-5555-5555-555555555555"
+    job.mkdir(parents=True)
+    studio_module.write_json(job / "config.json", {"start": "2025-01-01", "end": "2025-03-01", "factors": [{"name": "STR_5"}], "market": "csi300", "topk": 5, "n_drop": 1})
+    studio_module.write_json(job / "result.json", {"status": "completed", "metrics": {"total_return": 0.05}, "rows": _report_rows([0.001] * 55 + [-0.01] * 5, [0.0005] * 60)})
+    body = {"name": "近期", "factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}], "model": {"method": "rank"},
+            "params": {"market": "csi300", "benchmark": "SH000300", "topk": 5, "n_drop": 1, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015},
+            "evidence": {"backtest_id": "55555555-5555-5555-5555-555555555555", "start": "2025-01-01", "end": "2025-03-01"}}
+    strategy = studio_client.post("/studio/strategies", json=body).get_json()
+    recent = studio_client.get(f"/studio/strategies/{strategy['id']}/recent")
+    assert recent.status_code == 200, recent.get_json()
+    payload = recent.get_json()
+    assert payload["backtest_id"] == "55555555-5555-5555-5555-555555555555" and payload["run_kind"] == "evidence"
+    assert payload["has_ic"] is False and [h["key"] for h in payload["horizons"]] == ["week", "month"]
+    assert payload["horizons"][0]["reading"] == "needs_update"
+    studio_module.write_json(job / "result.json", {"status": "running"})
+    assert studio_client.get(f"/studio/strategies/{strategy['id']}/recent").status_code == 409
+    assert studio_client.get("/studio/strategies/00000000-0000-0000-0000-000000000000/recent").status_code == 404
+
+
 @pytest.mark.offline
 def test_research_from_strategy_seeds_base_features(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "ws" / "f0" / "factor.py").write_text("print('STR_5')")

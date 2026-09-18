@@ -346,3 +346,31 @@ textarea.mm-control { height: auto; padding: 6px 8px; line-height: 1.6; resize: 
 .mm-date__preset { display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 8px; border: 1px solid var(--mm-rule); border-radius: 999px; background: transparent; font: inherit; font-size: 11px; color: var(--mm-ink); cursor: pointer; }
 .mm-date__preset:hover { background: var(--mm-ground); }
 .mm-date__preset-date { font-family: var(--mm-mono); font-size: 10px; color: var(--mm-muted); }
+
+/* 近期表现在历史中的位置 (strategy page): one block per horizon. */
+.pulse { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--mm-rule); border-radius: 10px; background: var(--mm-paper); font-size: 12px; color: var(--mm-ink); }
+.pulse__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pulse__title { font-weight: 600; }
+.pulse__dates { font-family: var(--mm-mono); font-size: 11px; color: var(--mm-muted); }
+.pulse__nums { display: flex; flex-wrap: wrap; gap: 6px 18px; font-variant-numeric: tabular-nums; }
+.pulse__k { margin-right: 6px; font-size: 11px; color: var(--mm-muted); }
+.pulse__dist { display: flex; flex-direction: column; gap: 3px; }
+.pulse__strip { position: relative; height: 14px; border-radius: 7px; background: var(--mm-rule-soft); overflow: visible; }
+.pulse__band { position: absolute; top: 0; bottom: 0; background: var(--mm-rule); border-radius: 7px; }
+.pulse__tick { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: var(--mm-muted); border-radius: 1px; }
+.pulse__tick--zero { background: transparent; border-left: 1px dashed var(--mm-muted); width: 0; }
+.pulse__dot { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--mm-ink); box-shadow: 0 0 0 2px var(--mm-paper); }
+.pulse__dot--bad { background: var(--mm-bad); }
+.pulse__axis { display: flex; justify-content: space-between; font-family: var(--mm-mono); font-size: 10px; color: var(--mm-muted); }
+.pulse__ic { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; }
+.pulse__attr { display: flex; flex-direction: column; gap: 4px; padding-top: 4px; border-top: 1px solid var(--mm-rule-soft); }
+.pulse__row { display: grid; grid-template-columns: 140px 1fr 72px; align-items: center; gap: 10px; }
+.pulse__key { font-size: 11px; color: var(--mm-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pulse__sub { color: var(--mm-ink); }
+.pulse__track { position: relative; height: 8px; background: linear-gradient(to right, transparent calc(50% - 0.5px), var(--mm-rule) calc(50% - 0.5px), var(--mm-rule) calc(50% + 0.5px), transparent calc(50% + 0.5px)); }
+.pulse__bar { position: absolute; top: 0; bottom: 0; left: 50%; background: var(--mm-ok); border-radius: 0 3px 3px 0; opacity: 0.85; }
+.pulse__bar--neg { left: auto; right: 50%; background: var(--mm-bad); border-radius: 3px 0 0 3px; }
+.pulse__val { text-align: right; font-family: var(--mm-mono); font-size: 11.5px; }
+.pulse__read { margin: 0; padding-top: 6px; border-top: 1px solid var(--mm-rule-soft); font-size: 12px; line-height: 1.55; }
+.pulse__read--warn { color: var(--mm-warn); }
+.pulse__read--bad { color: var(--mm-bad); }

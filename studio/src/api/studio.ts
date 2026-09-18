@@ -262,6 +262,20 @@ export const deleteStrategy = (id: string) =>
 export interface SignalRow { date: string; type: "holding" | "score"; instrument: string; weight?: number | null; amount?: number | null; price?: number | null; value?: number | null; score?: number | null; rank?: number | null; held?: boolean }
 export interface SignalExport { strategy: string; strategy_id: string; backtest_id: string; as_of: string; market: string; topk: number; n_drop: number; cash: number | null; total: number | null; rows: SignalRow[] }
 export const strategySignal = (id: string) => api<SignalExport>(`/studio/strategies/${id}/signal`);
+/** 近期表现在历史中的位置: one horizon (week/month) of the newest finished run against the run's own history. */
+export type RecentReading = "normal" | "drift" | "market" | "style" | "specific" | "needs_update";
+export type StyleName = "momentum" | "reversal" | "volatility" | "liquidity";
+export interface RecentHorizon {
+  key: "week" | "month"; days: number; start: string; end: string;
+  return: number; benchmark: number; excess: number;
+  /** Where the window's net return sits among every same-length rolling window of the run (0…1), and that distribution. */
+  percentile: number; windows: number; low: number; p10: number; median: number; p90: number; high: number;
+  ic?: { recent: number; percentile: number; mean: number };
+  attribution?: { actual: number; alpha: number; market: number; styles: Record<StyleName, number>; residual: number };
+  reading: RecentReading;
+}
+export interface RecentContext { as_of: string; start: string; days: number; horizons: RecentHorizon[]; backtest_id: string; run_kind: string; has_ic: boolean; has_attribution: boolean }
+export const strategyRecent = (id: string) => api<RecentContext>(`/studio/strategies/${id}/recent`);
 export const strategySignalCsvUrl = (id: string) => `/studio/strategies/${id}/signal?format=csv`;
 /** Start a factor-research run whose base features are the strategy's members. */
 export const researchFromStrategy = (strategy_id: string, loops: number, all_duration: number) =>

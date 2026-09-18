@@ -187,15 +187,32 @@ def train_lgbm_signal(features, label, model, log=print):
     return score, report
 
 
-def information_coefficient(score, label):
-    """Mean daily Pearson and Spearman IC between a score and the forward-return label."""
+def daily_ic(score, label):
+    """Per-day Pearson and Spearman IC between a score and the forward-return label; (None, None) with no overlap."""
     frame = score.rename("score").to_frame().join(label.rename("label"), how="inner").dropna()
     if frame.empty:
         return None, None
     by_day = frame.groupby(level="datetime")
     ic = by_day.apply(lambda d: d["score"].corr(d["label"]) if len(d) > 2 else float("nan")).dropna()
     rank_ic = by_day.apply(lambda d: d["score"].corr(d["label"], method="spearman") if len(d) > 2 else float("nan")).dropna()
+    return ic, rank_ic
+
+
+def information_coefficient(score, label):
+    """Mean daily Pearson and Spearman IC between a score and the forward-return label."""
+    ic, rank_ic = daily_ic(score, label)
+    if ic is None:
+        return None, None
     return (float(ic.mean()) if len(ic) else None, float(rank_ic.mean()) if len(rank_ic) else None)
+
+
+def ic_rows(ic, rank_ic):
+    """The daily IC series as rows the recent-performance read-out compares against history."""
+    if ic is None:
+        return []
+    days = sorted(set(ic.index) | set(rank_ic.index))
+    return [{"date": str(day.date()), "ic": float(ic[day]) if day in ic.index else None,
+             "rank_ic": float(rank_ic[day]) if day in rank_ic.index else None} for day in days]
 
 
 def write_json(path, data):
@@ -533,12 +550,174 @@ def latest_scores(score, topk):
             "scores": [{"instrument": str(inst), "score": float(v), "rank": i + 1} for i, (inst, v) in enumerate(day.head(keep).items())]}
 
 
+# Style spreads: what a plain price-based tilt earned each day, from the previous close's information.
+# The recent-performance read-out regresses the strategy's daily return on the benchmark and these four
+# to say how much of a bad week was the market, a style the strategy leans on, or its own picks.
+STYLES = {
+    "momentum": "Ref($close, 1) / Ref($close, 21) - 1",        # 20-day return
+    "reversal": "Ref($close, 6) / Ref($close, 1) - 1",          # minus the 5-day return: high = fell lately
+    "volatility": "Ref(Std($close / Ref($close, 1) - 1, 20), 1)",
+    "liquidity": "Ref(Mean($close * $volume, 20), 1)",          # traded value, a size proxy
+}
+
+
+def load_style_frame(market, start, end):
+    """(datetime, instrument) rows of the day's return and each style's prior-close value over the universe."""
+    from qlib.data import D
+
+    frame = D.features(D.instruments(market), ["$close / Ref($close, 1) - 1", *STYLES.values()], start_time=start, end_time=end, freq="day")
+    frame.columns = ["ret", *STYLES]
+    if frame.index.names[0] == "instrument":
+        frame = frame.swaplevel(0, 1)
+    return frame.sort_index()
+
+
+def style_spreads(frame, quantile=0.2, min_names=10):
+    """Daily top-minus-bottom quintile return of each style, as rows; a style with too few names that day is null."""
+    rows = []
+    for day, cross in frame.groupby(level="datetime"):
+        row = {"date": str(day.date())}
+        for name in STYLES:
+            pairs = cross[[name, "ret"]].dropna()
+            if len(pairs) < min_names:
+                row[name] = None
+                continue
+            k = max(1, int(len(pairs) * quantile))
+            ordered = pairs.sort_values(name)["ret"]
+            row[name] = float(ordered.iloc[-k:].mean() - ordered.iloc[:k].mean())
+        rows.append(row)
+    return rows
+
+
+def bench_returns(rows):
+    """Daily benchmark returns recovered from the cumulative benchmark curve in the report rows."""
+    out, prev = [], 1.0
+    for row in rows:
+        out.append(row["benchmark"] / prev - 1)
+        prev = row["benchmark"]
+    return out
+
+
+def fit_exposures(rows, styles, min_days=30):
+    """OLS of the daily net return on the benchmark and the style spreads over the whole run.
+
+    Returns ``{"betas": {"alpha", "market", <styles>}, "r2", "days"}`` or None when too few days line up.
+    """
+    import numpy as np
+
+    by_date = {s["date"]: s for s in styles}
+    bench = bench_returns(rows)
+    X, y = [], []
+    for row, b in zip(rows, bench):
+        s = by_date.get(row["date"])
+        if not s or any(s.get(name) is None for name in STYLES):
+            continue
+        X.append([1.0, b, *(s[name] for name in STYLES)])
+        y.append(row["return"])
+    if len(y) < min_days:
+        return None
+    X, y = np.array(X), np.array(y)
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    fitted = X @ beta
+    total = float(((y - y.mean()) ** 2).sum())
+    r2 = 1 - float(((y - fitted) ** 2).sum()) / total if total > 0 else None
+    return {"betas": dict(zip(["alpha", "market", *STYLES], (float(v) for v in beta))), "r2": r2, "days": int(len(y))}
+
+
+HORIZONS = (("week", 5), ("month", 21))
+
+
+def _compound(values):
+    total = 1.0
+    for v in values:
+        total *= 1 + v
+    return total - 1
+
+
+def _percentile(population, value):
+    """Share of the population below ``value`` (ties count half), 0…1."""
+    below = sum(1 for v in population if v < value)
+    ties = sum(1 for v in population if v == value)
+    return (below + ties / 2) / len(population)
+
+
+def _quantile(sorted_values, q):
+    pos = q * (len(sorted_values) - 1)
+    lo, hi = int(pos), min(int(pos) + 1, len(sorted_values) - 1)
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (pos - lo)
+
+
+def _reading(horizon):
+    """One word on what the recent window looks like, from the numbers already in ``horizon``."""
+    if horizon["percentile"] >= 0.10:
+        return "normal"
+    ic, attribution = horizon.get("ic"), horizon.get("attribution")
+    if ic is not None and ic["percentile"] < 0.10:
+        return "drift"
+    if attribution is None:
+        return "needs_update" if ic is None else "specific"
+    explained = attribution["market"] + sum(attribution["styles"].values())
+    if abs(explained) >= abs(attribution["residual"]):
+        return "market" if abs(attribution["market"]) >= abs(sum(attribution["styles"].values())) else "style"
+    return "specific"
+
+
+def recent_context(result):
+    """近期表现在历史中的位置: the last week and month of a finished run against the run's own history.
+
+    For each horizon: compounded net and benchmark return, where the net return sits among every rolling
+    window of the same length in the run (percentile, spread), the same for the signal's mean IC when the
+    run stored daily IC, and, when it stored style spreads and exposures, the arithmetic split of the
+    window's return into alpha drift, market, styles and residual. ``reading`` names the picture.
+    """
+    rows = result.get("rows") or []
+    if len(rows) < 2 * HORIZONS[0][1]:
+        return None
+    net = [r["return"] for r in rows]
+    bench = bench_returns(rows)
+    ic_by_date = {r["date"]: r["ic"] for r in result.get("ic_rows") or [] if r.get("ic") is not None}
+    ics = [ic_by_date.get(r["date"]) for r in rows]
+    styles_by_date = {s["date"]: s for s in result.get("style_rows") or []}
+    betas = (result.get("attribution") or {}).get("betas")
+    out = {"as_of": rows[-1]["date"], "start": rows[0]["date"], "days": len(rows), "horizons": []}
+    for key, n in HORIZONS:
+        if len(rows) < 2 * n:
+            continue
+        windows = [_compound(net[i - n:i]) for i in range(n, len(rows) + 1)]
+        ordered = sorted(windows)
+        ret = windows[-1]
+        horizon = {"key": key, "days": n, "start": rows[-n]["date"], "end": rows[-1]["date"],
+                   "return": ret, "benchmark": _compound(bench[-n:]), "excess": ret - _compound(bench[-n:]),
+                   "percentile": _percentile(windows, ret), "windows": len(windows),
+                   "low": ordered[0], "p10": _quantile(ordered, 0.1), "median": _quantile(ordered, 0.5), "p90": _quantile(ordered, 0.9), "high": ordered[-1]}
+        ic_windows = []
+        for i in range(n, len(rows) + 1):
+            values = [v for v in ics[i - n:i] if v is not None]
+            ic_windows.append(sum(values) / len(values) if len(values) >= (n + 1) // 2 else None)
+        if ic_windows[-1] is not None and sum(v is not None for v in ic_windows) >= 2:
+            population = [v for v in ic_windows if v is not None]
+            all_ic = [v for v in ics if v is not None]
+            horizon["ic"] = {"recent": ic_windows[-1], "percentile": _percentile(population, ic_windows[-1]), "mean": sum(all_ic) / len(all_ic)}
+        recent_styles = [styles_by_date.get(r["date"]) for r in rows[-n:]]
+        if betas and all(s and all(s.get(name) is not None for name in STYLES) for s in recent_styles):
+            market = betas["market"] * sum(bench[-n:])
+            styles = {name: betas[name] * sum(s[name] for s in recent_styles) for name in STYLES}
+            alpha = betas["alpha"] * n
+            actual = sum(net[-n:])
+            horizon["attribution"] = {"actual": actual, "alpha": alpha, "market": market, "styles": styles,
+                                      "residual": actual - alpha - market - sum(styles.values())}
+        horizon["reading"] = _reading(horizon)
+        out["horizons"].append(horizon)
+    return clean(out) if out["horizons"] else None
+
+
 def run(config):
     prepared = prepare(config)
     config = prepared["config"]  # possibly with the end day clamped; see prepare()
     factors, model = prepared["factors"], prepared["model"]
     score, model_report = combine(prepared, [f["name"] for f in factors], [f["weight"] for f in factors], model)
-    test_ic, test_rank_ic = information_coefficient(score, prepared["label"])
+    ic, rank_ic = daily_ic(score, prepared["label"])
+    test_ic, test_rank_ic = (float(ic.mean()) if ic is not None and len(ic) else None, float(rank_ic.mean()) if rank_ic is not None and len(rank_ic) else None)
     signal = latest_scores(score, config["topk"])
     report, positions, indicator = backtest_score(score, config)
     trades = trades_from_indicator(getattr(indicator, "order_indicator_his", {}))
@@ -550,9 +729,18 @@ def run(config):
         trades, holdings = unadjust_book(trades, holdings, load_factors(traded, config["start"], holdings["as_of"]))
     instruments = instrument_summary(trades, holdings)
     metrics, rows = summarize_report(report)
+    # Style spreads and exposures feed the recent-performance read-out; they are a side dish, so a failure
+    # here is noted rather than failing the backtest.
+    try:
+        style_rows = style_spreads(load_style_frame(config["market"], config["start"], config["end"]))
+        attribution = fit_exposures(rows, style_rows)
+    except Exception as error:  # noqa: BLE001
+        style_rows, attribution = [], None
+        prepared["notes"].append(f"风格归因未计算：{error}")
     return clean({"metrics": {**metrics, "signal_ic": test_ic, "signal_rank_ic": test_rank_ic},
                   "model": model_report,
                   "rows": rows, "config": config,
+                  "ic_rows": ic_rows(ic, rank_ic), "style_rows": style_rows, "attribution": attribution,
                   "trades": trades, "holdings": holdings, "instruments": instruments, "latest_signal": signal,
                   "diagnosis": signal_diagnosis(prepared, score) if len(factors) > 1 else None,
                   "notes": prepared["notes"],
