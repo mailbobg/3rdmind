@@ -114,6 +114,13 @@ class RDAgentTask:
         # child before any rdagent settings module is imported so pydantic-settings picks them up.
         # The Studio's saved LLM settings (studio_llm) sit beneath the run's own variables.
         self.env: dict[str, str] = {**studio_llm.env(), **(env or {})}
+        # The research window is configured once, as QLIB_FACTOR_* in .env; model and joint (quant) runs read
+        # QLIB_MODEL_* / QLIB_QUANT_* and would otherwise fall back to RD-Agent's 2008–2020 defaults.
+        for window in ("TRAIN_START", "TRAIN_END", "VALID_START", "VALID_END", "TEST_START", "TEST_END"):
+            value = self.env.get(f"QLIB_FACTOR_{window}") or os.environ.get(f"QLIB_FACTOR_{window}")
+            if value:
+                for kind in ("MODEL", "QUANT"):
+                    self.env.setdefault(f"QLIB_{kind}_{window}", value)
         if sys.platform == "darwin":
             # Qlib's PyTorch models spawn DataLoader workers (n_jobs 20 in the templates, sized for the Docker
             # image); forked workers segfault on macOS, so local runs train in-process unless told otherwise.
@@ -918,6 +925,18 @@ def resume_research():
     started, last_finished = recorded_loops(history)
     total = started + loops if last_finished else started - 1 + loops
     all_duration = data.get("all_duration")
+    # The continued run must see the universe the trace was started on, or Qlib falls back to CSI300 on
+    # the A-share data and the new rounds are evaluated on the wrong market.
+    from rdagent.log.server.studio import run_market
+
+    try:
+        run_env = universe_env(run_market(trace_id), build=False)
+    except UniverseNotReady as pending:
+        return jsonify({"error": str(pending), "job": pending.job["id"], "retry": True}), 409
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        return jsonify({"error": f"准备股票池数据失败：{error}"}), 500
     task = RDAgentTask(
         target_name="resume",
         kwargs={"scenario": scenario, "path": str(log_trace_path), "loop_n": total,
@@ -927,6 +946,7 @@ def resume_research():
         scenario=scenario,
         trace_name=trace_name,
         ui_server_port=app.config["UI_SERVER_PORT"],
+        env=run_env,
     )
     task.messages = history
     if previous is not None:

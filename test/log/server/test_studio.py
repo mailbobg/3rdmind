@@ -285,6 +285,8 @@ def test_resume_appends_to_the_same_trace(studio_client, tmp_path: Path, monkeyp
     assert task is started[0] and task.target_name == "resume"
     assert task.kwargs == {"scenario": "Finance Data Building", "path": str(trace_dir), "loop_n": 3, "all_duration": None}
     assert [m["tag"] for m in task.messages] == ["research.hypothesis", "feedback.hypothesis_feedback"]
+    # The continued run keeps the trace's universe (csi300 here: no studio-run.json), not Qlib's defaults.
+    assert task.env["QLIB_FACTOR_MARKET"] == task.env["QLIB_MODEL_MARKET"] == "csi300" and task.env["QLIB_QUANT_BENCHMARK"] == "SH000300"
     # Guards: unknown scenario, missing session, bad loop count.
     assert studio_client.post("/resume", json={"id": "General Model Implementation/x", "loops": 1}).status_code == 400
     assert studio_client.post("/resume", json={"id": "Finance Data Building/nosession", "loops": 1}).status_code == 404
@@ -1508,6 +1510,15 @@ def test_llm_settings_save_env_and_test(studio_client, tmp_path: Path, monkeypat
     assert task.env["QLIB_MODEL_N_JOBS"] == "4" and task.env["QLIB_FACTOR_N_JOBS"] == "0"
     monkeypatch.setattr(server.sys, "platform", "linux")
     assert "QLIB_FACTOR_N_JOBS" not in server.RDAgentTask("fin_factor", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False).env
+    # The research window configured for factor runs (QLIB_FACTOR_*) also drives model and joint runs, which
+    # read QLIB_MODEL_* / QLIB_QUANT_* and would otherwise evaluate on RD-Agent's 2008–2020 defaults.
+    monkeypatch.setenv("QLIB_FACTOR_TRAIN_START", "2023-01-01")
+    monkeypatch.setenv("QLIB_FACTOR_TEST_END", "2025-12-31")
+    monkeypatch.delenv("QLIB_FACTOR_VALID_START", raising=False)
+    task = server.RDAgentTask("fin_model", {}, str(tmp_path / "o.log"), str(tmp_path / "t"), "s", "n", create_process=False, env={"QLIB_QUANT_TEST_END": "2024-12-31"})
+    assert task.env["QLIB_MODEL_TRAIN_START"] == task.env["QLIB_QUANT_TRAIN_START"] == "2023-01-01"
+    assert task.env["QLIB_MODEL_TEST_END"] == "2025-12-31" and task.env["QLIB_QUANT_TEST_END"] == "2024-12-31"  # an explicit value wins
+    assert "QLIB_MODEL_VALID_START" not in task.env
     # Switching provider without a key keeps the other provider's key on file and reports no key for the new one.
     switched = studio_client.put("/studio/llm", json={"provider": "openai", "model": "gpt-5"}).get_json()["current"]
     assert switched["has_key"] is False and switched["saved_keys"] == {"anthropic": "…efgh"}
