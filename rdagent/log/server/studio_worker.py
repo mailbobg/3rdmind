@@ -266,6 +266,17 @@ def require_signal_coverage(score_index_dates, start, end):
         )
 
 
+def read_result(path):
+    """The frame in a result.h5, taking the first dataset when the file holds several (a factor.py that saved twice)."""
+    import pandas as pd
+
+    try:
+        return pd.read_hdf(path)
+    except ValueError:
+        with pd.HDFStore(path, mode="r") as store:
+            return store[store.keys()[0]]
+
+
 def load_factor_frame(factor, start, end):
     """Read one signal as a single-column frame named after it.
 
@@ -283,7 +294,7 @@ def load_factor_frame(factor, start, end):
         source = Path(factor["path"]) / "result.h5"
         if not source.is_file():
             raise ValueError(f"Factor {factor['name']} has no result.h5 at {factor['path']}")
-        frame = pd.read_hdf(source)
+        frame = read_result(source)
     if isinstance(frame, pd.Series):
         frame = frame.to_frame()
     if frame.empty or frame.shape[1] == 0:

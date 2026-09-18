@@ -16,7 +16,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.server import studio_jobs, studio_llm, studio_markets, studio_sync
-from rdagent.log.server.studio_worker import recent_context, validate_config, write_json
+from rdagent.log.server.studio_worker import read_result, recent_context, validate_config, write_json
 
 studio = Blueprint("studio", __name__, url_prefix="/studio")
 PROCESSES = {}
@@ -336,7 +336,7 @@ def factor_correlation(workspaces):
         path = Path(workspace) / "result.h5"
         if not path.is_file():
             raise ValueError(f"{name} 没有 result.h5（它的研究可能没跑完）")
-        frame = pd.read_hdf(path)
+        frame = read_result(path)
         if isinstance(frame, pd.Series):
             frame = frame.to_frame()
         frames.append(frame.iloc[:, 0].rename(name))
@@ -804,9 +804,7 @@ def prediction_coverage(path):
 
 def factor_coverage(workspace):
     """Coverage of a factor's result.h5 without running the full single-factor analysis."""
-    import pandas as pd
-
-    return frame_coverage(pd.read_hdf(workspace / "result.h5"))
+    return frame_coverage(read_result(workspace / "result.h5"))
 
 
 @studio.get("/predictions/coverage")

@@ -14,10 +14,21 @@ import sys
 from pathlib import Path
 
 
+def read_result(path):
+    """The factor frame in a result.h5, taking the first dataset when the file holds several."""
+    import pandas as pd
+
+    try:
+        return pd.read_hdf(path)
+    except ValueError:
+        with pd.HDFStore(path, mode="r") as store:
+            return store[store.keys()[0]]
+
+
 def factor_series(workspace):
     import pandas as pd
 
-    frame = pd.read_hdf(Path(workspace) / "result.h5")
+    frame = read_result(Path(workspace) / "result.h5")
     if isinstance(frame, pd.Series):
         frame = frame.to_frame()
     series = frame.iloc[:, 0]

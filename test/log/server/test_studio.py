@@ -107,6 +107,20 @@ def test_load_factor_frame_reads_first_column(tmp_path: Path) -> None:
 
 
 @pytest.mark.offline
+def test_read_result_takes_the_first_dataset_of_a_multi_key_file(tmp_path: Path) -> None:
+    from rdagent.log.server.studio_worker import read_result
+
+    index = pd.MultiIndex.from_tuples([(pd.Timestamp("2025-01-02"), "AAPL")], names=["datetime", "instrument"])
+    path = tmp_path / "result.h5"
+    pd.DataFrame({"F": [0.5]}, index=index).to_hdf(path, key="data")
+    pd.DataFrame({"F": [0.9]}, index=index).to_hdf(path, key="second")
+    with pytest.raises(ValueError):
+        pd.read_hdf(path)
+    assert float(read_result(path).iloc[0, 0]) == 0.5
+    assert load_factor_frame({"name": "F", "path": str(tmp_path)}, pd.Timestamp("2025-01-01"), "2025-12-31").iloc[0, 0] == 0.5
+
+
+@pytest.mark.offline
 def test_load_factor_frame_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="result.h5"):
         load_factor_frame({"name": "X", "path": str(tmp_path)}, pd.Timestamp("2025-01-01"), "2025-12-31")
