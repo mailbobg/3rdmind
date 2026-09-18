@@ -1,10 +1,12 @@
 """Local, persisted backtest jobs on top of RD-Agent research output. Registered under the server's auth gate."""
 import hashlib
+import math
 import json
 import re
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +37,8 @@ WORKSPACE_ROOT = Path(RD_AGENT_SETTINGS.workspace_path).resolve()
 # simply have not been computed yet); they only lose to a near-duplicate with a known stronger ICIR.
 PREFILTER_NOISE_RANK_IC = 0.005
 PREFILTER_NOISE_ICIR = 0.05
+# Rank IC t statistic below which a factor is noise; analyses without days/t fall back to the two bars above.
+PREFILTER_NOISE_T = 2.0
 PREFILTER_DUPLICATE_CORR = 0.7
 
 
@@ -357,6 +361,18 @@ def factor_correlation(workspaces):
     return {"names": names, "matrix": [[float(v) for v in row] for row in matrix.values], "days": int(len(days))}
 
 
+def rank_ic_t(analysis):
+    """The Rank IC t statistic of a cached analysis: stored by recent analyses, else ICIR × √days; None when unknown."""
+    if not analysis:
+        return None
+    stats = analysis.get("rank_ic") or {}
+    if stats.get("t") is not None:
+        return float(stats["t"])
+    if stats.get("ir") is not None and analysis.get("days"):
+        return float(stats["ir"]) * math.sqrt(int(analysis["days"]))
+    return None
+
+
 def apply_search_prefilter(resolved):
     """Cheap pre-search filter over resolved factors (no backtest, no LLM call).
 
@@ -374,7 +390,7 @@ def apply_search_prefilter(resolved):
         rank_ic = (analysis.get("rank_ic") or {}).get("mean") if analysis else None
         icir = (analysis.get("rank_ic") or {}).get("ir") if analysis else None
         scored.append({"factor": factor, "rank_ic": rank_ic, "icir": 0.0 if icir is None else abs(icir),
-                       "analyzed": analysis is not None})
+                       "t": rank_ic_t(analysis), "analyzed": analysis is not None})
     # Weak-signal test first, so the reason names the real problem even for a factor that
     # would also duplicate a stronger one.
     candidates, excluded = [], []
@@ -387,13 +403,18 @@ def apply_search_prefilter(resolved):
         if not entry["analyzed"]:
             candidates.append(entry)
             continue
-        if abs(entry["rank_ic"] or 0) < PREFILTER_NOISE_RANK_IC or entry["icir"] < PREFILTER_NOISE_ICIR:
-            excluded.append({**ref(entry["factor"]),
-                             "reason": f"信号太弱（Rank IC {entry['rank_ic']:.4f}，ICIR {entry['icir']:.3f}）：先在因子库看单因子分析，达标再参与搜索"})
+        if entry["t"] is not None:
+            weak = abs(entry["t"]) < PREFILTER_NOISE_T
+            why = f"Rank IC 的 t 值 {entry['t']:.2f}，与零区分不开"
+        else:
+            weak = abs(entry["rank_ic"] or 0) < PREFILTER_NOISE_RANK_IC or entry["icir"] < PREFILTER_NOISE_ICIR
+            why = f"Rank IC {entry['rank_ic']:.4f}，ICIR {entry['icir']:.3f}"
+        if weak:
+            excluded.append({**ref(entry["factor"]), "reason": f"信号太弱（{why}）：先在因子库看单因子分析，达标再参与搜索"})
             continue
         candidates.append(entry)
     # Strongest first, so a duplicate always loses to the better factor.
-    candidates.sort(key=lambda e: (-e["icir"], e["factor"]["name"]))
+    candidates.sort(key=lambda e: (-(abs(e["t"]) if e["t"] is not None else e["icir"]), e["factor"]["name"]))
     try:
         corr = factor_correlation([(e["factor"]["name"], Path(e["factor"]["path"])) for e in candidates])
     except Exception:  # noqa: BLE001 -- unreadable workspaces just skip the duplicate check
@@ -701,6 +722,54 @@ def factors():
     region = wanted_region()
     library = factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"])
     return jsonify([f for f in library if in_region(f.get("market"), region)])
+
+
+# Work that should not share the CPU with a stream of analysis subprocesses; the analysis job waits for it.
+ANALYSIS_YIELDS_TO = ("research", "backtest", "search", "diagnose", "strategy_update", "refresh", "universe", "build")
+
+
+def pending_analyses(region):
+    """Library factors of ``region`` without a current single-factor analysis (never analysed, stale, or older format)."""
+    library = factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"])
+    return [f for f in library if in_region(f.get("market"), region) and f.get("analysis") is None]
+
+
+def run_pending_analyses(job, items, sleep=time.sleep):
+    """Analyse ``items`` in turn, pausing while research or backtests run; returns what was done and what failed."""
+    done, failures = [], []
+    for i, f in enumerate(items):
+        while any(j["kind"] in ANALYSIS_YIELDS_TO for j in studio_jobs.list_jobs(active_only=True)):
+            studio_jobs.update(job["id"], done=i, message="等其他任务跑完再继续")
+            sleep(15)
+        studio_jobs.update(job["id"], done=i, message=f["name"])
+        try:
+            analyze_factor(factor_workspace(f["trace"], f["loop_id"], f["name"]), f["market"])
+            done.append(f["name"])
+        except Exception as error:  # noqa: BLE001 - one unreadable factor must not stop the rest
+            failures.append({"name": f["name"], "error": str(error)[:200]})
+    studio_jobs.update(job["id"], done=len(items))
+    return {"analyzed": done, "failures": failures}
+
+
+@studio.post("/factors/analyze-pending")
+def analyze_pending():
+    """Start the background analysis of every factor in this workspace that lacks a current analysis.
+
+    Idempotent: a job already running for the region is returned instead of a second one. The factor page
+    calls this on arrival, so the library fills in by itself; the pre-search screen calls it when it finds
+    unanalysed candidates.
+    """
+    region = wanted_region() or "cn"
+    running = studio_jobs.find("factor_analysis", region=region)
+    if running is not None:
+        return jsonify({"job": running["id"], "pending": (running.get("progress") or {}).get("total")}), 200
+    items = pending_analyses(region)
+    if not items:
+        return jsonify({"job": None, "pending": 0}), 200
+    market = items[0]["market"]
+    job = studio_jobs.run("factor_analysis", f"分析 {len(items)} 个因子的指标", in_app(lambda job: run_pending_analyses(job, items)),
+                          market=market, link={"page": "factors", "region": region}, total=len(items))
+    return jsonify({"job": job["id"], "pending": len(items)}), 202
 
 
 @studio.get("/factors/analysis")

@@ -1,14 +1,22 @@
-import type { CorrelationMatrix, FactorWeight, LibraryFactor } from "../api/studio";
+import type { CorrelationMatrix, FactorAnalysis, FactorWeight, LibraryFactor } from "../api/studio";
 
 export const NOISE_RANK_IC = 0.005;
 export const NOISE_ICIR = 0.05;
+/** A Rank IC whose t statistic is below this is treated as noise (the same bar the factor page shows). */
+export const NOISE_T = 2.0;
 export const DUPLICATE_CORR = 0.7;
 
-export interface Ranked { factor: LibraryFactor; icir: number; rankIc: number }
+export interface Ranked { factor: LibraryFactor; icir: number; rankIc: number; t: number }
+
+/** Rank IC t statistic of an analysis: stored when the analysis is recent, else ICIR × √days. */
+export function rankIcT(a: FactorAnalysis): number {
+  return a.rank_ic.t ?? (a.rank_ic.ir ?? 0) * Math.sqrt(a.days || 0);
+}
 
 /**
- * Step 1 of 自动挑候选: drop factors without an analysis or with no measurable signal, keep one per name
- * (the stronger one when two experiments produced the same factor name), and order by |ICIR|.
+ * Step 1 of 自动挑候选: drop factors without an analysis or whose Rank IC is indistinguishable from zero
+ * (|t| < NOISE_T), keep one per name (the stronger one when two experiments produced the same factor name),
+ * and order by |t|.
  */
 export function rankCandidates(all: LibraryFactor[]): { ranked: Ranked[]; noise: LibraryFactor[]; unanalyzed: LibraryFactor[] } {
   const unanalyzed: LibraryFactor[] = [];
@@ -19,11 +27,12 @@ export function rankCandidates(all: LibraryFactor[]): { ranked: Ranked[]; noise:
     if (!a) { unanalyzed.push(f); continue; }
     const icir = a.rank_ic.ir ?? 0;
     const rankIc = a.rank_ic.mean;
-    if (Math.abs(rankIc) < NOISE_RANK_IC || Math.abs(icir) < NOISE_ICIR) { noise.push(f); continue; }
+    const t = rankIcT(a);
+    if (Math.abs(t) < NOISE_T) { noise.push(f); continue; }
     const current = byName.get(f.name);
-    if (!current || Math.abs(icir) > Math.abs(current.icir)) byName.set(f.name, { factor: f, icir, rankIc });
+    if (!current || Math.abs(t) > Math.abs(current.t)) byName.set(f.name, { factor: f, icir, rankIc, t });
   }
-  const ranked = [...byName.values()].sort((x, y) => Math.abs(y.icir) - Math.abs(x.icir));
+  const ranked = [...byName.values()].sort((x, y) => Math.abs(y.t) - Math.abs(x.t));
   return { ranked, noise, unanalyzed };
 }
 

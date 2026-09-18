@@ -194,6 +194,8 @@ export const stdoutUrl = (id: string) => `/stdout?${new URLSearchParams({ id })}
 export const environment = () => api<Environment>(scoped("/studio/environment"));
 export const strategySource = () => api<{ name: string; code: string }>("/studio/strategy");
 export const factorLibrary = () => api<LibraryFactor[]>(scoped("/studio/factors"));
+/** Start (or return the running) background job that analyses every library factor without a current analysis. */
+export const analyzePending = () => api<{ job: string | null; pending: number }>(scoped("/studio/factors/analyze-pending"), {});
 /** Single-factor analysis inside a universe; without `market` the server uses the factor's own research universe. */
 export const factorAnalysis = (ref: FactorRef, market?: string) =>
   api<FactorAnalysis>(`/studio/factors/analysis?${new URLSearchParams({ trace: ref.trace, loop_id: String(ref.loop_id), name: ref.name, ...(market ? { market } : {}) })}`);

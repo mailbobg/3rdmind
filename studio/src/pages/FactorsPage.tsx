@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
 import * as studio from "../api/studio";
-import type { CorrelationMatrix as Corr, FactorRef, LibraryFactor } from "../api/studio";
+import type { CorrelationMatrix as Corr, FactorRef, LibraryFactor, Job } from "../api/studio";
 import { basketKey as key } from "../hooks/useFactorBasket";
 import { download, errorText, shortName, useStudio } from "../hooks/studioContext";
 import { PageFrame } from "../components/PageFrame";
@@ -29,7 +29,6 @@ export function FactorsPage() {
   const [view, setView] = useState<"factor" | "basket">("factor");
   const [busyKey, setBusyKey] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
-  const [analyzed, setAnalyzed] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -70,11 +69,40 @@ export function FactorsPage() {
   }, [analyze]);
   const refreshMany = useCallback(async (items: LibraryFactor[]) => { for (const f of items) { if (!(await refresh(f, false))) break; } }, [refresh]);
   const coverageOf = (f: LibraryFactor) => f.coverage || f.analysis?.coverage || null;
+  // Factors without a current analysis are analysed by a server job (one Qlib subprocess at a time, yielding to
+  // research and backtests). It starts by itself when the page finds pending factors; the library reloads as
+  // the job advances, so the numbers fill in without clicking anything.
+  const [analysisJob, setAnalysisJob] = useState<Job | null>(null);
+  const kicked = useRef(false);
   const analyzeAll = useCallback(async () => {
-    // Sequential on purpose: each analysis is a Qlib subprocess; parallel runs would fight for CPU and memory.
-    setAnalyzing(true); setAnalyzed(0);
-    try { for (const f of pending) { await analyze(f); setAnalyzed((n) => n + 1); } } finally { setAnalyzing(false); }
-  }, [pending, analyze]);
+    setAnalyzing(true);
+    try {
+      const r = await studio.analyzePending();
+      if (r.job) setAnalysisJob(await studio.job(r.job));
+    } catch (e) { setError(errorText(e)); } finally { setAnalyzing(false); }
+  }, []);
+  useEffect(() => {
+    if (loading || kicked.current || !pending.length) return;
+    kicked.current = true;
+    analyzeAll();
+  }, [loading, pending.length, analyzeAll]);
+  useEffect(() => {
+    if (!analysisJob || analysisJob.status === "completed" || analysisJob.status === "failed") return;
+    let stop = false;
+    let lastDone = analysisJob.progress?.done ?? 0;
+    const tick = async () => {
+      try {
+        const j = await studio.job(analysisJob.id);
+        if (stop) return;
+        setAnalysisJob(j);
+        const done = j.progress?.done ?? 0;
+        if (done !== lastDone || j.status === "completed" || j.status === "failed") { lastDone = done; await load(); }
+      } catch { /* backend away */ }
+    };
+    const timer = setInterval(tick, 4000);
+    return () => { stop = true; clearInterval(timer); };
+  }, [analysisJob?.id, analysisJob?.status, load]); // eslint-disable-line react-hooks/exhaustive-deps
+  const analysisRunning = !!analysisJob && (analysisJob.status === "queued" || analysisJob.status === "running");
   const select = (f: LibraryFactor) => { setSelectedKey(key(f)); setView("factor"); layout.openResults(); if (!f.analysis && busyKey !== key(f)) analyze(f); };
   const check = (f: LibraryFactor) => { basket.toggle(f); setView("basket"); layout.openResults(); };
   const showBasket = () => { setView("basket"); layout.openResults(); };
@@ -111,7 +139,8 @@ export function FactorsPage() {
       actions={
         <>
           <TextInput type="search" ariaLabel={t("搜索因子")} placeholder={t("搜索因子或实验")} value={query} onChange={setQuery} className="w-44" />
-          <Btn disabled={analyzing || !pending.length} onClick={analyzeAll}>{analyzing ? t("分析中 {0}/{1}…", [analyzed, pending.length]) : t("分析全部（{0}）", [pending.length])}</Btn>
+          {analysisRunning ? <span className="text-[11px] text-muted tabular-nums">{t("后台分析中 {0}/{1}", [analysisJob!.progress?.done ?? 0, analysisJob!.progress?.total ?? pending.length])}{analysisJob!.message && analysisJob!.message !== String(analysisJob!.progress?.done) ? ` · ${analysisJob!.message}` : ""}</span>
+            : pending.length ? <Btn disabled={analyzing} onClick={analyzeAll}>{t("分析全部（{0}）", [pending.length])}</Btn> : null}
           <Btn onClick={load}>{t("刷新")}</Btn>
         </>
       }

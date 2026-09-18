@@ -87,8 +87,12 @@ export function BacktestPage() {
         // 篮子不够两个：从整个因子库按同样标准推荐一批，同样先预览再确认。
         const all = Object.values(library);
         const { ranked, noise, unanalyzed } = rankCandidates(all);
-        if (ranked.length < 2) { setPageError(t("因子库里只有 {0} 个因子有可用信号（{1} 个是噪声，{2} 个还没算指标），不够搜索。先在因子库点\"分析全部\"。", [ranked.length, noise.length, unanalyzed.length])); return; }
-        const shortlist = ranked.slice(0, 12);
+        // Factors still without an analysis are queued for the background job; the screen only ranks what is analysed.
+        if (unanalyzed.length) studio.analyzePending().catch(() => {});
+        if (ranked.length < 2) { setPageError(t("因子库里只有 {0} 个因子有可用信号（{1} 个是噪声，{2} 个还没算指标，已在后台分析，稍后再点），不够搜索。", [ranked.length, noise.length, unanalyzed.length])); return; }
+        // Walk the whole ranking (not a short top slice): the strongest factors tend to be copies of one idea,
+        // and a short list would leave nothing else standing after the duplicate check.
+        const shortlist = ranked.slice(0, 30);
         const corr = await studio.factorCorrelation(shortlist.map((r) => ({ trace: r.factor.trace, loop_id: r.factor.loop_id, name: r.factor.name })));
         const { picked, duplicates } = pickByCorrelation(shortlist, corr, 8);
         const pickedNames = new Set(picked.map((p) => p.name));
@@ -109,7 +113,7 @@ export function BacktestPage() {
           if (rows.some((r) => r.name === f.name)) continue;
           const lib = byName.get(f.name);
           if (!lib) continue;
-          rows.push({ name: f.name, trace: lib.trace, loop_id: lib.loop_id, kind: "factor", weight: 1, reason: noiseNames.has(f.name) ? t("单因子指标太弱，先在因子库看分析") : t("还没算单因子指标"), checked: false, flipped: false });
+          rows.push({ name: f.name, trace: lib.trace, loop_id: lib.loop_id, kind: "factor", weight: 1, reason: noiseNames.has(f.name) ? t("Rank IC 的 t 值不到 2，与零区分不开") : t("还没算单因子指标（后台分析中）"), checked: false, flipped: false });
         }
         setPreview(rows);
       }

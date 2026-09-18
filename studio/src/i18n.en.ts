@@ -951,4 +951,9 @@ export const EN: Record<string, string> = {
   "这份分析是旧版算的，还没有多期限和残差 IC。": "This analysis predates horizons and residual IC.",
   "重新计算": "Recompute",
   "期限": "Horizon",
+  "因子分析": "Factor analysis",
+  "后台分析中 {0}/{1}": "Analysing in the background {0}/{1}",
+  "因子库里只有 {0} 个因子有可用信号（{1} 个是噪声，{2} 个还没算指标，已在后台分析，稍后再点），不够搜索。": "Only {0} library factors carry a usable signal ({1} are noise, {2} are not analysed yet and are being analysed in the background; try again shortly): not enough to search.",
+  "Rank IC 的 t 值不到 2，与零区分不开": "Rank IC t below 2: indistinguishable from zero",
+  "还没算单因子指标（后台分析中）": "Not analysed yet (running in the background)",
 };

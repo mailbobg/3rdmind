@@ -509,6 +509,67 @@ def test_search_preview_reports_kept_and_excluded_without_starting(
 
 
 @pytest.mark.offline
+def test_prefilter_judges_weakness_by_t_when_the_analysis_has_one(tmp_path: Path) -> None:
+    from rdagent.log.server.studio import rank_ic_t
+
+    assert rank_ic_t(None) is None and rank_ic_t({"rank_ic": {"mean": 0.02, "ir": 0.1}}) is None
+    assert rank_ic_t({"rank_ic": {"mean": 0.02, "ir": 0.1, "t": 1.7}}) == 1.7
+    assert rank_ic_t({"days": 400, "rank_ic": {"mean": 0.02, "ir": 0.1}}) == pytest.approx(0.1 * 20)
+
+
+@pytest.mark.offline
+def test_analyze_pending_runs_one_job_over_the_unanalysed_library(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    analysed = []
+    monkeypatch.setattr(studio_module, "analyze_factor", lambda workspace, market: analysed.append((workspace.name, market)) or {"status": "completed"})
+    monkeypatch.setattr(studio_module.time, "sleep", lambda s: None)
+    library = studio_client.get("/studio/factors").get_json()
+    pending = [f["name"] for f in library if f["analysis"] is None]
+    assert pending, library
+    started = studio_client.post("/studio/factors/analyze-pending")
+    assert started.status_code == 202, started.get_json()
+    payload = started.get_json()
+    assert payload["pending"] == len(pending)
+    # A second call while it runs (or right after) returns the same job rather than starting another.
+    again = studio_client.post("/studio/factors/analyze-pending").get_json()
+    assert again["job"] in (payload["job"], None)
+    job = wait_job(studio_client, payload["job"])
+    assert job["status"] == "completed", job
+    assert job["kind"] == "factor_analysis" and job["progress"] == {"done": len(pending), "total": len(pending)}
+    assert sorted(job["result"]["analyzed"]) == sorted(pending) and job["result"]["failures"] == []
+    assert {m for _, m in analysed} == {"csi300"}
+
+
+@pytest.mark.offline
+def test_run_pending_analyses_waits_for_heavier_work_and_keeps_going_past_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_jobs
+
+    studio_jobs.reset()
+    blocker = studio_jobs.create("backtest", "回测", status="running")
+    waits = []
+
+    def sleep(seconds):
+        waits.append(seconds)
+        studio_jobs.finish(blocker["id"])  # the backtest ends while we wait
+
+    calls = []
+
+    def fake_analyze(workspace, market):
+        calls.append(workspace.name)
+        if workspace.name == "bad":
+            raise RuntimeError("no result.h5")
+        return {"status": "completed"}
+
+    monkeypatch.setattr(studio_module, "analyze_factor", fake_analyze)
+    monkeypatch.setattr(studio_module, "factor_workspace", lambda trace, loop_id, name: Path("/ws") / name)
+    job = studio_jobs.create("factor_analysis", "分析", total=2, status="running")
+    items = [{"trace": "T/a", "loop_id": 0, "name": "good", "market": "csi300"}, {"trace": "T/a", "loop_id": 0, "name": "bad", "market": "csi300"}]
+    result = studio_module.run_pending_analyses(job, items, sleep=sleep)
+    assert waits == [15] and calls == ["good", "bad"]
+    assert result == {"analyzed": ["good"], "failures": [{"name": "bad", "error": "no result.h5"}]}
+    assert studio_jobs.get(job["id"])["progress"] == {"done": 2, "total": 2}
+
+
+@pytest.mark.offline
 def test_validate_config_keeps_the_search_prefilter_block() -> None:
     prefilter = {"enabled": True, "excluded": [{"name": "F_WEAK", "reason": "too weak"}], "flipped": []}
     out = validate_config(_config(search={"prefilter": prefilter}))
