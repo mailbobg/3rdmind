@@ -2609,3 +2609,24 @@ def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeyp
     fetch_cmd = calls[0]
     assert fetch_cmd[2] == "fetch" and fetch_cmd[3] == str(cache) and Path(fetch_cmd[4]).read_text().splitlines()  # member codes were written
     assert studio_client.post("/studio/data/extra", json={"markets": ["nasdaq100"]}).status_code == 400
+
+
+@pytest.mark.offline
+def test_analysis_cache_survives_a_rewrite_with_the_same_content(tmp_path: Path) -> None:
+    days = pd.bdate_range("2025-01-01", periods=4)
+    index = pd.MultiIndex.from_product([days, ["A", "B"]], names=["datetime", "instrument"])
+    frame = pd.Series(range(len(index)), index=index, dtype=float).to_frame("x")
+    ws = tmp_path / "ws"; ws.mkdir()
+    frame.to_hdf(ws / "result.h5", key="data")
+    stamp = studio_module.source_stamp(ws / "result.h5")
+    (ws / "studio_analysis.csi300.json").write_text(json.dumps({"status": "completed", "version": studio_module.ANALYSIS_VERSION, **stamp, "rank_ic": {"mean": 0.02}}))
+    assert studio_module.cached_analysis(ws, "csi300")["rank_ic"]["mean"] == 0.02
+    # RD-Agent re-runs the code next round: same bytes, new mtime → still valid.
+    import os, time
+    os.utime(ws / "result.h5", (time.time() + 100, time.time() + 100))
+    assert studio_module.cached_analysis(ws, "csi300") is not None
+    # Different content → invalid; a record from before hashing falls back to the mtime rule.
+    (frame * 2).to_hdf(ws / "result.h5", key="data")
+    assert studio_module.cached_analysis(ws, "csi300") is None
+    (ws / "studio_analysis.csi300.json").write_text(json.dumps({"status": "completed", "version": studio_module.ANALYSIS_VERSION, "source_mtime": (ws / "result.h5").stat().st_mtime, "rank_ic": {"mean": 0.03}}))
+    assert studio_module.cached_analysis(ws, "csi300")["rank_ic"]["mean"] == 0.03

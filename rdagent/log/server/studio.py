@@ -204,8 +204,29 @@ def analysis_cache_path(workspace, market):
 ANALYSIS_VERSION = 2
 
 
+def source_stamp(source: Path) -> dict:
+    """What identifies the signal an analysis was computed from: the file's size and a hash of its bytes.
+    RD-Agent re-executes accepted factor code in later rounds and rewrites result.h5 with the same content,
+    so the modification time alone would throw the analysis away every round."""
+    stat = source.stat()
+    digest = hashlib.sha1()
+    with source.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return {"source_mtime": stat.st_mtime, "source_size": stat.st_size, "source_hash": digest.hexdigest()}
+
+
+def same_source(data: dict, source: Path) -> bool:
+    """Whether a stored analysis was computed from the current result.h5 (by hash; older records by mtime)."""
+    if data.get("source_hash"):
+        if data.get("source_size") != source.stat().st_size:
+            return False
+        return data["source_hash"] == source_stamp(source)["source_hash"]
+    return data.get("source_mtime") == source.stat().st_mtime
+
+
 def cached_analysis(workspace, market):
-    """The stored single-factor analysis, or None when absent, older than result.h5, or from an older analysis."""
+    """The stored single-factor analysis, or None when absent, computed from another result.h5, or from an older analysis."""
     path = analysis_cache_path(workspace, market)
     source = Path(workspace) / "result.h5"
     if not path.is_file() or not source.is_file():
@@ -214,7 +235,7 @@ def cached_analysis(workspace, market):
         data = json.loads(path.read_text())
     except ValueError:
         return None
-    if data.get("source_mtime") != source.stat().st_mtime or data.get("status") != "completed" or data.get("version") != ANALYSIS_VERSION:
+    if data.get("status") != "completed" or data.get("version") != ANALYSIS_VERSION or not same_source(data, source):
         return None
     return data
 
@@ -231,7 +252,7 @@ def failed_analysis(workspace, market):
         data = json.loads(path.read_text())
     except ValueError:
         return None
-    if data.get("status") == "failed" and data.get("source_mtime") == source.stat().st_mtime and permanent_failure(data.get("error")):
+    if data.get("status") == "failed" and same_source(data, source) and permanent_failure(data.get("error")):
         return str(data.get("error"))
     return None
 
@@ -441,7 +462,7 @@ def analyze_factor(workspace, market):
     if not output.is_file():
         raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "analysis produced no output")
     data = json.loads(output.read_text())
-    data["source_mtime"] = (Path(workspace) / "result.h5").stat().st_mtime
+    data.update(source_stamp(Path(workspace) / "result.h5"))
     data["version"] = ANALYSIS_VERSION
     output.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False))
     if data.get("status") != "completed":
