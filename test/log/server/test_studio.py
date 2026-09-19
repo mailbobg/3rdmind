@@ -619,8 +619,11 @@ def test_analyze_pending_runs_one_job_over_the_unanalysed_library(studio_client,
     assert payload["pending"] == len(pending)
     # A second call while it runs (or right after) returns the same job rather than starting another.
     again = studio_client.post("/studio/factors/analyze-pending").get_json()
-    assert again["job"] in (payload["job"], None)
     job = wait_job(studio_client, payload["job"])
+    # Either the same job came back, or the first one had already finished (the fake analysis is instant).
+    assert again["job"] in (payload["job"], None) or job["status"] == "completed"
+    if again["job"] not in (payload["job"], None):
+        wait_job(studio_client, again["job"])
     assert job["status"] == "completed", job
     assert job["kind"] == "factor_analysis" and job["progress"] == {"done": len(pending), "total": len(pending)}
     assert sorted(job["result"]["analyzed"]) == sorted(pending) and job["result"]["failures"] == []

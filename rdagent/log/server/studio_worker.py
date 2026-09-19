@@ -59,8 +59,10 @@ def validate_config(config):
         if isinstance(search.get("prefilter"), dict):
             result["search"]["prefilter"] = search["prefilter"]
     factors = result.get("factors", [])
-    if not isinstance(factors, list) or not 1 <= len(factors) <= 20:
-        raise ValueError("Select 1 to 20 factors")
+    # A trained model (零件组合) takes many signals; the greedy search is quadratic in them and stays small.
+    limit = MAX_SEARCH_FACTORS if "search" in result else MAX_FACTORS
+    if not isinstance(factors, list) or not 1 <= len(factors) <= limit:
+        raise ValueError(f"Select 1 to {limit} factors")
     names = [f.get("name") for f in factors if isinstance(f, dict)]
     duplicates = sorted({n for n in names if names.count(n) > 1})
     if duplicates:
@@ -79,6 +81,8 @@ def validate_config(config):
     return result
 
 
+MAX_FACTORS = 80  # signals one backtest may combine
+MAX_SEARCH_FACTORS = 20  # candidates one greedy search may walk
 LGBM_DEFAULTS = {"learning_rate": 0.05, "num_leaves": 63, "max_depth": 8, "colsample_bytree": 0.8,
                  "subsample": 0.8, "subsample_freq": 1, "lambda_l1": 0.0, "lambda_l2": 1.0,
                  "n_estimators": 1000, "early_stopping_rounds": 50}

@@ -91,6 +91,22 @@ export function BacktestPage() {
       setPreview(rows);
     } catch (e) { setPageError(t("预筛预览失败：{0}", [errorText(e)])); } finally { setPreviewing(false); }
   };
+  // 零件组合: every library factor above the weak bar on this universe (near-copies only dropped) goes into the
+  // basket as model input, the signal synthesis switches to LightGBM, and the windows are fitted once the
+  // coverage is known. The user then runs it like any backtest; a rank blend of the same basket is the baseline.
+  const [partsBusy, setPartsBusy] = useState(false);
+  const [partsNote, setPartsNote] = useState("");
+  const loadParts = async () => {
+    setPartsBusy(true); setPartsNote(""); setPageError("");
+    try {
+      const data = await studio.previewSearch([], params.market, "parts");
+      if (data.kept.length < 2) { setPageError(t("因子库里在 {0} 上过线的因子不够两个（{1} 个被淘汰），凑不出零件组合。", [universeLabel(params.market), data.excluded.length])); return; }
+      basket.replace(data.kept.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: f.weight })));
+      setMethod("lgbm");
+      setPartsNote(t("已放入 {0} 个零件（过弱信号线、相关 < 0.9），信号合成切到 LightGBM。到「参数设置」按覆盖调好窗口后运行回测；再用同一篮子跑一次排名加权作为对照。", [data.kept.length]));
+      setTab("params");
+    } catch (e) { setPageError(errorText(e)); } finally { setPartsBusy(false); }
+  };
   const confirmSearch = async () => {
     const chosen = (preview || []).filter((r) => r.checked);
     if (chosen.length < 2) { setPageError(t("至少勾选两个因子再开始搜索。")); return; }
@@ -501,6 +517,13 @@ export function BacktestPage() {
               <Field label={t("信号合成")}><span className="text-xs" style={{ lineHeight: "28px" }}>{t("排名加权（按篮内权重）")}</span></Field>
             </FieldGrid>
             <P>{t("点预筛候选，先看不花钱的预筛（单因子指标和两两相关），勾选确认后再跑回测：每个候选单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。")}</P>
+          </Block>
+          <Block title={t("零件组合")} note={t("多个弱信号交给模型")}>
+            <P>{t("另一条路：不挑两三个强因子，而是把库里所有过弱信号线的因子（相关 < 0.9 去重）一起交给 LightGBM，让模型定权重，在回测期之前的窗口上训练。用来检验“很多弱零件叠起来”是否比“两个强因子”更好；同一篮子再跑一次排名加权作对照。")}</P>
+            <div className="mm-row">
+              <Btn disabled={partsBusy || !env?.data_ready} onClick={loadParts}>{partsBusy ? t("挑选中…") : t("装入零件并切到 LightGBM")}</Btn>
+              {partsNote && <span className="text-[11px] text-muted">{partsNote}</span>}
+            </div>
           </Block>
           <Block title={t("候选信号")} count={candidates.length} note={<><Link href={workspace.href("/factors?return=search")}>{t("去因子库增减")}</Link>{candidates.length < 2 ? " · " + t("篮子不够两个会从全库推荐") : ""}</>}>
             <P>{t("先看预筛，勾选确认后再跑回测；确认结果会同步到信号篮。")}</P>

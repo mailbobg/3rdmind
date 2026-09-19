@@ -253,8 +253,8 @@ export interface PrefilterPreview {
   analyzing?: number;
   thresholds: { t_weak?: Record<string, number>; t_signal?: Record<string, number>; ic_signal?: number; noise_rank_ic: number; noise_icir: number; duplicate_corr: number };
 }
-export const previewSearch = (factors: FactorRef[], market?: string) =>
-  api<PrefilterPreview>("/studio/searches/preview", { factors, ...(market ? { market } : {}) });
+export const previewSearch = (factors: FactorRef[], market?: string, mode?: "parts") =>
+  api<PrefilterPreview>("/studio/searches/preview", { factors, ...(market ? { market } : {}), ...(mode ? { mode } : {}) });
 export const search = async (id: string): Promise<SearchResult> => {
   // The worker's "recommended" is the portfolio; the list's "recommended" is just its member names.
   const raw = await api<Record<string, unknown>>(`/studio/searches/${id}`);

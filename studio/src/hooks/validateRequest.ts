@@ -2,7 +2,8 @@ import type { BacktestRequest } from "../api/studio";
 import { t } from "../i18n";
 
 export function validateRequest(c: BacktestRequest): string | null {
-  if (!c.factors.length || c.factors.length > 20) return t("请选择 1–20 个因子。");
+  if (!c.factors.length || c.factors.length > 80) return t("请选择 1–80 个因子。");
+  if ("search" in c && c.factors.length > 20) return t("组合搜索最多 20 个候选；更多信号请用 LightGBM 零件组合。");
   if (!c.factors.every((f) => f.trace && Number.isInteger(f.loop_id))) return t("每个因子都要来自某个实验轮次。");
   if (!c.factors.every((f) => Number.isFinite(f.weight))) return t("因子权重必须是数字。");
   if (c.factors.reduce((s, f) => s + Math.abs(f.weight), 0) === 0) return t("至少一个因子的权重不为 0。");

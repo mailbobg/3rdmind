@@ -16,6 +16,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
 from rdagent.log.server import studio_jobs, studio_llm, studio_markets, studio_sync
+from rdagent.log.server import studio_worker
 from rdagent.log.server.studio_worker import read_result, recent_context, validate_config, write_json
 
 studio = Blueprint("studio", __name__, url_prefix="/studio")
@@ -40,6 +41,10 @@ PREFILTER_NOISE_RANK_IC = 0.005
 PREFILTER_NOISE_ICIR = 0.05
 # Rank IC t statistic below which a factor is noise; analyses without days/t fall back to the two bars above.
 PREFILTER_DUPLICATE_CORR = 0.7
+# 零件 mode: signals feeding a trained model may overlap far more than members of a rank blend, since the model
+# weighs them; only near-copies are dropped, and every factor above the weak bar is admitted.
+PARTS_DUPLICATE_CORR = 0.9
+PARTS_LIMIT = 80
 
 
 def job_folder(job_id):
@@ -539,7 +544,7 @@ def unanalysed_copies(resolved, market):
     return out
 
 
-def apply_search_prefilter(resolved, market=None):
+def apply_search_prefilter(resolved, market=None, duplicate_corr=PREFILTER_DUPLICATE_CORR):
     """Cheap pre-search filter over resolved factors (no backtest, no LLM call), judged the way the gate judges.
 
     ``resolved`` are the factor dicts from resolve_factor_paths (each carries name, weight, path, trace,
@@ -626,7 +631,7 @@ def apply_search_prefilter(resolved, market=None):
             i = index.get(entry["factor"]["name"])
             for done in kept:
                 j = index.get(done["name"])
-                if i is not None and j is not None and abs(corr["matrix"][i][j]) >= PREFILTER_DUPLICATE_CORR:
+                if i is not None and j is not None and abs(corr["matrix"][i][j]) >= duplicate_corr:
                     clash = (done["name"], corr["matrix"][i][j])
                     break
         if clash is not None:
@@ -1106,8 +1111,8 @@ def factors_correlation():
     body = request.get_json() or {}
     try:
         refs = body.get("factors") or []
-        if not isinstance(refs, list) or not 2 <= len(refs) <= 20:
-            raise ValueError("Select 2 to 20 factors")
+        if not isinstance(refs, list) or not 2 <= len(refs) <= studio_worker.MAX_FACTORS:
+            raise ValueError(f"Select 2 to {studio_worker.MAX_FACTORS} factors")
         workspaces = []
         for ref in refs:
             if not isinstance(ref, dict):
@@ -1329,6 +1334,7 @@ def search_preview():
             raise ValueError("Unsupported instrument universe")
         factors = body.get("factors") or []
         limit = None
+        parts = body.get("mode") == "parts"  # 零件: everything above the weak bar, near-copies only dropped
         if not factors:
             # No basket: screen the whole library of the market's region and keep the strongest few, the
             # rest listed unticked so the user can still add them.
@@ -1345,7 +1351,7 @@ def search_preview():
             factors = [{"name": f["name"], "trace": f["trace"], "loop_id": f["loop_id"], "weight": 1} for _, f in by_name.values()]
             if len(factors) < 2:
                 raise ValueError("因子库里不够两个因子，没有可搜索的候选")
-            limit = max(1, min(int(body.get("limit") or LIBRARY_PICK_LIMIT), 50))
+            limit = PARTS_LIMIT if parts else max(1, min(int(body.get("limit") or LIBRARY_PICK_LIMIT), 50))
         unresolved = []
         if limit:
             # A library entry whose workspace is gone (cleaned up, another machine) must not sink the whole
@@ -1359,7 +1365,7 @@ def search_preview():
                                        "reason": f"读不到信号：{error}"})
         else:
             resolved = resolve_factor_paths(str(body.get("trace") or "") or None, body.get("loop_id"), factors, market=market)
-        kept, excluded, flipped = apply_search_prefilter(resolved, market)
+        kept, excluded, flipped = apply_search_prefilter(resolved, market, PARTS_DUPLICATE_CORR if parts else PREFILTER_DUPLICATE_CORR)
         excluded.extend(unresolved)
         if limit and len(kept) > limit:
             # apply_search_prefilter returns the kept list strongest first.
