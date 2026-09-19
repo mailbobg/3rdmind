@@ -480,9 +480,10 @@ def prepare(config):
     features = pd.concat(frames, axis=1).sort_index()
     if features.empty:
         raise ValueError("No factor observations for this date range")
-    universe = set(D.list_instruments(D.instruments(config["market"]),
-                                      start_time=feature_start, end_time=config["end"], as_list=True))
-    features = features[features.index.get_level_values("instrument").isin(universe)]
+    # Point-in-time membership: a name only carries a signal on the days it belonged to the universe, so
+    # the book never holds a name because it was a member a year earlier (or later).
+    spans = D.list_instruments(D.instruments(config["market"]), start_time=feature_start, end_time=config["end"], as_list=False)
+    features = members_only(features, spans, calendar)
     if features.empty:
         raise ValueError("No factor observations inside the selected universe")
     # Cross-sectional percentile ranks per signal. Rows are not dropped here: a variant only needs its own
@@ -512,6 +513,25 @@ def prepare(config):
                 notes.append("行业中性未做：没有行业表（instrument_names.json），只做了规模中性")
     return {"calendar": calendar, "prior_day": prior[-1], "end_day": trading_day_on_or_before(calendar, config["end"]), "config": config, "notes": notes,
             "factors": factors, "model": model, "ranks": ranks, "label": label, "size": size, "industry": industry}
+
+
+def members_only(frame, spans, calendar):
+    """Keep the rows of a (datetime, instrument) frame whose date falls inside one of the instrument's
+    membership spans (Qlib's ``list_instruments(as_list=False)``: code → [(start, end), ...])."""
+    import numpy as np
+    import pandas as pd
+
+    cal = pd.DatetimeIndex(calendar)
+    keep = []
+    for code, ranges in spans.items():
+        for start, end in ranges:
+            days = cal[(cal >= pd.Timestamp(start)) & (cal <= pd.Timestamp(end))]
+            if len(days):
+                keep.append(pd.MultiIndex.from_arrays([days, np.repeat(code, len(days))], names=["datetime", "instrument"]))
+    if not keep:
+        return frame.iloc[0:0]
+    member = keep[0].append(keep[1:]) if len(keep) > 1 else keep[0]
+    return frame.loc[frame.index.isin(member)]
 
 
 def industry_map(config):
@@ -1037,8 +1057,10 @@ def walkforward(config, progress=lambda *_: None):
             return None, None
         return float(rank_ic.mean() / rank_ic.std() * np.sqrt(len(rank_ic))), float(rank_ic.mean())
 
-    results, baseline, previous = [], [], None
-    total = len(folds) * 2
+    # Each fold's selection scores its own dates; the pieces are stitched into one signal and backtested once,
+    # so the book carries over between folds (restarting it every fold resets the rebalance cadence, which
+    # alone moves a monthly strategy's result by tens of points).
+    results, pieces, previous = [], [], None
     for k, (fold_start, fold_end) in enumerate(folds):
         train_end_i = int(np.searchsorted(calendar, fold_start)) - config["horizon"] - 1
         train_end = calendar[train_end_i]
@@ -1049,62 +1071,72 @@ def walkforward(config, progress=lambda *_: None):
             judged.append({"name": name, "t": t, "ic": ic})
         admitted = sorted([j for j in judged if j["t"] is not None and abs(j["t"]) >= wf["select_t"]], key=lambda j: -abs(j["t"]))[:wf["max_factors"]]
         selected = [{"name": j["name"], "weight": 1.0 if j["t"] > 0 else -1.0, "t": round(j["t"], 2), "ic": round(j["ic"], 4)} for j in admitted]
-        window = {**config, "start": str(fold_start.date()), "end": str(fold_end.date())}
-        fold = {"start": window["start"], "end": window["end"], "train": [str(train_start.date()), str(train_end.date())],
+        fold = {"start": str(fold_start.date()), "end": str(fold_end.date()), "train": [str(train_start.date()), str(train_end.date())],
                 "selected": selected, "judged": [{**j, "t": None if j["t"] is None else round(j["t"], 2), "ic": None if j["ic"] is None else round(j["ic"], 4)} for j in judged]}
         if selected:
             score, _ = scored(prepared, [s_["name"] for s_ in selected], [s_["weight"] for s_ in selected], prepared["model"])
-            metrics, rows = summarize_report(backtest_score(score, window)[0])
-            fold["metrics"] = metrics
-            fold["rows"] = [{"date": r["date"], "return": r["return"], "benchmark": r.get("benchmark")} for r in rows]
-        else:
-            fold["metrics"] = None
-            fold["rows"] = []
+            # The fold's dates plus the day before it (TopkDropout reads the previous day's signal).
+            lo = calendar[max(0, int(np.searchsorted(calendar, fold_start)) - 1)]
+            sd = score.index.get_level_values("datetime")
+            pieces.append(score[(sd >= lo) & (sd <= fold_end)])
         current = {s_["name"] for s_ in selected}
         fold["turnover_of_set"] = None if previous is None else round(1 - len(current & previous) / max(1, len(current | previous)), 2)
         previous = current
         results.append(fold)
-        progress(2 * k + 1, total)
-        score, _ = scored(prepared, names, [given[n] for n in names], prepared["model"])
-        metrics, rows = summarize_report(backtest_score(score, window)[0])
-        baseline.append({"start": window["start"], "end": window["end"], "metrics": metrics,
-                         "rows": [{"date": r["date"], "return": r["return"], "benchmark": r.get("benchmark")} for r in rows]})
-        progress(2 * k + 2, total)
+        progress(k + 1, len(folds) + 2)
 
-    def stitched(fold_list):
-        """The folds strung together as one track record: compounded equity, overall metrics, per-fold table."""
-        rows = [r for f in fold_list for r in (f.get("rows") or [])]
-        if not rows:
+    def window_metrics(rows, a, b):
+        part = [r for r in rows if a <= r["date"] <= b]
+        if not part:
             return None
-        rets = pd.Series([r["return"] for r in rows])
-        equity = float((1 + rets).prod())
-        n = len(rets)
-        per_fold = [{"start": f["start"], "end": f["end"], "return": (f["metrics"] or {}).get("total_return"),
-                     "benchmark": (f["metrics"] or {}).get("benchmark_return"), "sharpe": (f["metrics"] or {}).get("sharpe"),
-                     "max_drawdown": (f["metrics"] or {}).get("max_drawdown"), "selected": [s_["name"] for s_ in f.get("selected", [])] if "selected" in f else None}
-                    for f in fold_list]
+        rets = pd.Series([r["return"] for r in part])
+        eq = float((1 + rets).prod())
+        bench = pd.Series([r["benchmark"] for r in part])
+        vol = rets.std(ddof=1) if len(rets) > 1 else 0.0
+        curve = (1 + rets).cumprod()
+        # rows carry the benchmark's cumulative level; its return inside the window is level end over level
+        # the day before the window (or the first day's level when the window opens the run).
+        before = [r for r in rows if r["date"] < a]
+        base = before[-1]["benchmark"] if before else bench.iloc[0]
+        return {"total_return": eq - 1, "benchmark_return": float(bench.iloc[-1] / base - 1),
+                "sharpe": float(rets.mean() / vol * np.sqrt(252)) if vol > 0 else None, "max_drawdown": float((curve / curve.cummax() - 1).min()), "days": len(part)}
+
+    def track(score_series, fold_list, with_selection):
+        if score_series is None or score_series.empty:
+            return None
+        metrics, rows = summarize_report(backtest_score(score_series, config)[0])
+        per_fold = []
+        for f in fold_list:
+            m = window_metrics(rows, f["start"], f["end"])
+            per_fold.append({"start": f["start"], "end": f["end"], "return": m and m["total_return"], "benchmark": m and m["benchmark_return"],
+                             "sharpe": m and m["sharpe"], "max_drawdown": m and m["max_drawdown"],
+                             "selected": [s_["name"] for s_ in f.get("selected", [])] if with_selection else None})
         excess = [(pf["return"] or 0) - (pf["benchmark"] or 0) for pf in per_fold if pf["return"] is not None]
         fold_returns = [pf["return"] for pf in per_fold if pf["return"] is not None]
-        eq_curve, e = [], 1.0
-        for r in rows:
-            e *= 1 + r["return"]
-            eq_curve.append([r["date"], round(e, 6)])
-        return {"total_return": equity - 1, "days": n, "sharpe": float(rets.mean() / rets.std() * np.sqrt(252)) if rets.std() > 0 else None,
-                "max_drawdown": float(((pd.Series([c[1] for c in eq_curve]) / pd.Series([c[1] for c in eq_curve]).cummax()) - 1).min()),
-                "folds": per_fold, "median_fold_return": float(np.median(fold_returns)) if fold_returns else None,
+        return {**metrics, "folds": per_fold, "median_fold_return": float(np.median(fold_returns)) if fold_returns else None,
                 "worst_fold_return": float(min(fold_returns)) if fold_returns else None,
                 "median_fold_excess": float(np.median(excess)) if excess else None, "worst_fold_excess": float(min(excess)) if excess else None,
-                "hit_rate": float(np.mean([x > 0 for x in excess])) if excess else None, "equity": eq_curve}
+                "hit_rate": float(np.mean([x > 0 for x in excess])) if excess else None,
+                "equity": [[r["date"], round(r["equity"], 6)] for r in rows], "benchmark_equity": [[r["date"], round(r["benchmark"], 6)] for r in rows]}
 
-    walk = stitched(results)
-    fixed = stitched(baseline)
+    stitched_score = pd.concat(pieces).sort_index() if pieces else None
+    if stitched_score is not None:
+        stitched_score = stitched_score[~stitched_score.index.duplicated(keep="last")]
+    walk = track(stitched_score, results, True)
+    progress(len(folds) + 1, len(folds) + 2)
+    fixed_score, _ = scored(prepared, names, [given[n] for n in names], prepared["model"])
+    # Same first day as the stitched score, so both books start their rebalance cadence on the same day.
+    fd = fixed_score.index.get_level_values("datetime")
+    fixed_score = fixed_score[fd >= calendar[max(0, int(np.searchsorted(calendar, folds[0][0])) - 1)]]
+    fixed = track(fixed_score, results, False)
+    progress(len(folds) + 2, len(folds) + 2)
     if walk is not None:
         walk["set_turnover"] = [f["turnover_of_set"] for f in results]
         walk["empty_folds"] = sum(1 for f in results if not f["selected"])
     return clean({"walkforward": {**wf, "folds": len(folds)}, "selected_by_fold": [{"start": f["start"], "end": f["end"], "train": f["train"], "selected": f["selected"], "judged": f["judged"]} for f in results],
                   "walk": walk, "fixed": fixed, "config": {k: v for k, v in config.items() if k != "factors"} | {"factors": [{k: v for k, v in f.items() if k != "path"} for f in config["factors"]]},
                   "notes": prepared["notes"],
-                  "method": "Each fold re-selects factors on the training window before it (size-neutral 1-day Rank IC t); the portfolio is the configured rank blend inside the fold; folds are compounded. Fixed = every candidate with its given weight, never re-selected."})
+                  "method": "Each fold re-selects factors on the training window before it (size-neutral 1-day Rank IC t, strongest first, signed by the IC); the fold's dates take that set's score; the stitched score is backtested once so the book carries over. Fixed = every candidate with its given weight, never re-selected."})
 
 
 def split_window(calendar, start, end, ratio):

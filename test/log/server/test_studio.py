@@ -2678,3 +2678,18 @@ def test_hold_scores_offsets_and_staggered_average() -> None:
     both = staggered_scores(score, 4, 2)
     assert both.loc[(days[3], "A")] == pytest.approx((0 + 4) / 2) and both.loc[(days[6], "A")] == pytest.approx((8 + 12) / 2)
     assert staggered_scores(score, 1, 5).equals(score)
+
+
+@pytest.mark.offline
+def test_members_only_keeps_point_in_time_membership() -> None:
+    from rdagent.log.server.studio_worker import members_only
+
+    days = pd.bdate_range("2025-01-01", periods=6)
+    index = pd.MultiIndex.from_product([days, ["A", "B", "C"]], names=["datetime", "instrument"])
+    frame = pd.DataFrame({"x": 1.0}, index=index)
+    spans = {"A": [(pd.Timestamp("2025-01-01"), pd.Timestamp("2025-01-03"))], "B": [(pd.Timestamp("2025-01-06"), pd.Timestamp("2025-12-31"))]}  # C never a member
+    out = members_only(frame, spans, days)
+    codes = out.index.get_level_values("instrument")
+    assert set(codes) == {"A", "B"} and (codes == "A").sum() == 3 and (codes == "B").sum() == 3
+    assert (pd.Timestamp("2025-01-06"), "A") not in out.index and (pd.Timestamp("2025-01-03"), "B") not in out.index
+    assert members_only(frame, {}, days).empty
