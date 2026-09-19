@@ -37,6 +37,12 @@ def validate_config(config):
     # neutral: what the portfolio score is purged of before ranking. "none" trades the raw blend (the way
     # every strategy before 2026-09-19 was run); "size" regresses out log traded value each day; "size_industry"
     # also removes industry means. The gate certifies size-neutral IC, so "size" is what matches it.
+    # stagger: how many tranches the book is split into, each refreshed on its own cadence within the rebalance
+    # interval (1 = the whole book turns on one day, and the result depends on which day the run started).
+    stagger = int(result.get("stagger") or 1)
+    if not 1 <= stagger <= 20:
+        raise ValueError("stagger must be between 1 and 20")
+    result["stagger"] = stagger
     neutral = str(result.get("neutral") or "none")
     if neutral not in NEUTRAL_MODES:
         raise ValueError("neutral must be none, size or size_industry")
@@ -65,6 +71,21 @@ def validate_config(config):
         # The server's pre-search filter rides along so the result shows what was screened out.
         if isinstance(search.get("prefilter"), dict):
             result["search"]["prefilter"] = search["prefilter"]
+    if result.get("walkforward") is not None:
+        wf = result["walkforward"] if isinstance(result["walkforward"], dict) else {}
+        fold = int(wf.get("fold_days", 63))
+        train = int(wf.get("train_days", 252))
+        select_t = float(wf.get("select_t", 2.0))
+        max_factors = int(wf.get("max_factors", 8))
+        if not 20 <= fold <= 252:
+            raise ValueError("fold_days must be between 20 and 252 trading days")
+        if not 120 <= train <= 1000:
+            raise ValueError("train_days must be between 120 and 1000 trading days")
+        if not 0 <= select_t <= 10:
+            raise ValueError("select_t must be between 0 and 10")
+        if not 1 <= max_factors <= 80:
+            raise ValueError("max_factors must be between 1 and 80")
+        result["walkforward"] = {"fold_days": fold, "train_days": train, "select_t": select_t, "max_factors": max_factors}
     factors = result.get("factors", [])
     # A trained model (零件组合) takes many signals; the greedy search is quadratic in them and stays small.
     limit = MAX_SEARCH_FACTORS if "search" in result else MAX_FACTORS
@@ -453,6 +474,8 @@ def prepare(config):
     model = config.get("model") or {"method": "rank"}
     # A trained model needs its training history as well; the rank blend only needs the backtest window.
     feature_start = pd.Timestamp(model["train"][0]) if model["method"] == "lgbm" else prior[-1]
+    if config.get("feature_start"):
+        feature_start = min(feature_start, pd.Timestamp(config["feature_start"]))
     frames = [load_factor_frame(f, feature_start, config["end"]) for f in factors]
     features = pd.concat(frames, axis=1).sort_index()
     if features.empty:
@@ -575,22 +598,38 @@ def signal_shortfall(ranks, end_day):
     return f"信号 {'、'.join(short)} 没有覆盖到 {pd.Timestamp(end_day).date()}：把它重算到最新（因子库 → 重算到最新），或把结束日改到它的最后一天之前。"
 
 
-def hold_scores(score, every):
+def hold_scores(score, every, offset=0):
     """Refresh the signal only every ``every`` trading days: each day inside a block repeats the block's first
     cross-section. TopkDropout then finds nothing to swap on the other days, so the book turns over once per
-    block instead of daily."""
+    block instead of daily. ``offset`` shifts the block boundaries (days before the first boundary hold the
+    first day's cross-section)."""
     if every <= 1:
         return score
     import pandas as pd
 
     days = score.index.get_level_values("datetime").unique().sort_values()
     pieces = []
-    for i in range(0, len(days), every):
-        block = days[i:i + every]
+    starts = list(range(offset % every if offset else 0, len(days), every))
+    if not starts or starts[0] != 0:
+        starts = [0] + starts
+    for n, i in enumerate(starts):
+        block = days[i:starts[n + 1]] if n + 1 < len(starts) else days[i:]
         first = score.xs(block[0], level="datetime")
         for day in block:
             pieces.append(pd.Series(first.values, index=pd.MultiIndex.from_arrays([[day] * len(first), first.index], names=["datetime", "instrument"])))
     return pd.concat(pieces).sort_index()
+
+
+def staggered_scores(score, every, tranches):
+    """``tranches`` held signals with evenly spaced refresh days, averaged: a fifth of the book refreshes every
+    four days instead of all of it every twenty, so the result no longer hinges on which day the run began."""
+    if tranches <= 1 or every <= 1:
+        return hold_scores(score, every)
+    import pandas as pd
+
+    step = max(1, every // tranches)
+    held = [hold_scores(score, every, k * step) for k in range(tranches)]
+    return pd.concat(held, axis=1).mean(axis=1).sort_index()
 
 
 def backtest_score(score, config):
@@ -598,8 +637,10 @@ def backtest_score(score, config):
     from qlib.backtest import backtest
 
     rebalance = int(config.get("rebalance", 1))
+    tranches = int(config.get("stagger", 1) or 1)
     strategy = {"class": "TopkDropoutStrategy", "module_path": "qlib.contrib.strategy",
-                "kwargs": {"signal": hold_scores(score, rebalance), "topk": config["topk"], "n_drop": config["n_drop"], "hold_thresh": rebalance}}
+                "kwargs": {"signal": staggered_scores(score, rebalance, tranches), "topk": config["topk"], "n_drop": config["n_drop"],
+                           "hold_thresh": max(1, rebalance // tranches)}}
     portfolios, indicators = backtest(
         start_time=config["start"], end_time=config["end"], strategy=strategy,
         executor={"class": "SimulatorExecutor", "module_path": "qlib.backtest.executor",
@@ -934,6 +975,138 @@ def singles_failure(singles):
     return f"No candidate could be backtested alone on the search window. {detail}"
 
 
+def walkforward(config, progress=lambda *_: None):
+    """走前向: re-select the factor set every fold from the training window before it, hold it through the
+    fold, and judge the strategy on the folds strung together.
+
+    At each fold start the candidates are scored on the ``train_days`` trading days ending ``horizon + 1``
+    days before it (so no label reaches into the fold): size-neutral daily Rank IC of the factor against the
+    1-day label, t = mean / std × √n. Factors with |t| ≥ ``select_t`` enter, signed by the IC, at most
+    ``max_factors`` of them (strongest first); a fold with no admitted factor stays in cash. The portfolio is
+    the same rank blend, neutralised as configured, backtested inside the fold. A fixed-set baseline (every
+    candidate with its given weight, never re-selected) runs beside it.
+    """
+    import numpy as np
+    import pandas as pd
+    from qlib.data import D
+
+    wf = config["walkforward"]
+    # Features must reach back one training window (plus the label gap) before the first fold.
+    import qlib
+    provider = Path(config["provider_uri"]).expanduser().resolve()
+    qlib.init(provider_uri=str(provider), region=config.get("region") or "cn")
+    calendar = D.calendar(freq="day")
+    first_fold = pd.Timestamp(config["start"])
+    before = calendar[calendar < first_fold]
+    if len(before) < wf["train_days"] + config["horizon"] + 2:
+        raise ValueError(f"Not enough history before {config['start']} for a {wf['train_days']}-day training window")
+    feature_start = before[-(wf["train_days"] + config["horizon"] + 1)]
+    prepared = prepare({**config, "feature_start": str(feature_start.date()), "neutral": config.get("neutral", "none")})
+    config = prepared["config"]
+    calendar = prepared["calendar"]
+    ranks, size, industry = prepared["ranks"], prepared.get("size"), prepared.get("industry")
+    # 1-day label for selection (the gate's dominant horizon), z-scored per day like the portfolio label.
+    label1 = D.features(D.instruments(config["market"]), ["Ref($close, -2)/Ref($close, -1) - 1"],
+                        start_time=str(feature_start.date()), end_time=config["end"], freq="day").iloc[:, 0]
+    if label1.index.names[0] == "instrument":
+        label1 = label1.swaplevel(0, 1)
+    label1 = cross_sectional_zscore(label1.sort_index())
+    if size is None:
+        # Selection is always size-neutral, whatever the portfolio does, so it matches the gate.
+        size_raw = D.features(D.instruments(config["market"]), ["Log(Ref(Mean($close*$volume, 20), 1))"],
+                              start_time=str(feature_start.date()), end_time=config["end"], freq="day").iloc[:, 0]
+        if size_raw.index.names[0] == "instrument":
+            size_raw = size_raw.swaplevel(0, 1)
+        size = size_raw.sort_index()
+    names = [f["name"] for f in prepared["factors"]]
+    given = {f["name"]: float(f["weight"]) for f in prepared["factors"]}
+    days = calendar[(calendar >= pd.Timestamp(config["start"])) & (calendar <= pd.Timestamp(config["end"]))]
+    folds = [(days[i], days[min(i + wf["fold_days"], len(days)) - 1]) for i in range(0, len(days), wf["fold_days"])]
+    if len(folds) > 1 and (folds[-1][1] - folds[-1][0]).days < 20:
+        folds[-2] = (folds[-2][0], folds[-1][1])
+        folds.pop()
+    dates = ranks.index.get_level_values("datetime")
+
+    def factor_t(name, train_start, train_end):
+        window = ranks[name][(dates >= train_start) & (dates <= train_end)].dropna()
+        if window.empty:
+            return None, None
+        neutral = neutralize(window, size, industry)
+        ic, rank_ic = daily_ic(neutral, label1)
+        if len(rank_ic) < 40 or rank_ic.std() == 0:
+            return None, None
+        return float(rank_ic.mean() / rank_ic.std() * np.sqrt(len(rank_ic))), float(rank_ic.mean())
+
+    results, baseline, previous = [], [], None
+    total = len(folds) * 2
+    for k, (fold_start, fold_end) in enumerate(folds):
+        train_end_i = int(np.searchsorted(calendar, fold_start)) - config["horizon"] - 1
+        train_end = calendar[train_end_i]
+        train_start = calendar[max(0, train_end_i - wf["train_days"] + 1)]
+        judged = []
+        for name in names:
+            t, ic = factor_t(name, train_start, train_end)
+            judged.append({"name": name, "t": t, "ic": ic})
+        admitted = sorted([j for j in judged if j["t"] is not None and abs(j["t"]) >= wf["select_t"]], key=lambda j: -abs(j["t"]))[:wf["max_factors"]]
+        selected = [{"name": j["name"], "weight": 1.0 if j["t"] > 0 else -1.0, "t": round(j["t"], 2), "ic": round(j["ic"], 4)} for j in admitted]
+        window = {**config, "start": str(fold_start.date()), "end": str(fold_end.date())}
+        fold = {"start": window["start"], "end": window["end"], "train": [str(train_start.date()), str(train_end.date())],
+                "selected": selected, "judged": [{**j, "t": None if j["t"] is None else round(j["t"], 2), "ic": None if j["ic"] is None else round(j["ic"], 4)} for j in judged]}
+        if selected:
+            score, _ = scored(prepared, [s_["name"] for s_ in selected], [s_["weight"] for s_ in selected], prepared["model"])
+            metrics, rows = summarize_report(backtest_score(score, window)[0])
+            fold["metrics"] = metrics
+            fold["rows"] = [{"date": r["date"], "return": r["return"], "benchmark": r.get("benchmark")} for r in rows]
+        else:
+            fold["metrics"] = None
+            fold["rows"] = []
+        current = {s_["name"] for s_ in selected}
+        fold["turnover_of_set"] = None if previous is None else round(1 - len(current & previous) / max(1, len(current | previous)), 2)
+        previous = current
+        results.append(fold)
+        progress(2 * k + 1, total)
+        score, _ = scored(prepared, names, [given[n] for n in names], prepared["model"])
+        metrics, rows = summarize_report(backtest_score(score, window)[0])
+        baseline.append({"start": window["start"], "end": window["end"], "metrics": metrics,
+                         "rows": [{"date": r["date"], "return": r["return"], "benchmark": r.get("benchmark")} for r in rows]})
+        progress(2 * k + 2, total)
+
+    def stitched(fold_list):
+        """The folds strung together as one track record: compounded equity, overall metrics, per-fold table."""
+        rows = [r for f in fold_list for r in (f.get("rows") or [])]
+        if not rows:
+            return None
+        rets = pd.Series([r["return"] for r in rows])
+        equity = float((1 + rets).prod())
+        n = len(rets)
+        per_fold = [{"start": f["start"], "end": f["end"], "return": (f["metrics"] or {}).get("total_return"),
+                     "benchmark": (f["metrics"] or {}).get("benchmark_return"), "sharpe": (f["metrics"] or {}).get("sharpe"),
+                     "max_drawdown": (f["metrics"] or {}).get("max_drawdown"), "selected": [s_["name"] for s_ in f.get("selected", [])] if "selected" in f else None}
+                    for f in fold_list]
+        excess = [(pf["return"] or 0) - (pf["benchmark"] or 0) for pf in per_fold if pf["return"] is not None]
+        fold_returns = [pf["return"] for pf in per_fold if pf["return"] is not None]
+        eq_curve, e = [], 1.0
+        for r in rows:
+            e *= 1 + r["return"]
+            eq_curve.append([r["date"], round(e, 6)])
+        return {"total_return": equity - 1, "days": n, "sharpe": float(rets.mean() / rets.std() * np.sqrt(252)) if rets.std() > 0 else None,
+                "max_drawdown": float(((pd.Series([c[1] for c in eq_curve]) / pd.Series([c[1] for c in eq_curve]).cummax()) - 1).min()),
+                "folds": per_fold, "median_fold_return": float(np.median(fold_returns)) if fold_returns else None,
+                "worst_fold_return": float(min(fold_returns)) if fold_returns else None,
+                "median_fold_excess": float(np.median(excess)) if excess else None, "worst_fold_excess": float(min(excess)) if excess else None,
+                "hit_rate": float(np.mean([x > 0 for x in excess])) if excess else None, "equity": eq_curve}
+
+    walk = stitched(results)
+    fixed = stitched(baseline)
+    if walk is not None:
+        walk["set_turnover"] = [f["turnover_of_set"] for f in results]
+        walk["empty_folds"] = sum(1 for f in results if not f["selected"])
+    return clean({"walkforward": {**wf, "folds": len(folds)}, "selected_by_fold": [{"start": f["start"], "end": f["end"], "train": f["train"], "selected": f["selected"], "judged": f["judged"]} for f in results],
+                  "walk": walk, "fixed": fixed, "config": {k: v for k, v in config.items() if k != "factors"} | {"factors": [{k: v for k, v in f.items() if k != "path"} for f in config["factors"]]},
+                  "notes": prepared["notes"],
+                  "method": "Each fold re-selects factors on the training window before it (size-neutral 1-day Rank IC t); the portfolio is the configured rank blend inside the fold; folds are compounded. Fixed = every candidate with its given weight, never re-selected."})
+
+
 def split_window(calendar, start, end, ratio):
     """Search on the first ``ratio`` of the trading days in [start, end], validate on the rest."""
     import pandas as pd
@@ -1052,6 +1225,7 @@ if __name__ == "__main__":
     folder = Path(sys.argv[1])
     diagnosing = "--diagnose" in sys.argv[2:]
     searching = "--search" in sys.argv[2:]
+    walking = "--walkforward" in sys.argv[2:]
     target = folder / ("diagnosis.json" if diagnosing else "result.json")
     try:
         config = validate_config(json.loads((folder / "config.json").read_text()))
@@ -1060,6 +1234,8 @@ if __name__ == "__main__":
             output = diagnose(config, progress=lambda done, total: write_json(target, {"status": "running", "done": done, "total": total}))
         elif searching:
             output = search(config, progress=lambda done, total, steps: write_json(target, {"status": "running", "done": done, "total": total, "steps": clean(steps)}))
+        elif walking:
+            output = walkforward(config, progress=lambda done, total: write_json(target, {"status": "running", "done": done, "total": total}))
         else:
             output = run(config)
         write_json(target, {"status": "completed", **output})

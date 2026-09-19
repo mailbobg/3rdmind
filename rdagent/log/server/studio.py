@@ -24,6 +24,7 @@ PROCESSES = {}
 TRACE_ROOT = Path(UI_SETTING.trace_folder).resolve()
 ROOT = TRACE_ROOT / "studio_backtests"
 SEARCH_ROOT = TRACE_ROOT / "studio_searches"
+WALK_ROOT = TRACE_ROOT / "studio_walkforwards"
 STRATEGY_ROOT = TRACE_ROOT / "studio_strategies"
 # Factors recomputed on the latest data ("重算到最新") live here, one folder per (trace, round, name),
 # beside the shared daily_pv the recomputation reads.
@@ -1342,6 +1343,61 @@ def search_folder(job_id):
     return SEARCH_ROOT / job_id
 
 
+@studio.route("/walkforwards", methods=["GET", "POST"])
+def walkforwards():
+    """走前向: the same request shape as a backtest plus a ``walkforward`` block ({fold_days, train_days, select_t,
+    max_factors}); the factors are the candidate pool, re-selected every fold on the window before it."""
+    WALK_ROOT.mkdir(parents=True, exist_ok=True)
+    if request.method == "GET":
+        region = wanted_region()
+        jobs = []
+        for path in sorted(WALK_ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
+            result_path = path.parent / "result.json"
+            result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
+            config = public_config(json.loads(path.read_text()))
+            if not in_region(config.get("market"), region):
+                continue
+            walk = result.get("walk") or {}
+            jobs.append({"id": path.parent.name, "status": result["status"], "config": config,
+                         "created": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+                         "total_return": walk.get("total_return"), "hit_rate": walk.get("hit_rate"), "worst_fold_excess": walk.get("worst_fold_excess")})
+        return jsonify(jobs)
+    body = request.get_json() or {}
+    try:
+        body.setdefault("walkforward", {})
+        config = prepare_backtest_config(body)
+        if len(config["factors"]) < 1:
+            raise ValueError("Walk-forward needs at least one candidate signal")
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify({"error": str(error)}), 400
+    job_id = str(uuid.uuid4())
+    folder = WALK_ROOT / job_id
+    folder.mkdir()
+    try:
+        launch_worker(folder, config, ["--walkforward"], job_id)
+    except OSError as error:
+        return jsonify({"error": f"Failed to start worker: {error}"}), 500
+    names = [f["name"] for f in config["factors"]]
+    studio_jobs.track("walkforward", f"走前向 {len(names)} 个候选", _result_poll(folder / "result.json", running_key=job_id,
+                      label_done=lambda d: {"total_return": (d.get("walk") or {}).get("total_return")}),
+                      market=config.get("market"), link={"page": "backtest", "walkforward": job_id}, job_id=job_id)
+    return jsonify({"id": job_id}), 202
+
+
+@studio.get("/walkforwards/<job_id>")
+def walkforward_result(job_id):
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        return jsonify({"error": "Invalid id"}), 400
+    folder = WALK_ROOT / job_id
+    if not (folder / "config.json").is_file():
+        return jsonify({"error": "Not found"}), 404
+    result_path = folder / "result.json"
+    result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
+    return jsonify({"id": job_id, **result, "config": public_config(json.loads((folder / "config.json").read_text()))})
+
+
 @studio.post("/searches/preview")
 def search_preview():
     """Dry-run of the pre-search screen: which candidates would enter the search, and why not for the rest.
@@ -1557,7 +1613,7 @@ def backtest_diagnose(job_id):
 
 # ---- Strategies: a named factor portfolio with its evidence and its tracking runs -----------------------
 
-STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost", "horizon", "rebalance", "neutral")
+STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost", "horizon", "rebalance", "neutral", "stagger")
 
 
 def strategy_path(strategy_id):

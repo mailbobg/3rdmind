@@ -2662,3 +2662,19 @@ def test_neutralize_removes_size_and_industry_from_the_score() -> None:
     assert validate_config(base)["neutral"] == "none" and validate_config({**base, "neutral": "size_industry"})["neutral"] == "size_industry"
     with pytest.raises(ValueError):
         validate_config({**base, "neutral": "beta"})
+
+
+@pytest.mark.offline
+def test_hold_scores_offsets_and_staggered_average() -> None:
+    from rdagent.log.server.studio_worker import hold_scores, staggered_scores
+
+    days = pd.bdate_range("2025-01-01", periods=8)
+    index = pd.MultiIndex.from_product([days, ["A", "B"]], names=["datetime", "instrument"])
+    score = pd.Series(range(16), index=index, dtype=float)  # day d: A = 2d, B = 2d + 1
+    held = hold_scores(score, 4)
+    assert held.loc[(days[3], "A")] == 0 and held.loc[(days[4], "A")] == 8  # blocks start at day 0 and day 4
+    shifted = hold_scores(score, 4, 2)
+    assert shifted.loc[(days[1], "A")] == 0 and shifted.loc[(days[2], "A")] == 4 and shifted.loc[(days[5], "A")] == 4 and shifted.loc[(days[6], "A")] == 12
+    both = staggered_scores(score, 4, 2)
+    assert both.loc[(days[3], "A")] == pytest.approx((0 + 4) / 2) and both.loc[(days[6], "A")] == pytest.approx((8 + 12) / 2)
+    assert staggered_scores(score, 1, 5).equals(score)
