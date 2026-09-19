@@ -17,6 +17,7 @@ import json
 import os
 import re
 import time
+import uuid
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -42,11 +43,18 @@ PROVIDERS: list[dict] = [
     {"id": "moonshot", "label": "Moonshot (Kimi)", "prefix": "moonshot/", "key_env": "MOONSHOT_API_KEY", "base_env": "MOONSHOT_API_BASE",
      "models": ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6"], "embeddings": [], "site": "https://platform.kimi.com",
      "list_url": "https://api.moonshot.cn/v1/models"},
-    # OpenCode Zen: one subscription key in front of many vendors' models, served through an OpenAI-compatible
-    # gateway. Talks to LiteLLM as ``openai/<model>`` with the gateway as base URL.
+    # OpenCode Zen: one subscription key in front of many vendors' models, served through one gateway with
+    # three wire formats, each model on exactly one (docs/go, 2026-09-19): most models on /chat/completions
+    # (``openai/<model>``), the OpenAI-house models on /responses (LiteLLM's ``openai/responses/<model>``
+    # bridge) and the MiniMax / Qwen models on /messages (``anthropic/<model>``). A model asked for on the
+    # wrong endpoint fails with "Endpoint is unavailable".
     {"id": "opencode", "label": "OpenCode Zen（套餐）", "prefix": "openai/", "key_env": "OPENAI_API_KEY", "base_env": "OPENAI_API_BASE",
-     "models": ["muse-spark-1.3-contributor", "deepseek-v4-pro", "deepseek-flash", "kimi-k3", "glm-5.3", "qwen3.8-max", "minimax-m3", "gpt-5.6-luna", "grok-4.6"],
-     "embeddings": [], "site": "https://opencode.ai/zen", "list_url": "https://opencode.ai/zen/go/v1/models", "fixed_base": "https://opencode.ai/zen/go/v1"},
+     "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4.1-flash", "kimi-k3", "kimi-k2.7-code", "glm-5.3", "glm-5.3-flash", "mimo-v2.5-pro",
+                "muse-spark-1.3-contributor", "gpt-5.6-luna", "grok-4.6", "minimax-m3", "qwen3.8-max", "qwen3.8-flash"],
+     "routes": {"responses": ["muse-spark", "gpt-", "grok-"], "messages": ["minimax-", "qwen"]},
+     "embeddings": [], "site": "https://opencode.ai/zen", "list_url": "https://opencode.ai/zen/go/v1/models", "fixed_base": "https://opencode.ai/zen/go/v1",
+     # The gateway refuses requests without a session id (it routes a session to one backend for cache hits).
+     "headers": {"User-Agent": "rd-agent-studio/1.0", "x-opencode-session": "{session}"}},
     {"id": "openai_compatible", "label": "OpenAI 兼容接口", "prefix": "openai/", "key_env": "OPENAI_API_KEY", "base_env": "OPENAI_API_BASE",
      "models": [], "embeddings": [], "needs_base": True, "site": "", "list_url": None},
     # Local models through Ollama: no key, the base URL is the local server (LiteLLM's default is 11434).
@@ -276,15 +284,44 @@ def resolve(values: dict | None = None) -> dict | None:
     if spec is None or not source.get("model"):
         return None
     model = str(source["model"])
-    if spec["id"] != "openai_compatible" and "/" not in model:
+    route = gateway_route(spec, model)
+    key_env, base_env = spec["key_env"], spec["base_env"]
+    if "/" not in model:
         model = spec["prefix"] + model
-    elif spec["id"] == "openai_compatible" and "/" not in model:
-        model = spec["prefix"] + model
+    if route == "responses":
+        model = "openai/responses/" + model.split("/", 1)[1]
+    elif route == "messages":
+        model, key_env, base_env = "anthropic/" + model.split("/", 1)[1], "ANTHROPIC_API_KEY", "ANTHROPIC_API_BASE"
     api_key = _ascii("API Key", str(source.get("api_key") or "").strip()) or keys.get(provider, "") or os.environ.get(spec["key_env"], "")
     # A gateway provider has one address; an explicit base URL (a mirror) still wins.
     base_url = _ascii("Base URL", str(source.get("base_url") or "").strip()) or spec.get("fixed_base", "")
-    return {"provider": provider, "model": model, "api_key": api_key, "base_url": base_url,
-            "key_env": spec["key_env"], "base_env": spec["base_env"], "max_retry": int(source.get("max_retry") or saved.get("max_retry") or 10)}
+    gateway_base = base_url
+    if route == "messages" and base_url:
+        # LiteLLM appends /v1/messages to an Anthropic base unless it already ends with it; name the endpoint
+        # in full whatever the base looks like (the gateway's ends with /v1, a mirror's may not).
+        base_url = base_url.rstrip("/")
+        if not base_url.endswith("/v1/messages"):
+            base_url += "/messages" if base_url.endswith("/v1") else "/v1/messages"
+    return {"provider": provider, "model": model, "api_key": api_key, "base_url": base_url, "gateway_base": gateway_base,
+            "headers": provider_headers(spec), "key_env": key_env, "base_env": base_env,
+            "max_retry": int(source.get("max_retry") or saved.get("max_retry") or 10)}
+
+
+def gateway_route(spec: dict, model: str) -> str:
+    """Which of a gateway's wire formats serves ``model``: ``chat`` unless the provider's ``routes`` map a
+    name prefix to ``responses`` or ``messages``."""
+    name = model.split("/")[-1].lower()
+    for route, prefixes in (spec.get("routes") or {}).items():
+        if any(name.startswith(prefix) for prefix in prefixes):
+            return route
+    return "chat"
+
+
+def provider_headers(spec: dict) -> dict[str, str]:
+    """The HTTP headers a provider's gateway needs on every request, with ``{session}`` filled by a new id
+    (one per research run or connection test, so a run's requests share a session)."""
+    session = uuid.uuid4().hex
+    return {k: v.format(session=session) for k, v in (spec.get("headers") or {}).items()}
 
 
 def env() -> dict[str, str]:
@@ -297,8 +334,10 @@ def env() -> dict[str, str]:
         out[r["key_env"]] = r["api_key"]
     if r["base_url"]:
         out[r["base_env"]] = r["base_url"]
-        if PROVIDER_BY_ID[r["provider"]]["prefix"] == "openai/":
+        if r["model"].startswith("openai/"):
             out["OPENAI_BASE_URL"] = r["base_url"]
+    if r["headers"]:
+        out["LITELLM_EXTRA_HEADERS"] = json.dumps(r["headers"])
     e = resolve_embedding()
     if e is not None:
         out["EMBEDDING_MODEL"] = out["LITELLM_EMBEDDING_MODEL"] = e["model"]
@@ -336,6 +375,34 @@ def test_embedding(values: dict) -> dict:
         return {"ok": False, "error": str(error).splitlines()[0][:300], "seconds": round(time.monotonic() - started, 2), "model": r["model"]}
 
 
+def complete(prompt: str, system: str = "", max_tokens: int = 2000, timeout: int = 180) -> str:
+    """One completion with the saved settings (the model the research runs use); raises when nothing is
+    configured or the call fails. For the Studio's own short jobs, such as the reflection memo."""
+    r = resolve()
+    if r is None:
+        raise RuntimeError("没有配置 LLM")
+    if not r["api_key"] and not PROVIDER_BY_ID[r["provider"]].get("no_key"):
+        raise RuntimeError("没有 API Key")
+    import litellm  # heavy; imported on demand
+
+    kwargs = {"model": r["model"], "max_tokens": max_tokens, "timeout": timeout,
+              "messages": ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]}
+    if r["api_key"]:
+        kwargs["api_key"] = r["api_key"]
+    if r["base_url"]:
+        kwargs["api_base"] = r["base_url"]
+    if r["headers"]:
+        kwargs["extra_headers"] = r["headers"]
+    response = litellm.completion(**kwargs)
+    choice = response.choices[0]
+    text = (choice.message.content or "").strip()
+    if not text:
+        # Reasoning models spend the budget thinking first; an empty answer with finish_reason "length" means
+        # max_tokens was too small for the thinking plus the answer.
+        raise RuntimeError(f"模型没有返回正文（finish_reason={choice.finish_reason}，max_tokens={max_tokens}）")
+    return text
+
+
 def test_connection(values: dict) -> dict:
     """One tiny completion with the given (or saved) settings; returns {ok, reply|error, seconds, model}."""
     try:
@@ -356,6 +423,8 @@ def test_connection(values: dict) -> dict:
             kwargs["api_key"] = r["api_key"]
         if r["base_url"]:
             kwargs["api_base"] = r["base_url"]
+        if r["headers"]:
+            kwargs["extra_headers"] = r["headers"]
         response = litellm.completion(**kwargs)
         reply = (response.choices[0].message.content or "").strip()
         return {"ok": True, "reply": reply, "seconds": round(time.monotonic() - started, 2), "model": r["model"]}
@@ -387,8 +456,9 @@ def list_models(values: dict) -> dict:
     elif spec["id"] == "ollama":
         url = (r["base_url"].rstrip("/") if r["base_url"] else "http://localhost:11434") + "/api/tags"
     else:
-        url = (r["base_url"].rstrip("/") + ("/v1/models" if spec["id"] in ("openai", "anthropic", "moonshot", "dashscope") else "/models")) if r["base_url"] else spec["list_url"]
-    headers = {"User-Agent": "rd-agent-studio"}
+        base = r.get("gateway_base") or r["base_url"]  # the listing lives at the gateway root, not at a model's endpoint
+        url = (base.rstrip("/") + ("/v1/models" if spec["id"] in ("openai", "anthropic", "moonshot", "dashscope") else "/models")) if base else spec["list_url"]
+    headers = {"User-Agent": "rd-agent-studio", **r["headers"]}
     if spec["id"] == "anthropic":
         headers.update({"x-api-key": r["api_key"], "anthropic-version": "2023-06-01"})
     elif spec["id"] == "gemini":

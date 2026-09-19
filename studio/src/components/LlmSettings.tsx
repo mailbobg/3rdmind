@@ -107,10 +107,13 @@ export function LlmSettings({ onSaved }: { onSaved: () => void }) {
       <button type="button" onClick={openSheet} aria-haspopup="dialog" aria-expanded={open}
         className="-mx-2.5 flex w-[calc(100%+20px)] items-center gap-2.5 rounded-[10px] px-2.5 py-2 text-left text-foreground transition-colors hover:bg-surface-secondary">
         <span className="w-[22px] text-center text-[17px] leading-none" aria-hidden>⚙︎</span>
-        <span className="min-w-0 flex-1 text-[13px] font-medium">{t("模型设置")}</span>
-        <span className={`flex min-w-0 items-center gap-1.5 text-[11px] ${warn ? "text-warning" : "text-muted"}`}>
-          {warn && <i className="inline-block size-[6px] shrink-0 rounded-full bg-warning" />}
-          <span className="truncate" title={headline}>{headline}</span>
+        {/* The model name goes under the label, like the other rail entries' subtitles, rather than beside it. */}
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="text-[13px] font-medium">{t("模型设置")}</span>
+          <span className={`flex min-w-0 items-center gap-1.5 text-[11px] ${warn ? "text-warning" : "text-muted"}`}>
+            {warn && <i className="inline-block size-[6px] shrink-0 rounded-full bg-warning" />}
+            <span className="truncate" title={headline}>{headline}</span>
+          </span>
         </span>
       </button>
       {open && createPortal(

@@ -38,7 +38,9 @@ class LiteLLMSettings(LLMSettings):
         env_prefix = "LITELLM_"
         """Use `LITELLM_` as prefix for environment variables"""
 
-    # Placeholder for LiteLLM specific settings, so far it's empty
+    extra_headers: dict[str, str] = {}
+    """HTTP headers added to every chat completion (``LITELLM_EXTRA_HEADERS`` as JSON): some gateways route
+    on a session header, e.g. OpenCode Zen's ``x-opencode-session``."""
 
 
 LITELLM_SETTINGS = LiteLLMSettings()
@@ -152,6 +154,8 @@ class LiteLLMAPIBackend(APIBackend):
         complete_kwargs = self.get_complete_kwargs()
         model = complete_kwargs["model"]
 
+        if LITELLM_SETTINGS.extra_headers:
+            kwargs["extra_headers"] = {**LITELLM_SETTINGS.extra_headers, **(kwargs.get("extra_headers") or {})}
         response = completion(
             messages=messages,
             stream=LITELLM_SETTINGS.chat_stream,
