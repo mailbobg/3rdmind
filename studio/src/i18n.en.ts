@@ -880,6 +880,7 @@ export const EN: Record<string, string> = {
   "不做": "None",
   "规模": "Size",
   "规模 + 行业": "Size + industry",
+  " · 中性化：{0}": " · neutral: {0}",
   "这是软淘汰：这次没进搜索不代表以后没用，换一批队友或换个窗口可以再试。": "Soft-screen only: missing this search does not mean useless later; retry with different peers or a different window.",
   "候选 {0} 个，预筛后 {1} 个": "{0} candidates, {1} after pre-screening",
   "预筛候选": "Screen candidates",
