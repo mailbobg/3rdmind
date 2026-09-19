@@ -1680,6 +1680,23 @@ def test_trace_status_distinguishes_unknown_and_loaded(studio_client) -> None:
 
 
 @pytest.mark.offline
+def test_opencode_gateway_provider_resolves_to_its_fixed_base(studio_client, tmp_path: Path) -> None:
+    from rdagent.log.server import studio_llm
+
+    saved = studio_client.put("/studio/llm", json={"provider": "opencode", "model": "muse-spark-1.3-contributor", "api_key": "oc-abcdefgh"}).get_json()
+    assert saved["current"]["provider"] == "opencode" and saved["current"]["base_url"] == ""  # nothing typed: the gateway's own address is used
+    r = studio_llm.resolve()
+    assert r["model"] == "openai/muse-spark-1.3-contributor" and r["base_url"] == "https://opencode.ai/zen/go/v1" and r["api_key"] == "oc-abcdefgh"
+    env = studio_llm.env()
+    assert env["CHAT_MODEL"] == "openai/muse-spark-1.3-contributor" and env["OPENAI_API_KEY"] == "oc-abcdefgh"
+    assert env["OPENAI_API_BASE"] == env["OPENAI_BASE_URL"] == "https://opencode.ai/zen/go/v1"
+    # A mirror address still wins over the gateway default.
+    assert studio_llm.resolve({"provider": "opencode", "model": "kimi-k3", "base_url": "https://mirror.example/v1"})["base_url"] == "https://mirror.example/v1"
+    providers = {p["id"]: p for p in studio_client.get("/studio/llm").get_json()["providers"]}
+    assert "muse-spark-1.3-contributor" in providers["opencode"]["models"] and not providers["opencode"].get("needs_base")
+
+
+@pytest.mark.offline
 def test_llm_settings_save_env_and_test(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
     import types

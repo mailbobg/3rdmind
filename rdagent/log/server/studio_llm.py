@@ -42,6 +42,11 @@ PROVIDERS: list[dict] = [
     {"id": "moonshot", "label": "Moonshot (Kimi)", "prefix": "moonshot/", "key_env": "MOONSHOT_API_KEY", "base_env": "MOONSHOT_API_BASE",
      "models": ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6"], "embeddings": [], "site": "https://platform.kimi.com",
      "list_url": "https://api.moonshot.cn/v1/models"},
+    # OpenCode Zen: one subscription key in front of many vendors' models, served through an OpenAI-compatible
+    # gateway. Talks to LiteLLM as ``openai/<model>`` with the gateway as base URL.
+    {"id": "opencode", "label": "OpenCode Zen（套餐）", "prefix": "openai/", "key_env": "OPENAI_API_KEY", "base_env": "OPENAI_API_BASE",
+     "models": ["muse-spark-1.3-contributor", "deepseek-v4-pro", "deepseek-flash", "kimi-k3", "glm-5.3", "qwen3.8-max", "minimax-m3", "gpt-5.6-luna", "grok-4.6"],
+     "embeddings": [], "site": "https://opencode.ai/zen", "list_url": "https://opencode.ai/zen/go/v1/models", "fixed_base": "https://opencode.ai/zen/go/v1"},
     {"id": "openai_compatible", "label": "OpenAI 兼容接口", "prefix": "openai/", "key_env": "OPENAI_API_KEY", "base_env": "OPENAI_API_BASE",
      "models": [], "embeddings": [], "needs_base": True, "site": "", "list_url": None},
     # Local models through Ollama: no key, the base URL is the local server (LiteLLM's default is 11434).
@@ -276,7 +281,9 @@ def resolve(values: dict | None = None) -> dict | None:
     elif spec["id"] == "openai_compatible" and "/" not in model:
         model = spec["prefix"] + model
     api_key = _ascii("API Key", str(source.get("api_key") or "").strip()) or keys.get(provider, "") or os.environ.get(spec["key_env"], "")
-    return {"provider": provider, "model": model, "api_key": api_key, "base_url": _ascii("Base URL", str(source.get("base_url") or "").strip()),
+    # A gateway provider has one address; an explicit base URL (a mirror) still wins.
+    base_url = _ascii("Base URL", str(source.get("base_url") or "").strip()) or spec.get("fixed_base", "")
+    return {"provider": provider, "model": model, "api_key": api_key, "base_url": base_url,
             "key_env": spec["key_env"], "base_env": spec["base_env"], "max_retry": int(source.get("max_retry") or saved.get("max_retry") or 10)}
 
 
@@ -290,7 +297,7 @@ def env() -> dict[str, str]:
         out[r["key_env"]] = r["api_key"]
     if r["base_url"]:
         out[r["base_env"]] = r["base_url"]
-        if r["provider"] == "openai_compatible":
+        if PROVIDER_BY_ID[r["provider"]]["prefix"] == "openai/":
             out["OPENAI_BASE_URL"] = r["base_url"]
     e = resolve_embedding()
     if e is not None:
