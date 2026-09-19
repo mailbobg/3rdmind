@@ -1199,6 +1199,7 @@ def prepare_backtest_config(body):
     config["region"] = record["region"]
     config["limit_threshold"] = record["limit_threshold"]
     config["min_cost"] = record["min_cost"]
+    config["names_path"] = str(INSTRUMENT_NAMES)  # industries for the industry-neutral score
     if not (Path(config["provider_uri"]) / "calendars" / "day.txt").is_file():
         raise ValueError("Qlib data not found. Configure a local Qlib daily data directory first.")
     return config
@@ -1556,7 +1557,7 @@ def backtest_diagnose(job_id):
 
 # ---- Strategies: a named factor portfolio with its evidence and its tracking runs -----------------------
 
-STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost", "horizon", "rebalance")
+STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost", "horizon", "rebalance", "neutral")
 
 
 def strategy_path(strategy_id):

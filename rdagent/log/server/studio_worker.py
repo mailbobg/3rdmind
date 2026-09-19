@@ -34,6 +34,13 @@ def validate_config(config):
         raise ValueError("n_drop cannot exceed topk")
     # horizon: days the label looks ahead (LightGBM target and reported IC); rebalance: trading days between
     # signal refreshes, also the minimum holding period. Both default to the daily setup.
+    # neutral: what the portfolio score is purged of before ranking. "none" trades the raw blend (the way
+    # every strategy before 2026-09-19 was run); "size" regresses out log traded value each day; "size_industry"
+    # also removes industry means. The gate certifies size-neutral IC, so "size" is what matches it.
+    neutral = str(result.get("neutral") or "none")
+    if neutral not in NEUTRAL_MODES:
+        raise ValueError("neutral must be none, size or size_industry")
+    result["neutral"] = neutral
     for key in ("horizon", "rebalance"):
         value = float(1 if result.get(key) is None else result[key])
         if not math.isfinite(value) or not value.is_integer() or not 1 <= value <= 20:
@@ -81,6 +88,7 @@ def validate_config(config):
     return result
 
 
+NEUTRAL_MODES = ("none", "size", "size_industry")
 MAX_FACTORS = 80  # signals one backtest may combine
 MAX_SEARCH_FACTORS = 20  # candidates one greedy search may walk
 LGBM_DEFAULTS = {"learning_rate": 0.05, "num_leaves": 63, "max_depth": 8, "colsample_bytree": 0.8,
@@ -466,8 +474,66 @@ def prepare(config):
     if label_raw.index.names[0] == "instrument":  # Qlib returns (instrument, datetime); signals are (datetime, instrument)
         label_raw = label_raw.swaplevel(0, 1)
     label = cross_sectional_zscore(label_raw.sort_index())
+    size, industry = None, None
+    if config.get("neutral", "none") != "none":
+        # The same size measure the single-factor analysis residualises on, so the portfolio trades what the
+        # gate certified: log of the trailing 20-day mean traded value, known the day before.
+        size_raw = D.features(D.instruments(config["market"]), ["Log(Ref(Mean($close*$volume, 20), 1))"],
+                              start_time=feature_start, end_time=config["end"], freq="day").iloc[:, 0]
+        if size_raw.index.names[0] == "instrument":
+            size_raw = size_raw.swaplevel(0, 1)
+        size = size_raw.sort_index()
+        if config["neutral"] == "size_industry":
+            industry = industry_map(config)
+            if not industry:
+                notes.append("行业中性未做：没有行业表（instrument_names.json），只做了规模中性")
     return {"calendar": calendar, "prior_day": prior[-1], "end_day": trading_day_on_or_before(calendar, config["end"]), "config": config, "notes": notes,
-            "factors": factors, "model": model, "ranks": ranks, "label": label}
+            "factors": factors, "model": model, "ranks": ranks, "label": label, "size": size, "industry": industry}
+
+
+def industry_map(config):
+    """Instrument → industry from the Studio's name table beside the traces (A-shares; empty elsewhere)."""
+    path = Path(config.get("names_path") or "")
+    if not path.is_file():
+        return {}
+    try:
+        names = json.loads(path.read_text()).get("names") or {}
+    except ValueError:
+        return {}
+    return {code: (entry or {}).get("industry") for code, entry in names.items() if (entry or {}).get("industry")}
+
+
+def scored(prepared, columns, weights, model, log=lambda *_: None):
+    """combine() followed by the configured neutralisation: the score every backtest, search variant and
+    diagnosis actually trades."""
+    score, report = combine(prepared, columns, weights, model, log=log)
+    if prepared.get("size") is not None:
+        score = neutralize(score, prepared["size"], prepared.get("industry"))
+    return score, report
+
+
+def neutralize(score, size, industry):
+    """Per day, the residual of the score's cross-sectional rank after removing log size (and industry means):
+    what is left is the factor's view on a name relative to names of the same size and trade."""
+    import numpy as np
+    import pandas as pd
+
+    frame = score.rename("score").to_frame().join(size.rename("size"), how="left")
+    frame["score"] = frame.groupby(level="datetime")["score"].rank(pct=True)
+    frame = frame.dropna(subset=["size"])
+    if industry:
+        frame["industry"] = frame.index.get_level_values("instrument").map(lambda c: industry.get(c, "其他"))
+        frame["score"] = frame["score"] - frame.groupby([frame.index.get_level_values("datetime"), "industry"])["score"].transform("mean")
+        frame["size"] = frame["size"] - frame.groupby([frame.index.get_level_values("datetime"), "industry"])["size"].transform("mean")
+    def residual(day):
+        x = day["size"].to_numpy(dtype=float)
+        y = day["score"].to_numpy(dtype=float)
+        if len(day) < 5 or np.nanstd(x) == 0:
+            return pd.Series(y - np.nanmean(y), index=day.index)
+        beta = np.cov(x, y, bias=True)[0, 1] / np.var(x)
+        return pd.Series(y - np.mean(y) - beta * (x - np.mean(x)), index=day.index)
+    out = frame.groupby(level="datetime", group_keys=False).apply(residual)
+    return out.sort_index()
 
 
 def combine(prepared, columns, weights, model, log=print):
@@ -785,7 +851,9 @@ def run(config):
     prepared = prepare(config)
     config = prepared["config"]  # possibly with the end day clamped; see prepare()
     factors, model = prepared["factors"], prepared["model"]
-    score, model_report = combine(prepared, [f["name"] for f in factors], [f["weight"] for f in factors], model)
+    score, model_report = scored(prepared, [f["name"] for f in factors], [f["weight"] for f in factors], model, log=print)
+    if prepared.get("size") is not None:
+        prepared["notes"].append("打分已做" + ("规模 + 行业" if prepared.get("industry") else "规模") + "中性化，再进选股")
     ic, rank_ic = daily_ic(score, prepared["label"])
     test_ic, test_rank_ic = (float(ic.mean()) if ic is not None and len(ic) else None, float(rank_ic.mean()) if rank_ic is not None and len(rank_ic) else None)
     signal = latest_scores(score, config["topk"])
@@ -833,7 +901,7 @@ def diagnose(config, progress=lambda *_: None):
     weights = {f["name"]: f["weight"] for f in factors}
 
     def variant(columns):
-        score, _ = combine(prepared, columns, [weights[c] for c in columns], model, log=lambda *_: None)
+        score, _ = scored(prepared, columns, [weights[c] for c in columns], model)
         ic, rank_ic = information_coefficient(score, prepared["label"])
         metrics, rows = summarize_report(backtest_score(score, config)[0])
         # Equity only, so the UI can overlay every variant's curve on the portfolio's without bloating the file.
@@ -903,7 +971,7 @@ def search(config, progress=lambda *_: None):
         return value if isinstance(value, (int, float)) else float("-inf")
 
     def run_variant(columns, window, keep_curve=False):
-        score, _ = combine(prepared, columns, [weights[c] for c in columns], model, log=lambda *_: None)
+        score, _ = scored(prepared, columns, [weights[c] for c in columns], model)
         report = backtest_score(score, {**config, "start": window[0], "end": window[1]})[0]
         metrics, rows = summarize_report(report)
         if keep_curve:

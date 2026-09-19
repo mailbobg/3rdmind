@@ -68,6 +68,8 @@ export interface BacktestRequest {
   topk: number; n_drop: number; account: number; open_cost: number; close_cost: number;
   /** Label look-ahead in trading days (LightGBM target, reported IC) and days between signal refreshes (also the minimum hold); both default to 1. */
   horizon?: number; rebalance?: number;
+  /** What the score is purged of before ranking: nothing (legacy), log traded value, or that plus industry means. */
+  neutral?: Neutral;
   /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
   trace?: string; loop_id?: number;
 }
@@ -263,7 +265,8 @@ export const search = async (id: string): Promise<SearchResult> => {
   return { ...(rest as unknown as SearchResult), recommended: portfolio?.members ?? null, recommended_portfolio: portfolio };
 };
 export const runSearch = (config: SearchRequest) => api<{ id: string }>("/studio/searches", config);
-export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number }
+export type Neutral = "none" | "size" | "size_industry";
+export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number; neutral?: Neutral }
 export interface StrategyRun { id: string; kind: "evidence" | "update"; status?: string; start?: string; end?: string; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; benchmark_return?: number | null; error?: string; created?: string }
 export interface Strategy {
   id: string; name: string; note: string; created: string; updated: string;

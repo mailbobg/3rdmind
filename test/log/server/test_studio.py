@@ -2630,3 +2630,35 @@ def test_analysis_cache_survives_a_rewrite_with_the_same_content(tmp_path: Path)
     assert studio_module.cached_analysis(ws, "csi300") is None
     (ws / "studio_analysis.csi300.json").write_text(json.dumps({"status": "completed", "version": studio_module.ANALYSIS_VERSION, "source_mtime": (ws / "result.h5").stat().st_mtime, "rank_ic": {"mean": 0.03}}))
     assert studio_module.cached_analysis(ws, "csi300")["rank_ic"]["mean"] == 0.03
+
+
+@pytest.mark.offline
+def test_neutralize_removes_size_and_industry_from_the_score() -> None:
+    import numpy as np
+    from rdagent.log.server.studio_worker import neutralize, validate_config
+
+    days = pd.bdate_range("2025-01-01", periods=3)
+    names = [f"S{i}" for i in range(40)]
+    index = pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"])
+    rng = np.random.RandomState(0)
+    size = pd.Series(np.tile(np.linspace(10, 14, 40), 3), index=index)  # log traded value, same each day
+    industry = {n: ("A" if i % 2 else "B") for i, n in enumerate(names)}
+    # A score that is pure size plus an industry offset plus noise: after neutralisation only the noise is left.
+    noise = pd.Series(rng.randn(len(index)), index=index)
+    score = size * 3 + pd.Series([5.0 if industry[n] == "A" else 0.0 for _, n in index], index=index) + noise
+    out = neutralize(score, size, industry)
+    assert set(out.index) == set(score.index)
+    for day in days:
+        d = out.loc[day]
+        raw = abs(np.corrcoef(score.loc[day].rank().to_numpy(), size.loc[day].to_numpy())[0, 1])
+        left = abs(np.corrcoef(d.to_numpy(), size.loc[day].to_numpy())[0, 1])
+        assert raw > 0.7 and left < 0.2  # the score was mostly size; the residual is not
+        by = d.groupby(pd.Series(industry)).mean()
+        assert abs(by["A"] - by["B"]) < 0.05  # industry means gone
+    # Without an industry map only size is removed; a stock without size is dropped.
+    out2 = neutralize(score, size.drop((days[0], "S0")), None)
+    assert (days[0], "S0") not in out2.index and len(out2) == len(score) - 1
+    base = {"start": "2025-01-01", "end": "2025-02-01", "market": "csi300", "factors": [{"name": "F", "path": "/tmp/x", "weight": 1}]}
+    assert validate_config(base)["neutral"] == "none" and validate_config({**base, "neutral": "size_industry"})["neutral"] == "size_industry"
+    with pytest.raises(ValueError):
+        validate_config({**base, "neutral": "beta"})
