@@ -2562,3 +2562,50 @@ def test_review_gaps_memory_route_submit_branch_replay_and_reflection_failure(st
     assert studio_module.failed_analysis(ws, "csi300") is None
     (ws / "studio_analysis.csi300.json").write_text(json.dumps({"status": "failed", "source_mtime": (ws / "result.h5").stat().st_mtime, "error": "factor has no observations inside csi300"}))
     assert studio_module.failed_analysis(ws, "csi300").startswith("factor has no observations")
+
+
+@pytest.mark.offline
+def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_extra
+
+    cache = tmp_path / "traces" / "studio_data" / "extra" / "baostock"
+    cache.mkdir(parents=True)
+    (cache / "SH600000.csv").write_text("date,code,close,volume,amount,turn,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST\n"
+                                        "2025-01-02,sh.600000,10.0,1000000,10000000,0.5,8.5,0.9,1.2,-3.0,0\n"
+                                        "2025-01-03,sh.600000,10.5,2000000,21000000,0,8.9,0.95,1.3,-3.1,1\n")
+    (cache / "SZ000001.csv").write_text("date,code,close,volume,amount,turn,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST\n")  # fetched, nothing there
+    assert studio_extra.bs_code("SH600000") == "sh.600000" and studio_extra.qlib_code("sz.000001") == "SZ000001"
+    extra = studio_extra.load(cache, ["SH600000", "SZ000001", "SH600004"])
+    assert list(extra.columns) == studio_extra.EXTRA_COLUMNS and len(extra) == 2
+    first = extra.loc[(pd.Timestamp("2025-01-02"), "SH600000")]
+    assert first["$turnover"] == pytest.approx(0.005) and first["$float_cap"] == pytest.approx(10.0 * 1_000_000 / 0.005) and first["$is_st"] == 0
+    second = extra.loc[(pd.Timestamp("2025-01-03"), "SH600000")]
+    assert pd.isna(second["$float_cap"]) and second["$is_st"] == 1  # zero turnover: no float cap
+    # attach: left join onto an OHLCV frame; rows without a source row stay NaN; a foreign universe stays untouched.
+    days = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])
+    index = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
+    ohlcv = pd.DataFrame({"$close": 1.0, "$volume": 2.0}, index=index)
+    joined, attached = studio_extra.attach(ohlcv, cache)
+    assert attached and list(joined.columns) == ["$close", "$volume", *studio_extra.EXTRA_COLUMNS]
+    assert joined.loc[(days[0], "SH600000"), "$pe_ttm"] == pytest.approx(8.5) and pd.isna(joined.loc[(days[2], "SH600000"), "$pe_ttm"])
+    assert pd.isna(joined.loc[(days[0], "SH600004"), "$turnover"])
+    us = pd.DataFrame({"$close": 1.0}, index=pd.MultiIndex.from_product([days, ["AAPL"]], names=["datetime", "instrument"]))
+    assert studio_extra.attach(us, cache)[1] is False and studio_extra.attach(us, tmp_path / "nowhere")[1] is False
+    # Status and the job: member codes from the instrument lists, the fetch subprocess, exports rebuilt.
+    monkeypatch.setattr(studio_module, "EXTRA_CACHE", cache)
+    status = studio_client.get("/studio/data/extra").get_json()
+    assert status["instruments"] == 2 and status["last"] == "2025-01-03" and status["columns"] == studio_extra.EXTRA_COLUMNS
+    calls = []
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return type("P", (), {"stdout": json.dumps({"status": "completed", "done": 2, "updated": 2, "empty": 0, "failed": [], "failed_count": 0}), "stderr": "", "returncode": 0})()
+    monkeypatch.setattr(studio_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)
+    started = studio_client.post("/studio/data/extra", json={"markets": ["csi1000"]})
+    assert started.status_code == 202, started.get_json()
+    job = wait_job(studio_client, started.get_json()["job"])
+    assert job["status"] == "completed", job
+    assert job["result"]["updated"] == 2 and "rebuilt" in job["result"]
+    fetch_cmd = calls[0]
+    assert fetch_cmd[2] == "fetch" and fetch_cmd[3] == str(cache) and Path(fetch_cmd[4]).read_text().splitlines()  # member codes were written
+    assert studio_client.post("/studio/data/extra", json={"markets": ["nasdaq100"]}).status_code == 400

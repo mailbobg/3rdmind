@@ -6,7 +6,7 @@ import { t as tr } from "../i18n";
 
 export const JOB_KIND_LABELS: Record<string, string> = {
   research: tr("研究"), backtest: tr("回测"), search: tr("组合搜索"), diagnose: tr("拆开回测"), refresh: tr("重算到最新"),
-  universe: tr("准备股票池数据"), strategy_update: tr("更新策略"), sync: tr("同步数据"), build: tr("重建数据"), factor_analysis: tr("因子分析"),
+  universe: tr("准备股票池数据"), strategy_update: tr("更新策略"), sync: tr("同步数据"), build: tr("重建数据"), factor_analysis: tr("因子分析"), extra_data: tr("扩展字段"),
 };
 
 /**

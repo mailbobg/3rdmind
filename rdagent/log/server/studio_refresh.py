@@ -34,13 +34,18 @@ def ensure_data(provider, data_path, start, market="csi300", region="cn"):
     if data_path.is_file():
         existing = pd.read_hdf(data_path)
         dates = existing.index.get_level_values("datetime")
-        if pd.Timestamp(dates.max()) >= last and pd.Timestamp(dates.min()) <= pd.Timestamp(start):
+        extra_ready = region != "cn" or not (data_path.parent / "extra" / "baostock").is_dir() or "$turnover" in existing.columns
+        if pd.Timestamp(dates.max()) >= last and pd.Timestamp(dates.min()) <= pd.Timestamp(start) and extra_ready:
             return str(dates.min().date()), str(dates.max().date()), int(len(existing))
     frame = D.features(D.instruments(market), FIELDS, start_time=start, end_time=str(last.date()), freq="day")
     if frame.index.names[0] == "instrument":
         frame = frame.swaplevel()
     frame = frame.sort_index().astype("float32")
     frame.index = frame.index.set_names(["datetime", "instrument"])
+    if region == "cn":
+        from studio_extra import attach
+
+        frame, _ = attach(frame, data_path.parent / "extra" / "baostock")
     data_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_hdf(data_path, key="data", mode="w")
     dates = frame.index.get_level_values("datetime")

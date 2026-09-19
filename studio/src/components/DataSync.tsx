@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import * as studio from "../api/studio";
-import type { SyncStatus } from "../api/studio";
+import type { ExtraStatus, SyncStatus } from "../api/studio";
+import { universeLabel } from "../api/studio";
 import { errorText } from "../hooks/studioContext";
 import { Btn, SelectInput } from "./minimal";
 import { locale, t } from "../i18n";
@@ -24,6 +25,28 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
   }, []);
   useEffect(() => { load(true); }, [load]);
   const running = !!status?.sync.running;
+  // Extra A-share fields (baostock): status while the sheet is open, and a poll while their job runs.
+  const [extra, setExtra] = useState<ExtraStatus | null>(null);
+  const [extraJob, setExtraJob] = useState<string | null>(null);
+  const extraRunning = !!extraJob;
+  useEffect(() => { if (open) studio.extraDataStatus().then(setExtra).catch(() => setExtra(null)); }, [open]);
+  useEffect(() => {
+    if (!extraJob) return;
+    const timer = setInterval(async () => {
+      const job = await studio.job(extraJob).catch(() => null);
+      if (job && job.status !== "running" && job.status !== "queued") {
+        setExtraJob(null);
+        if (job.status !== "completed") setMessage(t("扩展字段没取完：{0}", [job.error || job.status]));
+        studio.extraDataStatus().then(setExtra).catch(() => null);
+        onSynced();
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [extraJob, onSynced]);
+  const startExtra = async () => {
+    setBusy(true); setMessage("");
+    try { setExtraJob((await studio.startExtraData()).job); } catch (e) { setMessage(errorText(e)); } finally { setBusy(false); }
+  };
   useEffect(() => {
     if (!running) return;
     const t = setInterval(async () => {
@@ -105,6 +128,14 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
                 <Btn kind="primary" disabled={busy || running} onClick={() => start(false)}>{running ? t("同步中…") : newer ? t("同步到最新") : t("检查并同步")}</Btn>
                 {!newer && !running && <Btn disabled={busy} onClick={() => start(true)}>{t("强制重下")}</Btn>}
                 <Btn kind="text" disabled={busy} onClick={() => load(true, true)}>{t("重新检查")}</Btn>
+              </div>
+              <div className="flex flex-col gap-2 border-t border-border pt-3">
+                <div className="text-[12px] font-medium">{t("扩展字段（baostock）")}</div>
+                <div className="text-[11px] text-muted">
+                  {extra ? (extra.instruments ? t("{0} 只股票已缓存，数据到 {1}；股票池数据带这些字段：{2}", [extra.instruments, extra.last || "—", Object.entries(extra.exports).filter(([, ok]) => ok).map(([m]) => universeLabel(m)).join("、") || t("暂无")]) : t("还没有取过。")) : t("检查中…")}
+                </div>
+                <p className="m-0 text-[11px] leading-relaxed text-muted">{t("从 baostock 取换手率、PE / PB / PS / PCF、流通市值、ST 标记，按日拼进沪深300 和中证1000 的因子数据（$turnover、$pe_ttm、$pb、$float_cap…），研究和重算都能用。首次约半小时，之后增量。")}</p>
+                <div><Btn disabled={busy || extraRunning} onClick={startExtra}>{extraRunning ? t("取字段中…") : extra?.instruments ? t("增量更新扩展字段") : t("取扩展字段")}</Btn></div>
               </div>
               <div className="flex flex-col gap-2 border-t border-border pt-3">
                 <label className="flex items-center gap-2">

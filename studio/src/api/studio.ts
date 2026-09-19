@@ -326,6 +326,10 @@ export const startDataSync = (force = false) =>
 export const saveDataSyncSettings = (values: { auto?: boolean; hour?: number }) =>
   fetch("/studio/data/sync/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
     .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as SyncStatus["settings"]; });
+/** Extra A-share fields (baostock): turnover, valuation, float cap, ST — how much is cached and which exports carry them. */
+export interface ExtraStatus { instruments: number; last: string | null; columns: string[]; exports: Record<string, boolean> }
+export const extraDataStatus = () => api<ExtraStatus>("/studio/data/extra");
+export const startExtraData = (markets?: string[]) => api<{ job: string }>("/studio/data/extra", { markets });
 export const instrumentNames = () => api<{ source: string | null; names: Record<string, { name: string; industry?: string }> }>(scoped("/studio/instruments/names"));
 export const diagnoseBacktest = (id: string) => api<{ status: string }>(`/studio/backtests/${id}/diagnose`, {});
 export interface LlmProvider { id: string; label: string; prefix: string; key_env: string; base_env: string; models: string[]; embeddings: string[]; needs_base?: boolean; no_key?: boolean; site: string }

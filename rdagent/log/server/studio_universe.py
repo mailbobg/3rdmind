@@ -31,6 +31,14 @@ def main(provider, market, start, end, out_dir, region="cn"):
         frame = frame.swaplevel()
     frame = frame.sort_index().astype("float32")
     frame.index = frame.index.set_names(["datetime", "instrument"])
+    extra_note = ""
+    if region == "cn":
+        # Turnover, valuation, float cap and the ST flag from the baostock cache beside the universe exports.
+        from studio_extra import README_NOTE, attach
+
+        frame, attached = attach(frame, Path(out_dir).parent.parent / "extra" / "baostock")
+        if attached:
+            extra_note = README_NOTE
     out = Path(out_dir)
     (out / "full").mkdir(parents=True, exist_ok=True)
     (out / "debug").mkdir(parents=True, exist_ok=True)
@@ -42,10 +50,11 @@ def main(provider, market, start, end, out_dir, region="cn"):
     debug.to_hdf(out / "debug" / "daily_pv.h5", key="data", mode="w")
     summary = {"market": market, "start": str(dates.min().date()), "end": str(dates.max().date()),
                "instruments": int(frame.index.get_level_values("instrument").nunique()), "rows": int(len(frame)),
+               "columns": list(frame.columns),
                "debug": {"end": str(debug_end.date()), "instruments": int(len(instruments)), "rows": int(len(debug))}}
     readme = (f"{market.upper()} historical membership OHLCV from the local Qlib snapshot. Full: {summary['start']} to {summary['end']}"
               f" ({summary['instruments']} instruments); debug: first half year, {summary['debug']['instruments']} instruments."
-              " Adjusted prices, not a live feed.\n")
+              " Adjusted prices, not a live feed.\n" + extra_note)
     (out / "full" / "README.md").write_text(readme)
     (out / "debug" / "README.md").write_text(readme)
     (out / "meta.json").write_text(json.dumps(summary))
