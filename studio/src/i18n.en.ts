@@ -967,4 +967,6 @@ export const EN: Record<string, string> = {
   "确定性规则，不经 LLM：市值中性 Rank IC 最好期限 |t| ≥ 3；与库里任一因子秩相关 < 0.7；{0}。这个判定替代了 Agent 的接受 / 拒绝，并作为下一轮的方向反馈给它。": "Deterministic rules, no LLM: size-neutral Rank IC |t| ≥ 3 at the best horizon; rank correlation with every library factor < 0.7; {0}. This verdict replaces the agent's accept / reject and is fed back as the direction for the next round.",
   "在 {0} 上同号复现 |t| ≥ 2": "replicates on {0} with the same sign and |t| ≥ 2",
   "本区域没有第二个股票池，未做复现检验": "no second universe in this region, so no replication check",
+  "市值中性 Rank IC 在每个期限上都没过线，与零区分不开": "Size-neutral Rank IC clears the bar at no horizon: indistinguishable from zero",
+  "t {0}（{1} 日）· Rank IC {2} · 按 {3} 的数": "t {0} ({1}d) · Rank IC {2} · judged on {3}",
 };

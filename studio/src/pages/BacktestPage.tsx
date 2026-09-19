@@ -76,11 +76,11 @@ export function BacktestPage() {
     setPreviewing(true); setPreview(null); setPageError("");
     try {
       if (candidates.length >= 2) {
-        const data = await studio.previewSearch(candidates.map((f) => ({ trace: f.trace, loop_id: f.loop_id, name: f.name })));
+        const data = await studio.previewSearch(candidates.map((f) => ({ trace: f.trace, loop_id: f.loop_id, name: f.name })), params.market);
         const flippedReason = Object.fromEntries(data.flipped.map((f) => [f.name, f.reason]));
         const basketWeight = Object.fromEntries(candidates.map((f) => [key(f), Number(f.weight)]));
         setPreview([
-          ...data.kept.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: f.weight, reason: flippedReason[f.name] || "", checked: true, flipped: Boolean(flippedReason[f.name]) })),
+          ...data.kept.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: f.weight, reason: [f.note, flippedReason[f.name]].filter(Boolean).join("；"), checked: true, flipped: Boolean(flippedReason[f.name]) })),
           ...data.excluded.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: basketWeight[key(f)] ?? 1, reason: f.reason, checked: false, flipped: false })),
         ]);
       } else {
@@ -104,7 +104,8 @@ export function BacktestPage() {
         for (const r of shortlist) {
           if (pickedNames.has(r.factor.name)) {
             const p = picked.find((x) => x.name === r.factor.name)!;
-            rows.push({ name: p.name, trace: p.trace, loop_id: p.loop_id, kind: "factor", weight: p.weight, reason: p.weight < 0 ? t("方向为负，已反向") : "", checked: true, flipped: p.weight < 0 });
+            const g = shortlist.find((r) => r.factor.name === p.name)!;
+            rows.push({ name: p.name, trace: p.trace, loop_id: p.loop_id, kind: "factor", weight: p.weight, reason: [t("t {0}（{1} 日）· Rank IC {2} · 按 {3} 的数", [g.t.toFixed(2), g.horizon, g.rankIc.toFixed(4), g.factor.market]), p.weight < 0 ? t("方向为负，已反向") : ""].filter(Boolean).join("；"), checked: true, flipped: p.weight < 0 });
           } else {
             rows.push({ name: r.factor.name, trace: r.factor.trace, loop_id: r.factor.loop_id, kind: "factor", weight: r.rankIc < 0 ? -1 : 1, reason: dupReason[r.factor.name] || "", checked: false, flipped: false });
           }
@@ -113,7 +114,7 @@ export function BacktestPage() {
           if (rows.some((r) => r.name === f.name)) continue;
           const lib = byName.get(f.name);
           if (!lib) continue;
-          rows.push({ name: f.name, trace: lib.trace, loop_id: lib.loop_id, kind: "factor", weight: 1, reason: noiseNames.has(f.name) ? t("Rank IC 的 t 值不到 2，与零区分不开") : t("还没算单因子指标（后台分析中）"), checked: false, flipped: false });
+          rows.push({ name: f.name, trace: lib.trace, loop_id: lib.loop_id, kind: "factor", weight: 1, reason: noiseNames.has(f.name) ? t("市值中性 Rank IC 在每个期限上都没过线，与零区分不开") : t("还没算单因子指标（后台分析中）"), checked: false, flipped: false });
         }
         setPreview(rows);
       }

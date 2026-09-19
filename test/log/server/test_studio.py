@@ -539,6 +539,19 @@ def test_search_preview_reports_kept_and_excluded_without_starting(
     assert [f["name"] for f in data["kept"]] == ["F_A"]
     assert [e["name"] for e in data["excluded"]] == ["F_WEAK"]
     assert data["excluded"][0]["trace"] == "Finance Data Building/demo"
+    # The screen judges like the gate: a recent analysis is read at the horizon where |t| clears its own bar
+    # (20-day t 1.8 passes the 1.5 bar although the 1-day t 1.0 would not), the Rank IC size is noted rather
+    # than excluding, and a search on another universe says whose numbers were used.
+    long_run = {"status": "completed", "version": studio_module.ANALYSIS_VERSION, "source_mtime": (ws / "f_a" / "result.h5").stat().st_mtime,
+                "days": 400, "rank_ic": {"mean": 0.004, "ir": 0.05, "t": 1.0, "positive_ratio": 0.5},
+                "horizons": [{"days": 1, "residual_rank_ic": {"t": 1.0, "mean": 0.004}}, {"days": 20, "residual_rank_ic": {"t": 1.8, "mean": 0.012}}]}
+    (ws / "f_a" / "studio_analysis.csi300.json").write_text(json.dumps(long_run))
+    data = studio_client.post("/studio/searches/preview", json={"market": "csi1000",
+        "factors": [{"name": "F_A", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}]}).get_json()
+    assert data["market"] == "csi1000" and [f["name"] for f in data["kept"]] == ["F_A"]
+    note = data["kept"][0]["note"]
+    assert "t 1.80（20 日）" in note and "量级不到 0.02" in note and "偏弱" in note and "按 csi300 的数" in note
+    assert data["thresholds"]["t_weak"] == {"1": 2.0, "5": 1.75, "10": 1.5, "20": 1.5}
     # Nothing was launched: no job folder appeared.
     assert list((tmp_path / "traces" / "studio_searches").glob("*/config.json")) == []
     assert studio_client.post("/studio/searches/preview", json={"factors": []}).status_code == 400

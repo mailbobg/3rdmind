@@ -387,24 +387,49 @@ def rank_ic_t(analysis):
     return None
 
 
-def apply_search_prefilter(resolved):
-    """Cheap pre-search filter over resolved factors (no backtest, no LLM call).
+def signal_stats(analysis):
+    """What the gate reads from a cached analysis: (t, horizon, Rank IC, weak bar, signal bar).
 
-    ``resolved`` are the factor dicts from resolve_factor_paths (each carries name, weight,
-    path, trace, loop_id). Returns ``(kept, excluded)`` where ``kept`` keeps the input
-    shape (weights possibly sign-flipped to each factor's Rank IC) and ``excluded`` holds
-    ``{name, reason}`` entries for the page to display. Factors without a cached analysis
-    are kept; only near-duplicates (|rho| >= PREFILTER_DUPLICATE_CORR) of a stronger kept
-    factor are dropped.
+    Recent analyses carry horizons and the size-neutral residual IC, judged with the gate's horizon-aware bars;
+    older ones fall back to the 1-day raw Rank IC t. (None, ...) when nothing is usable.
     """
+    from rdagent.log.server import studio_gate
+
+    if analysis and analysis.get("horizons"):
+        t, horizon, ic = studio_gate.best_stats(analysis)
+    else:
+        t, horizon, ic = rank_ic_t(analysis), 1, (analysis or {}).get("rank_ic", {}).get("mean")
+    if t is None:
+        return None, None, None, None, None
+    return t, horizon, ic, studio_gate.bar(studio_gate.T_WEAK_BY_HORIZON, horizon), studio_gate.bar(studio_gate.T_SIGNAL_BY_HORIZON, horizon)
+
+
+def apply_search_prefilter(resolved, market=None):
+    """Cheap pre-search filter over resolved factors (no backtest, no LLM call), judged the way the gate judges.
+
+    ``resolved`` are the factor dicts from resolve_factor_paths (each carries name, weight, path, trace,
+    loop_id). ``market`` is the universe the search will run on: a factor's analysis on that universe is
+    used when it exists (a per-universe copy), else the one from the universe it was researched on, and the
+    note says so. Returns ``(kept, excluded, flipped)``: ``kept`` keeps the input shape (weights sign-flipped
+    to each factor's Rank IC, plus a ``note`` with t / horizon / Rank IC), ``excluded`` holds ``{name,
+    reason}``. Weakness is the gate's horizon-aware t bar; the Rank IC size is noted, never excluded, since the
+    search's validation segment is the judge of what a small signal is worth. Factors without any cached
+    analysis are kept; near-duplicates (|rho| >= PREFILTER_DUPLICATE_CORR) of a stronger kept factor drop.
+    """
+    from rdagent.log.server import studio_gate
+
     scored = []
     for factor in resolved:
-        market = run_market(factor.get("trace") or "")
-        analysis = cached_analysis(Path(factor["path"]), market)
-        rank_ic = (analysis.get("rank_ic") or {}).get("mean") if analysis else None
+        own = run_market(factor.get("trace") or "")
+        target = market or own
+        analysis, judged_on = cached_analysis(Path(factor["path"]), target), target
+        if analysis is None and target != own:
+            analysis, judged_on = cached_analysis(Path(factor["path"]), own), own
+        t, horizon, ic, t_weak, t_signal = signal_stats(analysis)
+        rank_ic = ic if ic is not None else ((analysis.get("rank_ic") or {}).get("mean") if analysis else None)
         icir = (analysis.get("rank_ic") or {}).get("ir") if analysis else None
-        scored.append({"factor": factor, "rank_ic": rank_ic, "icir": 0.0 if icir is None else abs(icir),
-                       "t": rank_ic_t(analysis), "analyzed": analysis is not None})
+        scored.append({"factor": factor, "rank_ic": rank_ic, "icir": 0.0 if icir is None else abs(icir), "t": t, "horizon": horizon,
+                       "t_weak": t_weak, "t_signal": t_signal, "judged_on": judged_on, "target": target, "analyzed": analysis is not None})
     # Weak-signal test first, so the reason names the real problem even for a factor that
     # would also duplicate a stronger one.
     candidates, excluded = [], []
@@ -413,13 +438,16 @@ def apply_search_prefilter(resolved):
         return {"name": factor["name"], "trace": factor.get("trace"), "loop_id": factor.get("loop_id"),
                 "kind": factor.get("kind", "factor")}
 
+    def where(entry):
+        return f"，按 {entry['judged_on']} 的数" if entry["judged_on"] != entry["target"] else ""
+
     for entry in scored:
         if not entry["analyzed"]:
             candidates.append(entry)
             continue
         if entry["t"] is not None:
-            weak = abs(entry["t"]) < PREFILTER_NOISE_T
-            why = f"Rank IC 的 t 值 {entry['t']:.2f}，与零区分不开"
+            weak = abs(entry["t"]) < entry["t_weak"]
+            why = f"市值中性 Rank IC 的 t 值 {entry['t']:.2f}（{entry['horizon']} 日，线 {entry['t_weak']:g}{where(entry)}），与零区分不开"
         else:
             weak = abs(entry["rank_ic"] or 0) < PREFILTER_NOISE_RANK_IC or entry["icir"] < PREFILTER_NOISE_ICIR
             why = f"Rank IC {entry['rank_ic']:.4f}，ICIR {entry['icir']:.3f}"
@@ -427,8 +455,8 @@ def apply_search_prefilter(resolved):
             excluded.append({**ref(entry["factor"]), "reason": f"信号太弱（{why}）：先在因子库看单因子分析，达标再参与搜索"})
             continue
         candidates.append(entry)
-    # Strongest first, so a duplicate always loses to the better factor.
-    candidates.sort(key=lambda e: (-(abs(e["t"]) if e["t"] is not None else e["icir"]), e["factor"]["name"]))
+    # Strongest first (how far |t| clears its own horizon's bar), so a duplicate always loses to the better factor.
+    candidates.sort(key=lambda e: (-((abs(e["t"]) / e["t_signal"]) if e["t"] is not None else e["icir"]), e["factor"]["name"]))
     try:
         corr = factor_correlation([(e["factor"]["name"], Path(e["factor"]["path"])) for e in candidates])
     except Exception:  # noqa: BLE001 -- unreadable workspaces just skip the duplicate check
@@ -446,13 +474,24 @@ def apply_search_prefilter(resolved):
                     break
         if clash is not None:
             excluded.append({**ref(entry["factor"]),
-                             "reason": f"与 {clash[0]} 相关 {clash[1]:.2f}：两个基本是同一个信号，只留 ICIR 更高的那个"})
+                             "reason": f"与 {clash[0]} 相关 {clash[1]:.2f}：两个基本是同一个信号，只留 t 更高的那个"})
             continue
         factor = dict(entry["factor"])
         if entry["rank_ic"] is not None and entry["rank_ic"] != 0 and (factor.get("weight", 1) > 0) != (entry["rank_ic"] > 0):
             factor["weight"] = -abs(factor.get("weight", 1)) if entry["rank_ic"] < 0 else abs(factor.get("weight", 1))
             flipped.append({"name": factor["name"],
                             "reason": f"方向为负（Rank IC {entry['rank_ic']:.4f}）：权重已反向，不算淘汰"})
+        if entry["t"] is not None:
+            parts = [f"t {entry['t']:.2f}（{entry['horizon']} 日）"]
+            if entry["rank_ic"] is not None:
+                parts.append(f"Rank IC {entry['rank_ic']:+.4f}" + ("，量级不到 %g" % studio_gate.IC_SIGNAL if abs(entry["rank_ic"]) < studio_gate.IC_SIGNAL else ""))
+            if abs(entry["t"]) < entry["t_signal"]:
+                parts.append("偏弱")
+            if entry["judged_on"] != entry["target"]:
+                parts.append(f"按 {entry['judged_on']} 的数")
+            factor["note"] = " · ".join(parts)
+        elif not entry["analyzed"]:
+            factor["note"] = "还没算指标，先放行"
         kept.append(factor)
     return kept, excluded, flipped
 
@@ -1102,14 +1141,17 @@ def search_preview():
     try:
         if not body.get("factors"):
             raise ValueError("Preview needs at least one candidate factor")
+        market = str(body.get("market") or "").strip().lower() or None
+        if market and not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", market):
+            raise ValueError("Unsupported instrument universe")
         resolved = resolve_factor_paths(str(body.get("trace") or "") or None, body.get("loop_id"),
-                                        body.get("factors") or [])
-        kept, excluded, flipped = apply_search_prefilter(resolved)
-        public = [{k: f[k] for k in ("name", "kind", "weight", "trace", "loop_id") if k in f} for f in kept]
-        return jsonify({"kept": public, "excluded": excluded, "flipped": flipped,
-                        "thresholds": {"noise_rank_ic": PREFILTER_NOISE_RANK_IC,
-                                       "noise_icir": PREFILTER_NOISE_ICIR,
-                                       "duplicate_corr": PREFILTER_DUPLICATE_CORR}})
+                                        body.get("factors") or [], market=market)
+        kept, excluded, flipped = apply_search_prefilter(resolved, market)
+        public = [{k: f[k] for k in ("name", "kind", "weight", "trace", "loop_id", "note") if k in f} for f in kept]
+        from rdagent.log.server import studio_gate
+        return jsonify({"kept": public, "excluded": excluded, "flipped": flipped, "market": market,
+                        "thresholds": {"t_weak": studio_gate.T_WEAK_BY_HORIZON, "t_signal": studio_gate.T_SIGNAL_BY_HORIZON, "ic_signal": studio_gate.IC_SIGNAL,
+                                       "noise_rank_ic": PREFILTER_NOISE_RANK_IC, "noise_icir": PREFILTER_NOISE_ICIR, "duplicate_corr": PREFILTER_DUPLICATE_CORR}})
     except (ValueError, TypeError, KeyError) as error:
         return jsonify({"error": str(error)}), 400
 
@@ -1140,7 +1182,7 @@ def searches():
         if len(config["factors"]) < 2:
             raise ValueError("Search needs at least two candidate signals")
         if prefilter:
-            kept, excluded, flipped = apply_search_prefilter(config["factors"])
+            kept, excluded, flipped = apply_search_prefilter(config["factors"], config.get("market"))
             config["search"]["prefilter"] = {"enabled": True, "excluded": excluded, "flipped": flipped,
                                              "requested": [f["name"] for f in config["factors"]],
                                              "thresholds": {"noise_rank_ic": PREFILTER_NOISE_RANK_IC,

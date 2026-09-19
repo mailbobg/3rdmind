@@ -239,9 +239,10 @@ export interface SearchResult extends SearchSummary {
 export const searches = () => api<SearchSummary[]>(scoped("/studio/searches"));
 /** Dry-run of the pre-search screen over these candidates; launches nothing. */
 export interface PrefilterPreview {
-  kept: FactorWeight[]; excluded: (FactorRef & { kind?: SignalKind; reason: string })[];
-  flipped: PrefilterItem[];
-  thresholds: { noise_rank_ic: number; noise_icir: number; duplicate_corr: number };
+  /** Kept candidates carry a `note`: t, horizon, Rank IC (and its size), and which universe's numbers were used. */
+  kept: (FactorWeight & { note?: string })[]; excluded: (FactorRef & { kind?: SignalKind; reason: string })[];
+  flipped: PrefilterItem[]; market?: string | null;
+  thresholds: { t_weak?: Record<string, number>; t_signal?: Record<string, number>; ic_signal?: number; noise_rank_ic: number; noise_icir: number; duplicate_corr: number };
 }
 export const previewSearch = (factors: FactorRef[], market?: string) =>
   api<PrefilterPreview>("/studio/searches/preview", { factors, ...(market ? { market } : {}) });
