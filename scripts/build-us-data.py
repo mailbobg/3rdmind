@@ -1,12 +1,17 @@
-"""Build a Qlib data directory for a NASDAQ index universe from Yahoo Finance.
+"""Build a Qlib data directory for one or more Nasdaq index universes from Yahoo Finance.
 
     python scripts/build-us-data.py [--index NDX] [--market nasdaq100] [--start 2007-01-01]
                                     [--target ~/.qlib/qlib_data/us_ndx] [--members-from 2008-01]
 
 Steps: monthly membership snapshots from indexes.nasdaqomx.com -> membership intervals; daily OHLCV for
-every symbol that was ever a member (plus the index itself) via yahooquery; qlib's Yahoo normalisation
+every symbol that was ever a member (plus the benchmark) via yahooquery; qlib's Yahoo normalisation
 (adjust by adjclose, first close = 1, `factor` and `change` columns); qlib's dump_bin into <target>;
 instruments/<market>.txt from the intervals; and a studio-universe.json so the Studio lists the market.
+
+Run it once per universe into the same target and work directory: the dump covers every symbol downloaded
+so far, the manifest keeps the markets already declared (with each one's benchmark), and ``--redownload``
+refreshes the cached price files so every universe ends on the same day. Known indexes: NDX (Nasdaq-100,
+snapshots from 2008), NQUS500LC (Nasdaq US 500 Large Cap, from 2017), NQUSM (Nasdaq US Mid Cap, from 2017).
 
 Needs `pip install yahooquery` and the qlib source checkout next to this repository (for scripts/dump_bin.py).
 Tickers no longer on Yahoo (delisted, acquired) are skipped, so the history has survivorship bias.
@@ -17,6 +22,7 @@ import argparse
 import json
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,8 +31,10 @@ import pandas as pd
 import requests
 
 SNAPSHOT_URL = "https://indexes.nasdaqomx.com/Index/WeightingData?id={index}&tradeDate={day}T00%3A00%3A00.000&timeOfDay=SOD"
-BENCHMARKS = {"NDX": "^NDX"}
-LABELS = {"nasdaq100": "纳斯达克 100"}
+# Yahoo symbols of a benchmark that tracks each universe (Nasdaq's own NQUS500LC / NQUSM are not on Yahoo).
+BENCHMARKS = {"NDX": "^NDX", "NQUS500LC": "^GSPC", "NQUSM": "^MID"}
+_NAMES_LOCK = threading.Lock()  # snapshots run in threads; names.json is read-modify-written under it
+LABELS = {"nasdaq100": "纳斯达克 100", "us500": "美股大盘 500", "usmid": "美股中盘"}
 
 
 def snapshot(index: str, day: str, cache: Path) -> tuple[str, list[str]]:
@@ -40,12 +48,18 @@ def snapshot(index: str, day: str, cache: Path) -> tuple[str, list[str]]:
             if r.status_code == 200:
                 rows = [row for row in r.json().get("aaData", []) if row.get("Symbol")]
                 symbols = sorted({row["Symbol"].strip() for row in rows})
+                # An empty answer with status 200 is a holiday or a day before the index existed: cache it
+                # too, so a rerun does not retry it with back-off.
+                path.write_text(json.dumps(symbols))
                 if symbols:
-                    path.write_text(json.dumps(symbols))
                     names_path = cache / "names.json"
-                    names = json.loads(names_path.read_text()) if names_path.exists() else {}
-                    names.update({row["Symbol"].strip(): str(row.get("Name") or "").strip() for row in rows})
-                    names_path.write_text(json.dumps(names, ensure_ascii=False))
+                    with _NAMES_LOCK:
+                        try:
+                            names = json.loads(names_path.read_text()) if names_path.exists() else {}
+                        except ValueError:
+                            names = {}
+                        names.update({row["Symbol"].strip(): str(row.get("Name") or "").strip() for row in rows})
+                        names_path.write_text(json.dumps(names, ensure_ascii=False))
                     return day, symbols
         except requests.RequestException:
             pass
@@ -137,13 +151,21 @@ def main() -> int:
     parser.add_argument("--members-from", default="2008-01-01")
     parser.add_argument("--target", default="~/.qlib/qlib_data/us_ndx")
     parser.add_argument("--work", default="~/.qlib/stock_data/us_build")
+    parser.add_argument("--redownload", action="store_true", help="drop the cached price files first, so every symbol ends on the same day")
     args = parser.parse_args()
     target, work = Path(args.target).expanduser(), Path(args.work).expanduser()
     (work / "snapshots").mkdir(parents=True, exist_ok=True)
+    known = {p.stem for folder in ("source", "normalized") for p in (work / folder).glob("*.csv")}
+    if args.redownload:
+        # Every symbol the shared work directory holds is refreshed, not only this universe's, so the dump
+        # (which covers them all) ends on the same day for every universe.
+        for folder in ("source", "normalized"):
+            for csv in (work / folder).glob("*.csv"):
+                csv.unlink()
 
     intervals = membership(args.index, args.members_from, work / "snapshots")
     intervals.to_csv(work / f"{args.market}_intervals.csv", index=False)
-    symbols = sorted(set(intervals.symbol)) + [BENCHMARKS.get(args.index, f"^{args.index}")]
+    symbols = sorted(set(intervals.symbol) | (known if args.redownload else set())) + [BENCHMARKS.get(args.index, f"^{args.index}")]
     missing = download(symbols, args.start, work / "source")
     print(f"{len(symbols) - len(missing)} symbols downloaded, {len(missing)} not on Yahoo: {' '.join(missing)}", file=sys.stderr)
     normalize(work / "source", work / "normalized")
@@ -158,18 +180,30 @@ def main() -> int:
 
     calendar = (target / "calendars" / "day.txt").read_text().split()
     have = {line.split("\t")[0] for line in (target / "instruments" / "all.txt").read_text().splitlines()}
-    inst = intervals[intervals.symbol.isin(have)].copy()
-    inst["end"] = inst["end"].where(inst["end"] <= calendar[-1], calendar[-1])
-    inst["start"] = inst["start"].where(inst["start"] >= calendar[0], calendar[0])
-    inst.sort_values(["symbol", "start"]).to_csv(target / "instruments" / f"{args.market}.txt", sep="\t", header=False, index=False)
+    benchmark = BENCHMARKS.get(args.index, f"^{args.index}").lower()
+    manifest_path = target / "studio-universe.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {"region": "us", "label": "美股", "benchmark": benchmark, "markets": {}}
+    manifest.setdefault("markets", {})[args.market] = LABELS.get(args.market, args.market.upper())
+    manifest.setdefault("benchmarks", {})[args.market] = benchmark
+    # The dump moved the calendar for every universe in this directory, so every declared market's
+    # instrument file is rewritten from its intervals (an open interval is clamped to the new last day).
+    counts = {}
+    for market in manifest["markets"]:
+        path = work / f"{market}_intervals.csv"
+        if not path.is_file():
+            continue
+        inst = pd.read_csv(path, dtype=str)
+        inst = inst[inst.symbol.isin(have)].copy()
+        inst["end"] = inst["end"].where(inst["end"] <= calendar[-1], calendar[-1])
+        inst["start"] = inst["start"].where(inst["start"] >= calendar[0], calendar[0])
+        inst.sort_values(["symbol", "start"]).to_csv(target / "instruments" / f"{market}.txt", sep="\t", header=False, index=False)
+        counts[market] = inst.symbol.nunique()
     names_path = work / "snapshots" / "names.json"
     if names_path.exists():
         names = {sym: {"name": name} for sym, name in json.loads(names_path.read_text()).items() if name}
         (target / "instrument_names.json").write_text(json.dumps({"source": "indexes.nasdaqomx.com weighting data", "names": names}, ensure_ascii=False))
-    benchmark = BENCHMARKS.get(args.index, f"^{args.index}").lower()
-    (target / "studio-universe.json").write_text(json.dumps(
-        {"region": "us", "label": "美股", "benchmark": benchmark, "markets": {args.market: LABELS.get(args.market, args.market.upper())}}, ensure_ascii=False))
-    print(f"done: {target} ({calendar[0]} → {calendar[-1]}, {inst.symbol.nunique()} instruments in {args.market})", file=sys.stderr)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False))
+    print(f"done: {target} ({calendar[0]} → {calendar[-1]}, " + ", ".join(f"{n} instruments in {m}" for m, n in counts.items()) + ")", file=sys.stderr)
     return 0
 
 

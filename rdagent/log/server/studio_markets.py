@@ -3,7 +3,10 @@
 The default provider (``QLIB_PROVIDER_URI``, the A-share snapshot) contributes every ``instruments/*.txt`` it
 holds. Any sibling directory of it that carries a ``studio-universe.json`` contributes its own markets::
 
-    {"region": "us", "label": "美股", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100"}}
+    {"region": "us", "label": "美股", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100", "us500": "美股大盘 500"},
+     "benchmarks": {"us500": "^gspc"}}
+
+``benchmarks`` names a market's own benchmark; markets it leaves out use the provider's ``benchmark``.
 
 Each universe resolves to the provider directory, Qlib region, benchmark and the exchange rules a backtest
 should use (A-shares: 9.5% limit, 5-yuan minimum commission; US: no limit, 1-dollar minimum). Everything else
@@ -89,7 +92,8 @@ def _universes(default: Path) -> list[dict]:
         present = _instruments(folder)
         for market, label in (manifest.get("markets") or {}).items():
             if market in present:
-                out.append(_record(market, str(label or market.upper()), folder, region, str(manifest.get("benchmark") or ""), str(manifest.get("label") or region.upper())))
+                benchmark = (manifest.get("benchmarks") or {}).get(market) or manifest.get("benchmark") or ""
+                out.append(_record(market, str(label or market.upper()), folder, region, str(benchmark), str(manifest.get("label") or region.upper())))
     return out
 
 
