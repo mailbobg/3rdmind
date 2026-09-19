@@ -244,6 +244,82 @@ class FactorDatetimeDailyEvaluator(FactorEvaluator):
         return "The generated dataframe is daily.", True
 
 
+class FactorCoverageEvaluator(FactorEvaluator):
+    """Deterministic check that the factor produced values a model could learn from, before any LLM reads it.
+
+    Catches the failures that used to cost a whole round: a rolling window longer than the (debug) data so
+    every row is NaN, a formula that resolves on almost no date, or a constant output. Needs no ground truth.
+    Returns False only for those hard failures; thin coverage (a long window on the half-year debug data, a
+    factor defined for a subset of names) is described in the text for the reviewer and returns None, since
+    the full data the evaluation runs on is several times longer.
+    """
+
+    MIN_VALID_DATES = 10  # below this the factor is unusable even as a debug run
+    THIN_DATE_SHARE = 0.3  # noted, not failed
+    THIN_NAN_SHARE = 0.8  # among names that ever carry a value; noted, not failed
+
+    def evaluate(
+        self,
+        implementation: Workspace,
+        gt_implementation: Workspace,
+    ) -> Tuple[str, object]:
+        _, gen_df = self._get_df(gt_implementation, implementation)
+        if gen_df is None:
+            return "The source dataframe is None. Skip the coverage check.", False
+        if "datetime" not in gen_df.index.names:
+            return "The source dataframe has no datetime index. Skip the coverage check.", None
+        if gen_df.shape[1] == 0:
+            return "The source dataframe has no columns: the factor produced no values.", False
+        values = gen_df.iloc[:, 0]
+        dates = pd.Index(gen_df.index.get_level_values("datetime")).unique().sort_values()
+        n_dates = len(dates)
+        valid = values.dropna()
+        if valid.empty:
+            return (
+                f"All {len(values)} values are NaN over {n_dates} dates ({dates.min()} to {dates.max()}). "
+                "A rolling window longer than the data, or a formula that never resolves. The data here spans "
+                f"only {n_dates} trading days: use windows well under that, set min_periods, and make sure the "
+                "output has values from the first date the window can be filled.",
+                False,
+            )
+        valid_dates = pd.Index(valid.index.get_level_values("datetime")).unique()
+        first_valid = valid_dates.min()
+        warmup = int((dates < first_valid).sum())
+        # NaN share after warm-up, among the names that ever carry a value (a factor defined for a subset of
+        # names is not sparse within that subset).
+        covered = pd.Index(valid.index.get_level_values("instrument")).unique() if "instrument" in values.index.names else None
+        after = values[values.index.get_level_values("datetime") >= first_valid]
+        if covered is not None:
+            after = after[after.index.get_level_values("instrument").isin(covered)]
+        nan_share = float(after.isna().mean()) if len(after) else 1.0
+        share_dates = len(valid_dates) / n_dates if n_dates else 0.0
+        summary = (
+            f"Coverage: values on {len(valid_dates)} of {n_dates} dates (first valid date {first_valid}, "
+            f"{warmup} warm-up dates before it)"
+            + (f", {len(covered)} of {gen_df.index.get_level_values('instrument').nunique()} names" if covered is not None else "")
+            + f"; after warm-up {nan_share:.0%} of rows are NaN."
+        )
+        if len(valid_dates) < self.MIN_VALID_DATES:
+            return (
+                summary + f" Fewer than {self.MIN_VALID_DATES} dates carry values: the window or the warm-up eats the data. "
+                "Shorten the window or use min_periods.",
+                False,
+            )
+        if valid.nunique() <= 1:
+            return summary + f" Every valid value is {valid.iloc[0]!r}: a constant carries no information.", False
+        notes = []
+        if share_dates < self.THIN_DATE_SHARE:
+            notes.append(f"Only {share_dates:.0%} of the dates carry values here; this debug span is {n_dates} days, the full data is several times longer, so a long window is acceptable if intended.")
+        if nan_share > self.THIN_NAN_SHARE:
+            notes.append(f"More than {self.THIN_NAN_SHARE:.0%} NaN after warm-up: check the joins, the min_periods and the conditions that leave a value undefined.")
+        top_share = float(valid.value_counts(normalize=True).iloc[0])
+        if top_share >= 0.95:
+            notes.append(f"{top_share:.0%} of valid values are the same number; almost no cross-sectional variation.")
+        if notes:
+            return summary + " " + " ".join(notes), None
+        return summary, True
+
+
 class FactorRowCountEvaluator(FactorEvaluator):
     def evaluate(
         self,
@@ -419,6 +495,11 @@ class FactorValueEvaluator(FactorEvaluator):
         feedback_str, inf_evaluate_res = FactorInfEvaluator(self.scen).evaluate(implementation, gt_implementation)
         conclusions.append(feedback_str)
 
+        # Did the code produce values at all? Decided by rule before the LLM-backed format review, so an
+        # all-NaN or constant factor is sent back with the exact cause without spending a model call.
+        feedback_str, coverage_result = FactorCoverageEvaluator(self.scen).evaluate(implementation, gt_implementation)
+        conclusions.append(feedback_str)
+
         # Check if the index of the dataframe is ("datetime", "instrument")
         feedback_str, _ = FactorOutputFormatEvaluator(self.scen).evaluate(implementation, gt_implementation)
         conclusions.append(feedback_str)
@@ -468,6 +549,7 @@ class FactorValueEvaluator(FactorEvaluator):
             or output_format_result is False
             or daily_check_result is False
             or inf_evaluate_res is False
+            or coverage_result is False
         ):
             decision_from_value_check = False
         else:
