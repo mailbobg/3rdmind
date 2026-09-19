@@ -102,7 +102,7 @@ export function RecentPerformance({ data, dataEnd }: { data: RecentContext; data
             {h.ic ? (
               <>
                 <span className="pulse__k">IC</span>
-                <span className="tabular-nums">{t("近 {0} 日均值 {1}", [h.days, h.ic.recent.toFixed(4)])}</span>
+                <span className="tabular-nums">{t("近 {0} 日均值 {1}", [h.days, h.ic.recent.toFixed(4)])}{h.ic.lag ? <span className="text-muted" title={t("预测 N 日收益的信号，最近 N 日还没有完整的标签，IC 只能算到 {0}", [h.ic.end])}> {t("（截至 {0}）", [h.ic.end])}</span> : null}</span>
                 <span className={`tabular-nums${h.ic.percentile < 0.1 ? " text-danger" : ""}`}>{t("历史第 {0} 百分位", [ordinal(h.ic.percentile)])}</span>
                 <span className="text-muted">{t("全期均值 {0}", [h.ic.mean.toFixed(4)])}</span>
               </>

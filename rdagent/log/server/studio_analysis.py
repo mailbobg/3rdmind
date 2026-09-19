@@ -34,7 +34,12 @@ def factor_series(workspace):
     series = frame.iloc[:, 0]
     if list(series.index.names) != ["datetime", "instrument"]:
         raise ValueError("factor index must be (datetime, instrument)")
-    return series.dropna().sort_index()
+    valid = series.dropna()
+    if valid.empty:
+        dates = series.index.get_level_values("datetime")
+        raise ValueError(f"factor has no valid values: all {len(series)} rows are NaN over {dates.min().date()} → {dates.max().date()} "
+                         "(a rolling window longer than the data, or a formula that never resolves)")
+    return valid.sort_index()
 
 
 def daily_ic(factor, label):

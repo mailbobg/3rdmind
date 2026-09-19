@@ -46,13 +46,13 @@ export function FactorsPage() {
     return [...map.entries()].map(([trace, items]) => ({ trace, items }));
   }, [rows]);
   const selected = useMemo(() => all.find((f) => key(f) === selectedKey) || null, [all, selectedKey]);
-  const pending = useMemo(() => all.filter((f) => !f.analysis), [all]);
+  const pending = useMemo(() => all.filter((f) => !f.analysis && !f.analysis_error), [all]);
 
   const analyze = useCallback(async (f: LibraryFactor) => {
     setBusyKey(key(f));
     try {
       const analysis = await studio.factorAnalysis(f);
-      setAll((list) => list.map((item) => (key(item) === key(f) ? { ...item, analysis } : item)));
+      setAll((list) => list.map((item) => (key(item) === key(f) ? { ...item, analysis, analysis_error: null } : item)));
     } catch (e) { setError(`${f.name}：${errorText(e)}`); } finally { setBusyKey(""); }
   }, []);
   // Recompute a factor on the latest Qlib data ("重算到最新"): its coverage then reaches the data's last day and
@@ -62,7 +62,7 @@ export function FactorsPage() {
     setRefreshingKey(key(f));
     try {
       const meta = await studio.refreshFactor(f);
-      setAll((list) => list.map((item) => (key(item) === key(f) ? { ...item, refreshed: meta, coverage: { start: meta.start, end: meta.end }, analysis: null } : item)));
+      setAll((list) => list.map((item) => (key(item) === key(f) ? { ...item, refreshed: meta, coverage: { start: meta.start, end: meta.end }, analysis: null, analysis_error: null } : item)));
       if (reanalyze) await analyze(f);
       return true;
     } catch (e) { setError(t("{0} 重算失败：{1}", [f.name, errorText(e)])); return false; } finally { setRefreshingKey(""); }
@@ -103,7 +103,7 @@ export function FactorsPage() {
     return () => { stop = true; clearInterval(timer); };
   }, [analysisJob?.id, analysisJob?.status, load]); // eslint-disable-line react-hooks/exhaustive-deps
   const analysisRunning = !!analysisJob && (analysisJob.status === "queued" || analysisJob.status === "running");
-  const select = (f: LibraryFactor) => { setSelectedKey(key(f)); setView("factor"); layout.openResults(); if (!f.analysis && busyKey !== key(f)) analyze(f); };
+  const select = (f: LibraryFactor) => { setSelectedKey(key(f)); setView("factor"); layout.openResults(); if (!f.analysis && !f.analysis_error && busyKey !== key(f)) analyze(f); };
   const check = (f: LibraryFactor) => { basket.toggle(f); setView("basket"); layout.openResults(); };
   const showBasket = () => { setView("basket"); layout.openResults(); };
   const library = useMemo(() => new Map(all.map((f) => [key(f), f])), [all]);
@@ -213,6 +213,7 @@ export function FactorsPage() {
                   <IcBars monthly={selected.analysis.monthly} field="rank_ic" />
                 </>
               ) : busyKey === key(selected) ? <Hint>{t("分析中，约 10 秒…")}</Hint>
+                : selected.analysis_error ? <Note tone="bad">{t("没有产出可用的值：{0}。这是实现问题（窗口长于数据、公式算不出来），不是弱信号；重算到最新或改代码后才有指标。", [selected.analysis_error])}</Note>
                 : <div className="flex items-center gap-2"><Hint>{t("尚未计算。")}</Hint><Btn onClick={() => analyze(selected)}>{t("现在计算")}</Btn></div>}
             </Section>
             <Section title={t("所在轮次的 Qlib 评估")} note={t("与同轮其他因子合并训练的结果")}><MetricTable metrics={selected.metrics} /></Section>
@@ -281,7 +282,7 @@ export function FactorsPage() {
                   <Num key="ric" value={f.analysis?.rank_ic.mean} />,
                   f.analysis?.rank_ic.ir == null ? <span key="ir" className="mm-dim">—</span> : <span key="ir" className={Math.abs(f.analysis.rank_ic.t ?? f.analysis.rank_ic.ir * Math.sqrt(f.analysis.days)) >= 3 ? "" : "mm-dim"}>{(f.analysis.rank_ic.t ?? f.analysis.rank_ic.ir * Math.sqrt(f.analysis.days)).toFixed(1)}</span>,
                   <span key="cov" className="mm-mono mm-dim">
-                    {coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}${f.refreshed ? " ↻" : ""}` : busyKey === key(f) ? t("分析中…") : <Link onClick={(e) => { e.stopPropagation(); analyze(f); }}>{t("计算指标")}</Link>}
+                    {coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}${f.refreshed ? " ↻" : ""}` : busyKey === key(f) ? t("分析中…") : f.analysis_error ? <span className="text-danger" title={f.analysis_error}>{t("无有效值")}</span> : <Link onClick={(e) => { e.stopPropagation(); analyze(f); }}>{t("计算指标")}</Link>}
                   </span>,
                 ],
               })),

@@ -753,10 +753,17 @@ def recent_context(result):
         for i in range(n, len(rows) + 1):
             values = [v for v in ics[i - n:i] if v is not None]
             ic_windows.append(sum(values) / len(values) if len(values) >= (n + 1) // 2 else None)
-        if ic_windows[-1] is not None and sum(v is not None for v in ic_windows) >= 2:
+        # A signal predicting h-day returns has no IC for the last h days (the label is not complete yet), so
+        # the newest complete window is used and dated; the reading then judges the signal as of that day.
+        last = max((i for i, v in enumerate(ic_windows) if v is not None), default=None)
+        if last is not None and sum(v is not None for v in ic_windows) >= 2:
             population = [v for v in ic_windows if v is not None]
             all_ic = [v for v in ics if v is not None]
-            horizon["ic"] = {"recent": ic_windows[-1], "percentile": _percentile(population, ic_windows[-1]), "mean": sum(all_ic) / len(all_ic)}
+            # ``end`` is the last day that actually has an IC inside that window (the label horizon leaves
+            # the newest days empty), ``lag`` how many trading days the window trails the return window.
+            last_ic_day = max(i for i in range(last, last + n) if ics[i] is not None)
+            horizon["ic"] = {"recent": ic_windows[last], "percentile": _percentile(population, ic_windows[last]), "mean": sum(all_ic) / len(all_ic),
+                             "end": rows[last_ic_day]["date"], "lag": len(rows) - 1 - last_ic_day}
         recent_styles = [styles_by_date.get(r["date"]) for r in rows[-n:]]
         if betas and all(s and all(s.get(name) is not None for name in STYLES) for s in recent_styles):
             market = betas["market"] * sum(bench[-n:])

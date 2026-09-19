@@ -27,8 +27,10 @@ def bar(table, horizon):
 DUPLICATE_CORR = 0.7  # rank correlation with a library factor from which it counts as the same signal
 RELATED_CORR = 0.5  # from which the overlap is worth mentioning
 
-# The universe a signal is re-checked on, in the same region and period: different names, same years.
-SECOND_MARKET = {"csi300": "csi1000", "csi500": "csi1000", "csi1000": "csi300"}
+# The universe a signal is re-checked on, in the same region and period: different names, same years. The
+# US large caps (Nasdaq-100 sits inside the 500) are checked on the mid caps, which share no names with them.
+SECOND_MARKET = {"csi300": "csi1000", "csi500": "csi1000", "csi1000": "csi300",
+                 "nasdaq100": "usmid", "us500": "usmid", "usmid": "us500"}
 
 LEVEL_LABELS = {"signal": "通过", "weak": "偏弱", "noise": "噪声", "duplicate": "重复", "unreplicated": "未复现", "error": "未能判断"}
 
@@ -154,25 +156,27 @@ def family_representatives(library, correlate, threshold=DUPLICATE_CORR):
     return kept
 
 
-def gate_round(factors, market, library, *, analyze, correlate, replicate, families=None, existing=None):
+def gate_round(factors, market, library, *, analyze, correlate, replicate, families=None, existing=None, context=None):
     """Judge every factor of a round; the round is accepted when at least one passes.
 
-    ``factors`` is ``[(name, path), ...]``. ``families`` are the library's family representatives and
-    ``existing`` every library factor's name, both only for the hint. Returns the per-factor verdicts, the
+    ``factors`` is ``[(name, path), ...]``. ``families`` are the library's family representatives,
+    ``existing`` every library factor's name and ``context`` the campaign memory lines (power, the
+    tested-mechanism map, campaign statistics), all only for the hint. Returns the per-factor verdicts, the
     decision, a one-paragraph summary for the feedback's reason, and a hint for the next hypothesis.
     """
     verdicts = [judge_factor(name, path, market, library, analyze=analyze, correlate=correlate, replicate=replicate) for name, path in factors]
     decision = any(v["level"] == "signal" for v in verdicts)
     parts = [f"{v['name']}：{LEVEL_LABELS[v['level']]}（{'；'.join(v['reasons'])}）" for v in verdicts]
     summary = f"验收（确定性规则，不经 LLM）：{'通过' if decision else '不通过'}。" + "；".join(parts) + "。"
-    hint = next_hint(verdicts, families if families is not None else [n for n, _ in library], existing)
+    hint = next_hint(verdicts, families if families is not None else [n for n, _ in library], existing, context)
     return {"factors": verdicts, "decision": decision, "summary": summary, "hint": hint, "market": market,
-            "second_market": SECOND_MARKET.get(market), "families": families,
+            "second_market": SECOND_MARKET.get(market), "families": families, "context": context or [],
             "thresholds": {"t_signal": T_SIGNAL_BY_HORIZON, "t_weak": T_WEAK_BY_HORIZON, "t_replicate": T_REPLICATE_BY_HORIZON, "ic_signal": IC_SIGNAL, "duplicate_corr": DUPLICATE_CORR}}
 
 
-def next_hint(verdicts, families, existing=None):
-    """What the agent should stop proposing, from this round's verdicts, the library's families and its names."""
+def next_hint(verdicts, families, existing=None, context=None):
+    """What the agent should stop proposing, from this round's verdicts, the library's families and its names,
+    and the campaign memory (``context`` lines replace the bare name list when given)."""
     lines = []
     duplicates = [v for v in verdicts if v["level"] == "duplicate"]
     if duplicates:
@@ -188,7 +192,14 @@ def next_hint(verdicts, families, existing=None):
         lines.append("这些没有产出可用的值（窗口长于可用数据、全为 NaN，或结果无法读取），不算被检验过；若要重提，窗口不得超过 120 日并设 min_periods：" + "、".join(broken))
     if families:
         lines.append("库里已有的独立信号族（各列一个代表；新假设与它们的相关要低于 0.5）：" + "、".join(families[:12]))
-    if existing:
+    if context:
+        lines.extend(context)
+        # Names the map does not carry (never analysed, workspace unreadable) still must not be re-proposed.
+        mentioned = "\n".join(context)
+        rest = [n for n in (existing or []) if n not in mentioned]
+        if rest:
+            lines.append("库里还有这些因子（未分析或读不到），同样不要再提：" + "、".join(rest))
+    elif existing:
         lines.append(f"库里已有 {len(existing)} 个因子，不要再提同名或同定义的：" + "、".join(existing))
     lines.append("验收标准：市值中性 Rank IC 在 1/5/10/20 日中最有说服力的期限上 |t| 过线（1 日 ≥ 3，5 日 ≥ 2.5，10/20 日 ≥ 2）且 |Rank IC| ≥ 0.02，与库里任一因子的秩相关 < 0.7，并在同区域另一个股票池上同号复现（1 日 |t| ≥ 2，10/20 日 ≥ 1.5）。10–20 日期限的机制换手低、门槛也低，优先考虑。请提出机制不同的假设，而不是同一族的新参数。")
     return "\n".join(lines)

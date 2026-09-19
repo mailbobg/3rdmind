@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert, Card, Checkbox, Chip, Disclosure, TextArea } from "@heroui/react";
-import { Btn, SelectInput } from "./minimal";
+import { Btn, Note, SelectInput } from "./minimal";
 import type { TraceEvent } from "../api/studio";
 import type { RoundView } from "../hooks/rounds";
 import { download } from "../hooks/studioContext";
@@ -43,6 +43,19 @@ export function RoundDetail({ round, onContinue, testDays }: { round: RoundView;
             ))}
           </div>
           <Hint>{t("确定性规则，不经 LLM：市值中性 Rank IC 最好期限 |t| ≥ 3；与库里任一因子秩相关 < 0.7；{0}。这个判定替代了 Agent 的接受 / 拒绝，并作为下一轮的方向反馈给它。", [round.gate.second_market ? t("在 {0} 上同号复现 |t| ≥ 2", [round.gate.second_market]) : t("本区域没有第二个股票池，未做复现检验")])}</Hint>
+          {typeof round.gate.reflection === "string" && <Note tone="bad">{t("这一轮该写反思备忘录，模型调用失败：{0}", [round.gate.reflection.replace(/^failed: /, "")])}</Note>}
+          {round.gate.context && round.gate.context.length > 0 && (
+            <details className="mm-details">
+              <summary>{t("随判定发给 Agent 的研究记忆（{0} 条）", [round.gate.context.length])}</summary>
+              <div className="flex flex-col gap-1 pt-1">{round.gate.context.map((line, i) => <p key={i} className="m-0 text-[11px] text-muted" style={{ wordBreak: "break-word" }}>{line}</p>)}</div>
+            </details>
+          )}
+        </Section>
+      )}
+      {round.reflection && (
+        <Section title={t("反思备忘录")} note={<span className="text-[11px] text-muted">{t("{0} 轮后 · {1}", [round.reflection.rounds, round.reflection.model || ""])}</span>}>
+          <p className="m-0 text-xs" style={{ whiteSpace: "pre-wrap" }}>{round.reflection.memo}</p>
+          <Hint>{t("由设置里的模型按验收判定和战役统计写成，每 3 轮一次；它的“方向”一段随下一轮的假设提示一起发给 Agent。只依据判定，不看回测收益。")}</Hint>
         </Section>
       )}
       {round.feedback && (

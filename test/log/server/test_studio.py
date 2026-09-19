@@ -554,7 +554,46 @@ def test_search_preview_reports_kept_and_excluded_without_starting(
     assert data["thresholds"]["t_weak"] == {"1": 2.0, "5": 1.75, "10": 1.5, "20": 1.5}
     # Nothing was launched: no job folder appeared.
     assert list((tmp_path / "traces" / "studio_searches").glob("*/config.json")) == []
-    assert studio_client.post("/studio/searches/preview", json={"factors": []}).status_code == 400
+    assert data["analyzing"] == 0
+    # A copy of F_A already computed on csi1000 (a strategy or an earlier search put it there) but not yet
+    # analysed there: the screen resolves to the copy, still judges by the own-universe numbers, and queues
+    # the copy's analysis on csi1000 so the next screen is exact.
+    monkeypatch.setattr(studio_module, "REFRESH_ROOT", tmp_path / "traces" / "studio_refresh")
+    copy = studio_module.refresh_dir("Finance Data Building/demo", 0, "F_A", "csi1000")
+    copy.mkdir(parents=True)
+    series["F_A"].to_frame("x").to_hdf(copy / "result.h5", key="data")
+    analysed = []
+    monkeypatch.setattr(studio_module, "analyze_factor", lambda workspace, market: analysed.append((Path(workspace), market)))
+    monkeypatch.setattr(studio_module.studio_jobs, "run", lambda kind, title, work, **meta: (work({"id": "job-1"}), {"id": "job-1", "kind": kind, **meta})[1])
+    monkeypatch.setattr(studio_module.studio_jobs, "update", lambda *a, **k: None)
+    monkeypatch.setattr(studio_module.studio_jobs, "list_jobs", lambda **k: [])
+    data = studio_client.post("/studio/searches/preview", json={"market": "csi1000",
+        "factors": [{"name": "F_A", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}]}).get_json()
+    assert [f["name"] for f in data["kept"]] == ["F_A"] and "按 csi300 的数" in data["kept"][0]["note"]
+    assert data["analyzing"] == 1 and analysed == [(copy, "csi1000")]
+    # An analysis that failed on this very signal (all NaN, nothing inside the universe) is an implementation
+    # failure: the screen says so instead of letting the factor through as "not analysed yet", and the
+    # background job does not retry it.
+    (ws / "f_weak" / "studio_analysis.csi300.json").write_text(json.dumps({
+        "status": "failed", "version": studio_module.ANALYSIS_VERSION, "source_mtime": (ws / "f_weak" / "result.h5").stat().st_mtime,
+        "error": "factor has no valid values: all 20 rows are NaN"}))
+    data = studio_client.post("/studio/searches/preview", json={
+        "factors": [{"name": n, "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0} for n in series]}).get_json()
+    assert [e["name"] for e in data["excluded"]] == ["F_WEAK"] and data["excluded"][0]["reason"].startswith("没有产出可用的值（factor has no valid values")
+    library = {f["name"]: f for f in studio_client.get("/studio/factors").get_json()}
+    assert library["F_WEAK"]["analysis"] is None and library["F_WEAK"]["analysis_error"].startswith("factor has no valid values")
+    with server.app.app_context():
+        assert "F_WEAK" not in [f["name"] for f in studio_module.pending_analyses("cn")]
+    # Without a basket the screen picks from the whole library of the market's region: the strongest few
+    # ticked (limit), the rest listed with a reason, and cross-universe copies skipped by the duplicate check.
+    data = studio_client.post("/studio/searches/preview", json={"factors": [], "market": "csi300", "limit": 1}).get_json()
+    assert [f["name"] for f in data["kept"]] == ["F_A"]
+    assert {e["name"]: e["reason"] for e in data["excluded"]}["F_WEAK"].startswith("没有产出可用的值")
+    assert studio_client.post("/studio/searches/preview", json={"factors": []}).status_code == 400  # no market either
+    task.messages[1]["content"]["workspaces"]["factors"].append({"name": "F_B", "path": str(ws / "f_a")})
+    data = studio_client.post("/studio/searches/preview", json={"factors": [], "market": "csi300", "limit": 1}).get_json()
+    names = {e["name"]: e["reason"] for e in data["excluded"]}
+    assert [f["name"] for f in data["kept"]] == ["F_A"] and "已有 1 个更强的候选" in names["F_B"]
 
 
 @pytest.mark.offline
@@ -786,10 +825,17 @@ def test_recent_context_places_the_last_week_in_the_runs_history() -> None:
     assert week["ic"]["recent"] == pytest.approx(0.02) and week["ic"]["percentile"] == pytest.approx(0.5)
     assert week["attribution"]["market"] == pytest.approx(-0.06) and week["attribution"]["residual"] == pytest.approx(0.01)
     assert week["reading"] == "market"
+    assert week["ic"]["lag"] == 0 and week["ic"]["end"] == result["rows"][-1]["date"]
     # A collapsing IC over the same week reads as drift instead.
     for row in result["ic_rows"][-5:]:
         row["ic"] = -0.05
     assert recent_context(result)["horizons"][0]["reading"] == "drift"
+    # A 20-day label leaves the last 20 days without IC: the newest complete window is used and dated.
+    result["ic_rows"] = [{"date": r["date"], "ic": 0.02, "rank_ic": 0.02} for r in result["rows"][:-20]]
+    week = recent_context(result)["horizons"][0]
+    # ``end`` is the last day that has an IC at all, ``lag`` how far that trails the return window.
+    assert week["ic"]["recent"] == pytest.approx(0.02) and week["ic"]["lag"] == 20 and week["ic"]["end"] == result["rows"][-21]["date"]
+    assert week["reading"] == "market"  # judged on the newest IC there is, not "needs update"
     # A normal week is normal whatever else is stored.
     result["rows"] = _report_rows([0.001] * 60, [0.0005] * 60)
     assert recent_context(result)["horizons"][0]["reading"] == "normal"
@@ -977,8 +1023,10 @@ def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, mo
     us = tmp_path / "us_ndx"
     (us / "instruments").mkdir(parents=True)
     (us / "instruments" / "nasdaq100.txt").write_text("AAPL\t2020-01-01\t2030-01-01\n")
-    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "label": "美股", "benchmark": "^ndx", "markets": {"nasdaq100": "纳斯达克 100", "sp500": "S&P 500"}}))
-    assert server.available_universes() == ["csi300", "csi1000", "all", "nasdaq100"]  # sp500 has no instruments file
+    (us / "instruments" / "us500.txt").write_text("AAPL\t2020-01-01\t2030-01-01\nJPM\t2020-01-01\t2030-01-01\n")
+    (us / "studio-universe.json").write_text(json.dumps({"region": "us", "label": "美股", "benchmark": "^ndx", "benchmarks": {"us500": "^gspc"},
+                                                        "markets": {"nasdaq100": "纳斯达克 100", "us500": "美股大盘 500", "sp500": "S&P 500"}}))
+    assert server.available_universes() == ["csi300", "csi1000", "all", "nasdaq100", "us500"]  # sp500 has no instruments file
     env = server.universe_env("nasdaq100")
     assert env["QLIB_FACTOR_REGION"] == "us" and env["QLIB_FACTOR_BENCHMARK"] == "^ndx" and env["QLIB_FACTOR_LIMIT_THRESHOLD"] == "null"
     assert env["QLIB_FACTOR_OPEN_COST"] == "0.0001" and env["QLIB_FACTOR_CLOSE_COST"] == "0.0001"
@@ -987,6 +1035,9 @@ def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, mo
     from rdagent.log.server import studio_markets
     record = studio_markets.universe("nasdaq100")
     assert record["limit_threshold"] is None and record["min_cost"] == 1 and record["label"] == "纳斯达克 100"
+    # A market with its own benchmark in the manifest uses it; the others keep the provider's.
+    assert studio_markets.universe("us500")["benchmark"] == "^gspc" and record["benchmark"] == "^ndx"
+    assert server.universe_env("us500")["QLIB_FACTOR_BENCHMARK"] == "^gspc"
 
 
 @pytest.mark.offline
@@ -1337,7 +1388,7 @@ def test_factor_library_lists_factors_with_code(studio_client, tmp_path: Path) -
         "trace": "Finance Data Building/demo", "loop_id": 0, "name": "STR_5", "market": "csi300",
         "description": "Short-term reversal", "formulation": "-r_5", "variables": {"$close": "close"},
         "hypothesis": "h", "decision": True, "reason": "improves return",
-        "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)", "analysis": None, "refreshed": None, "coverage": None,
+        "metrics": {"IC": 0.01, "Rank IC": 0.02}, "code": "print(5)", "analysis": None, "analysis_error": None, "refreshed": None, "coverage": None,
     }]
 
 
@@ -1621,6 +1672,17 @@ def test_analysis_summary_on_synthetic_ic() -> None:
 
 
 @pytest.mark.offline
+def test_factor_series_names_an_all_nan_signal(tmp_path: Path) -> None:
+    from rdagent.log.server.studio_analysis import factor_series
+
+    days = pd.bdate_range("2025-01-01", periods=5)
+    index = pd.MultiIndex.from_product([days, ["A", "B"]], names=["datetime", "instrument"])
+    pd.Series([float("nan")] * len(index), index=index).to_frame("x").to_hdf(tmp_path / "result.h5", key="data")
+    with pytest.raises(ValueError, match="no valid values: all 10 rows are NaN over 2025-01-01 → 2025-01-07"):
+        factor_series(tmp_path)
+
+
+@pytest.mark.offline
 def test_analysis_t_statistics_horizons_and_residual() -> None:
     import numpy as np
     from rdagent.log.server.studio_analysis import T_SIGNAL, label_expression, residualize, stats, verdict
@@ -1693,20 +1755,46 @@ def test_trace_status_distinguishes_unknown_and_loaded(studio_client) -> None:
 
 
 @pytest.mark.offline
-def test_opencode_gateway_provider_resolves_to_its_fixed_base(studio_client, tmp_path: Path) -> None:
+def test_opencode_gateway_provider_resolves_to_its_fixed_base(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from rdagent.log.server import studio_llm
 
-    saved = studio_client.put("/studio/llm", json={"provider": "opencode", "model": "muse-spark-1.3-contributor", "api_key": "oc-abcdefgh"}).get_json()
+    saved = studio_client.put("/studio/llm", json={"provider": "opencode", "model": "deepseek-v4-pro", "api_key": "oc-abcdefgh"}).get_json()
     assert saved["current"]["provider"] == "opencode" and saved["current"]["base_url"] == ""  # nothing typed: the gateway's own address is used
     r = studio_llm.resolve()
-    assert r["model"] == "openai/muse-spark-1.3-contributor" and r["base_url"] == "https://opencode.ai/zen/go/v1" and r["api_key"] == "oc-abcdefgh"
+    assert r["model"] == "openai/deepseek-v4-pro" and r["base_url"] == "https://opencode.ai/zen/go/v1" and r["api_key"] == "oc-abcdefgh"
     env = studio_llm.env()
-    assert env["CHAT_MODEL"] == "openai/muse-spark-1.3-contributor" and env["OPENAI_API_KEY"] == "oc-abcdefgh"
+    assert env["CHAT_MODEL"] == "openai/deepseek-v4-pro" and env["OPENAI_API_KEY"] == "oc-abcdefgh"
     assert env["OPENAI_API_BASE"] == env["OPENAI_BASE_URL"] == "https://opencode.ai/zen/go/v1"
     # A mirror address still wins over the gateway default.
     assert studio_llm.resolve({"provider": "opencode", "model": "kimi-k3", "base_url": "https://mirror.example/v1"})["base_url"] == "https://mirror.example/v1"
     providers = {p["id"]: p for p in studio_client.get("/studio/llm").get_json()["providers"]}
     assert "muse-spark-1.3-contributor" in providers["opencode"]["models"] and not providers["opencode"].get("needs_base")
+    # The gateway routes on a session header: every run gets a fresh id, carried to the research process as
+    # LITELLM_EXTRA_HEADERS and sent with the connection test.
+    import re, sys, types
+
+    headers = json.loads(env["LITELLM_EXTRA_HEADERS"])
+    assert headers["User-Agent"] == "rd-agent-studio/1.0" and re.fullmatch(r"[0-9a-f]{32}", headers["x-opencode-session"])
+    assert json.loads(studio_llm.env()["LITELLM_EXTRA_HEADERS"])["x-opencode-session"] != headers["x-opencode-session"]
+    assert studio_llm.resolve({"provider": "deepseek", "model": "deepseek-flash"})["headers"] == {}
+    sent = {}
+    fake = types.SimpleNamespace(completion=lambda **kw: sent.update(kw) or types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="OK"))]))
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    assert studio_llm.test_connection({"provider": "opencode", "model": "kimi-k3"})["ok"] is True
+    assert sent["extra_headers"]["x-opencode-session"] and sent["api_base"] == "https://opencode.ai/zen/go/v1"
+    # Each model lives on one of the gateway's three wire formats: the OpenAI-house models go through
+    # LiteLLM's Responses bridge, MiniMax / Qwen through the Anthropic-format endpoint (named in full so
+    # LiteLLM does not append /v1/messages to a path already ending in /v1), everything else stays on chat.
+    muse = studio_llm.resolve({"provider": "opencode", "model": "muse-spark-1.3-contributor"})
+    assert muse["model"] == "openai/responses/muse-spark-1.3-contributor" and muse["base_url"] == "https://opencode.ai/zen/go/v1"
+    qwen = studio_llm.resolve({"provider": "opencode", "model": "qwen3.8-max"})
+    assert qwen["model"] == "anthropic/qwen3.8-max" and qwen["base_url"] == "https://opencode.ai/zen/go/v1/messages"
+    assert (qwen["key_env"], qwen["base_env"]) == ("ANTHROPIC_API_KEY", "ANTHROPIC_API_BASE")
+    assert studio_llm.resolve({"provider": "opencode", "model": "kimi-k3"})["model"] == "openai/kimi-k3"
+    studio_client.put("/studio/llm", json={"provider": "opencode", "model": "minimax-m3", "api_key": "oc-abcdefgh"})
+    env = studio_llm.env()
+    assert env["CHAT_MODEL"] == "anthropic/minimax-m3" and env["ANTHROPIC_API_KEY"] == "oc-abcdefgh"
+    assert env["ANTHROPIC_API_BASE"] == "https://opencode.ai/zen/go/v1/messages" and "OPENAI_BASE_URL" not in env
 
 
 @pytest.mark.offline
@@ -2129,9 +2217,10 @@ def test_gate_judges_factors_by_t_duplication_and_replication() -> None:
         return {"names": names, "matrix": [[1.0 if a == b else fam_corr.get((a, b), fam_corr.get((b, a), 0.0)) for b in names] for a in names]}
     assert studio_gate.family_representatives(lib, correlate_lib) == ["A", "C"]
     assert studio_gate.family_representatives(lib, lambda pairs: (_ for _ in ()).throw(ValueError("no overlap"))) == ["A", "B", "C"]
-    # Without a passing factor the round is rejected; an analysis failure is reported, not raised; no second market → no replication.
-    gate = studio_gate.gate_round([("DEAD", "/ws/DEAD"), ("X", "/ws/X")], "nasdaq100", [], analyze=lambda p, m: analyses.get(Path(p).name) or (_ for _ in ()).throw(RuntimeError("no result.h5")), correlate=correlate, replicate=None)
+    # Without a passing factor the round is rejected; an analysis failure is reported, not raised; a market without a second universe does no replication.
+    gate = studio_gate.gate_round([("DEAD", "/ws/DEAD"), ("X", "/ws/X")], "other", [], analyze=lambda p, m: analyses.get(Path(p).name) or (_ for _ in ()).throw(RuntimeError("no result.h5")), correlate=correlate, replicate=None)
     assert gate["decision"] is False and [f["level"] for f in gate["factors"]] == ["noise", "error"] and gate["second_market"] is None
+    assert studio_gate.SECOND_MARKET["us500"] == "usmid" and studio_gate.SECOND_MARKET["nasdaq100"] == "usmid"  # large caps replicate on the mid caps
 
 
 @pytest.mark.offline
@@ -2157,6 +2246,11 @@ def test_feedback_requests_wait_for_the_gate_and_carry_its_verdict(studio_client
     seen = []
     monkeypatch.setattr(server.studio_gate, "gate_round", lambda factors, market, library, **kw: seen.append((factors, market, library)) or dict(verdict))
     monkeypatch.setattr(server, "run_refresh", lambda *a, **k: None, raising=False)
+    # Every REFLECT_EVERY gated rounds the memo is written with the configured model on the verdicts so far.
+    prompts = []
+    monkeypatch.setattr(server, "REFLECT_EVERY", 1)
+    monkeypatch.setattr(server.studio_llm, "complete", lambda prompt, **kw: prompts.append(prompt) or "观察：波动率族已饱和。\n反思：…\n方向：换成交额结构。")
+    monkeypatch.setattr(server.studio_llm, "resolve", lambda values=None: {"model": "deepseek/deepseek-flash"})
     # The fixture's round 0 has a metric event with STR_5's workspace and no verdict yet: that is the round under judgement.
     task.user_request_q.put({"decision": True, "reason": "looks promising", "new_hypothesis": "more of the same", "observations": "", "hypothesis_evaluation": ""})
     server._drain_user_requests_into_messages(task)
@@ -2168,11 +2262,31 @@ def test_feedback_requests_wait_for_the_gate_and_carry_its_verdict(studio_client
     assert seen and seen[0][0] == [("STR_5", str(tmp_path / "ws" / "f0"))] and seen[0][1] == "csi300"
     assert request_msg["content"]["decision"] is False
     assert request_msg["content"]["reason"].startswith("【验收】验收：不通过") and "【Agent 原判断】接受：looks promising" in request_msg["content"]["reason"]
-    assert request_msg["content"]["new_hypothesis"] == "more of the same\n\n不要再提波动率族"
+    # The hint is rebuilt with the campaign memory: this round's verdicts, what the sample can certify, what
+    # every market has judged, and the run's statistics so far.
+    hint = request_msg["content"]["new_hypothesis"]
+    assert hint.startswith("more of the same\n\n这些是库里已有信号的变体，不要再提类似的：STR_5 ≈ RVOL_20")
+    assert "本股票池 csi300" in hint and "过验收线需要：1 日 ICIR ≥" in hint
+    assert "本次研究至今 1 轮、1 个因子：重复 1；通过率 0%，重复率 100%" in hint
+    assert hint.endswith("请提出机制不同的假设，而不是同一族的新参数。\n\n【反思备忘录（1 轮后，deepseek/deepseek-flash）】\n观察：波动率族已饱和。\n反思：…\n方向：换成交额结构。")
+    assert len(prompts) == 1 and "第 1 轮：STR_5 重复（与库里的 RVOL_20 相关 +0.90）" in prompts[0] and "本股票池 csi300" in prompts[0]
+    gate_event = [m for m in task.messages if m.get("tag") == "studio.gate"][-1]
+    assert gate_event["content"]["context"] == request_msg["gate"]["context"] and len(request_msg["gate"]["context"]) >= 2
+    memo_event = [m for m in task.messages if m.get("tag") == "studio.reflection"][-1]
+    assert memo_event["loop_id"] == 0 and memo_event["content"]["rounds"] == 1
+    assert memo_event["content"]["memo"].startswith("观察：") and memo_event["content"]["stats"]["duplicate_rate"] == 1.0
+    assert [e["tag"] for e in server.studio_events(trace_folder / "Finance Data Building/demo")] == ["studio.gate", "studio.reflection"]
     assert request_msg["content"]["hypothesis_evaluation"].startswith("【验收】验收：不通过")  # survives in the replayed history
-    assert task.messages[-1]["tag"] == "studio.gate" and task.messages[-1]["loop_id"] == 0 and task.messages[-1]["content"]["decision"] is False
+    assert gate_event["loop_id"] == 0 and gate_event["content"]["decision"] is False
+    # The verdict is written beside the trace, so a reload of the trace from RD-Agent's log brings it back.
+    persisted = server.studio_events(trace_folder / "Finance Data Building/demo")
+    assert persisted[0]["tag"] == "studio.gate" and persisted[0]["content"]["summary"] == verdict["summary"]
     server.apply_confirm_policy(task)
-    assert replies[-1]["decision"] is False and replies[-1]["new_hypothesis"].endswith("不要再提波动率族")
+    assert replies[-1]["decision"] is False and replies[-1]["new_hypothesis"] == hint
+    # On demand, the memo is written again on the same verdicts.
+    again = studio_client.post("/studio/research/reflect", json={"id": "Finance Data Building/demo"})
+    assert again.status_code == 200 and again.get_json()["memo"].startswith("观察：") and len(prompts) == 2
+    assert studio_client.post("/studio/research/reflect", json={"id": "Finance Data Building/nope"}).status_code == 404
     # Gate off: the request passes straight through.
     task.confirm = server.parse_confirm("auto", 0, gate=False)
     task.user_request_q.put({"decision": True, "reason": "r"})
@@ -2200,13 +2314,20 @@ def test_confirm_policy_answers_requests_by_mode_and_timeout(studio_client, monk
     task.confirm = server.parse_confirm(None, None, "focus on volume")
     request({"user_instruction": None})
     server.apply_confirm_policy(task)
-    assert replies[-1] == {"user_instruction": "focus on volume"} and task.messages[-1]["tag"] == "user_interaction.auto"
+    # The direction goes out with the campaign memory for the run's universe attached.
+    assert replies[-1]["user_instruction"].startswith("focus on volume\n\n研究记忆（Studio 自动附上）：\n本股票池 csi300")
+    assert task.messages[-1]["tag"] == "user_interaction.auto"
+    task.confirm = server.parse_confirm(None, None, "focus on volume", gate=False)
+    request({"user_instruction": None})
+    server.apply_confirm_policy(task)
+    assert replies[-1] == {"user_instruction": "focus on volume"}  # gate off: the direction alone
+    task.confirm = server.parse_confirm(None, None, "focus on volume")
     request({"features": {"A": "$close"}, "feature_validation_msg": ""})
     server.apply_confirm_policy(task)
     assert replies[-1] == {"A": "$close"}
     request({"hypothesis": "h", "reason": "r"})
     server.apply_confirm_policy(task)
-    assert len(replies) == 2 and task.messages[-1]["tag"] == "user_interaction.request"
+    assert len(replies) == 3 and task.messages[-1]["tag"] == "user_interaction.request"
     assert studio_client.get("/studio/attention").get_json()[0]["kind"] == "hypothesis"
     # ... until the timeout passes.
     task.messages[-1]["timestamp"] = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat()
@@ -2217,7 +2338,7 @@ def test_confirm_policy_answers_requests_by_mode_and_timeout(studio_client, monk
     task.confirm = server.parse_confirm("all", 0)
     request({"decision": True, "reason": "ok"}, (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat())
     server.apply_confirm_policy(task)
-    assert len(replies) == 3
+    assert len(replies) == 4
     task.confirm = server.parse_confirm("auto", 0)
     server.apply_confirm_policy(task)
     assert replies[-1] == {"decision": True, "reason": "ok"}
@@ -2286,3 +2407,155 @@ def test_correlation_names_the_factors_that_do_not_overlap(tmp_path: Path) -> No
     assert "A 2025-01-02→2025-01-03（如 SH600000）" in message and "B 2026-09-14→2026-09-15（如 AAPL）" in message
     with pytest.raises(ValueError, match="没有 result.h5"):
         factor_correlation([("A", tmp_path / "a"), ("C", tmp_path / "c")])
+
+
+@pytest.mark.offline
+def test_campaign_power_map_and_stats() -> None:
+    from rdagent.log.server import studio_campaign as c
+
+    # Power: 900 days, NASDAQ-like dispersion. 1-day needs ICIR 0.10 (|IC| 0.02); 20-day needs 0.30 (|IC| 0.048): unreachable.
+    rows = c.power_table(900, {1: 0.197, 20: 0.161}, members=100)
+    by = {r["horizon"]: r for r in rows}
+    assert by[1]["icir"] == pytest.approx(0.1) and by[1]["ic"] == pytest.approx(0.0197, abs=1e-4) and by[1]["reachable"] is True
+    assert by[20]["icir"] == pytest.approx(0.298, abs=1e-3) and by[20]["reachable"] is False
+    assert by[5]["std"] == pytest.approx(3.0 / 10)  # no analysed factor at that horizon: the noise-multiple fallback
+    lines = c.power_lines("nasdaq100", 900, 100, rows)
+    assert lines[0].startswith("本股票池 nasdaq100（100 只、900 个交易日）过验收线需要：1 日 ICIR ≥ 0.10（|Rank IC| 约 ≥ 0.020）")
+    assert "20 日期限要求的 |Rank IC| 超过 0.04" in lines[1] and "可确认的期限：1 日" in lines[1]
+    assert c.power_lines("x", None, 100, c.power_table(None, {}, 100)) == []
+    # Analysis-only level follows the gate's bars and the magnitude line.
+    strong = {"horizons": [{"days": 1, "residual_rank_ic": {"t": -4.0, "mean": -0.03}}]}
+    assert c.level_of(strong)[0] == "signal"
+    assert c.level_of({"horizons": [{"days": 1, "residual_rank_ic": {"t": 3.5, "mean": 0.01}}]})[0] == "weak"
+    assert c.level_of({"horizons": [{"days": 20, "residual_rank_ic": {"t": 1.0, "mean": 0.03}}]})[0] == "noise"
+    assert c.level_of(None) == (None, None, None, None)
+    # The map: a gate verdict beats an analysis level on the same market; other markets' names are listed apart.
+    records = [
+        {"name": "PV_DIV_20", "market": "csi300", "level": "weak", "t": -2.7, "horizon": 1, "source": "analysis"},
+        {"name": "PV_DIV_20", "market": "csi300", "level": "signal", "t": -4.4, "horizon": 1, "source": "gate"},
+        {"name": "PV_DIV_20", "market": "csi1000", "level": "signal", "t": -11.0, "horizon": 1, "source": "analysis"},
+        {"name": "PATH_EFF_20", "market": "csi300", "level": "noise", "t": -1.0, "horizon": 1, "source": "gate"},
+        {"name": "BETA_60", "market": "nasdaq100", "level": "noise", "t": 0.7, "horizon": 20, "source": "gate"},
+        {"name": "BROKEN", "market": "csi300", "level": "error", "t": None, "horizon": None, "source": "analysis"},
+    ]
+    mapping = c.mechanism_map(records)
+    assert mapping["PV_DIV_20"]["csi300"]["t"] == -4.4 and set(mapping["PV_DIV_20"]) == {"csi300", "csi1000"}
+    here, elsewhere = c.map_lines(mapping, "csi300")
+    assert here.startswith("本市场（csi300）已检验 3 个因子") and "PV_DIV_20：通过 t -4.4（1 日）" in here and "PATH_EFF_20：噪声 t -1.0（1 日）" in here and "BROKEN：未能判断" in here
+    assert here.index("PV_DIV_20") < here.index("PATH_EFF_20")  # strongest first
+    assert elsewhere.startswith("其他市场检验过、本市场未试的机制") and "BETA_60：nasdaq100 噪声 t 0.7（20 日）" in elsewhere and "PV_DIV_20" not in elsewhere
+    us_lines = c.map_lines(mapping, "nasdaq100")
+    assert "PV_DIV_20：csi1000 有信号 t -11.0（1 日），csi300 通过 t -4.4（1 日）" in us_lines[1]  # analysis-only vs gate pass
+    assert c.map_lines({}, "csi300") == []
+    # Campaign statistics over gate verdicts, and the memo prompt built on them.
+    gates = [
+        {"loop_id": 0, "decision": False, "factors": [{"name": "A", "level": "noise", "reasons": ["t 0.5"]}, {"name": "B", "level": "duplicate", "reasons": ["≈ RVOL"]}]},
+        {"loop_id": 1, "decision": True, "factors": [{"name": "C", "level": "signal", "reasons": ["t 5"]}, {"name": "A", "level": "weak", "reasons": ["t 2.2"]}, {"name": "D", "level": "error", "reasons": ["NaN"]}]},
+    ]
+    stats = c.campaign_stats(gates)
+    assert stats["rounds"] == 2 and stats["rounds_passed"] == 1 and stats["factors"] == 5
+    assert stats["pass_rate"] == 0.2 and stats["duplicate_rate"] == 0.2 and stats["noise_rate"] == 0.4 and stats["error_rate"] == 0.2
+    assert stats["reproposed"] == ["A"] and stats["signals"] == ["C"]
+    line = c.stats_lines(stats)[0]
+    assert line.startswith("本次研究至今 2 轮、5 个因子：") and "通过率 20%，重复率 20%，噪声率 40%，实现失败率 20%" in line and "重提过的名字：A" in line
+    assert c.stats_lines(c.campaign_stats([])) == []
+    prompt = c.reflection_prompt(stats, gates, ["记忆行"], "量能结构")
+    assert "研究方向：量能结构" in prompt and "第 1 轮：A 噪声（t 0.5）；B 重复（≈ RVOL）" in prompt and "记忆行" in prompt and "不得引用回测收益" in prompt
+
+
+@pytest.mark.offline
+def test_tested_records_join_library_copies_and_gate_verdicts(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    task = server.rdagent_processes[str(trace_folder / "Finance Data Building/demo")]
+    library = [{"name": "STR_5", "market": "csi300", "trace": "Finance Data Building/demo", "loop_id": 0,
+                "analysis": {"horizons": [{"days": 1, "residual_rank_ic": {"t": -2.5, "mean": -0.02}}]}, "analysis_error": None},
+               {"name": "DEAD", "market": "csi300", "trace": "Finance Data Building/demo", "loop_id": 0, "analysis": None, "analysis_error": "all NaN"}]
+    monkeypatch.setattr(studio_module, "REFRESH_ROOT", tmp_path / "traces" / "studio_refresh")
+    copy = studio_module.refresh_dir("Finance Data Building/demo", 0, "STR_5", "csi1000")
+    copy.mkdir(parents=True)
+    (copy / "result.h5").write_bytes(b"")
+    (copy / "studio_analysis.csi1000.json").write_text(json.dumps({"status": "completed", "version": studio_module.ANALYSIS_VERSION,
+        "source_mtime": (copy / "result.h5").stat().st_mtime, "horizons": [{"days": 1, "residual_rank_ic": {"t": -6.0, "mean": -0.03}}]}))
+    task.messages.append({"tag": "studio.gate", "timestamp": "t", "loop_id": 0, "content": {"market": "csi300", "decision": False,
+                          "factors": [{"name": "STR_5", "level": "duplicate", "t": -2.5, "horizon": 1, "ic": -0.02}]}})
+    with server.app.app_context():
+        records = studio_module.tested_records(server.rdagent_processes, trace_folder, library)
+    keyed = {(r["name"], r["market"], r["source"]): r for r in records}
+    assert keyed[("STR_5", "csi300", "analysis")]["level"] == "weak"
+    assert keyed[("STR_5", "csi1000", "analysis")]["level"] == "signal" and keyed[("STR_5", "csi1000", "analysis")]["t"] == -6.0
+    assert keyed[("STR_5", "csi300", "gate")]["level"] == "duplicate"
+    assert keyed[("DEAD", "csi300", "analysis")]["level"] == "error"
+    with server.app.app_context():
+        lines = studio_module.campaign_context(server.rdagent_processes, trace_folder, "csi1000", library=library)
+    assert any(l.startswith("本股票池 csi1000") for l in lines)
+    assert any("本市场（csi1000）已检验 1 个因子" in l and "STR_5：有信号 t -6.0" in l for l in lines)
+    assert any("其他市场检验过" in l and "DEAD：csi300 未能判断" in l for l in lines)
+
+
+@pytest.mark.offline
+def test_gate_verdicts_recovered_from_feedback_text() -> None:
+    from rdagent.log.server import studio_campaign as c
+
+    text = ("【验收】验收（确定性规则，不经 LLM）：通过。LIMIT_TOUCH_NET_20：通过（与 MAX_RET_20D 相关 +0.57，增量有限；t 值 -15.86，Rank IC -0.0399（1 日）；在 csi300 上复现（t -6.87））；"
+            "DRY_DAYS_20_60：偏弱（t 值 3.02（1 日）但 Rank IC 只有 +0.0123，量级不到 0.02，付不起自己的换手）；RET_LAG：噪声（市值中性 Rank IC 的 t 值 -0.86（20 日，线 1.5），与零区分不开）；"
+            "X：重复（与库里的 RVOL_20 相关 -0.85，是同一个信号的变体）。\nThe hypothesis is partially supported…")
+    parsed = c.parse_gate_summary(text)
+    assert parsed["decision"] is True and parsed["recovered"] is True and [f["level"] for f in parsed["factors"]] == ["signal", "weak", "noise", "duplicate"]
+    first = parsed["factors"][0]
+    assert first == {"name": "LIMIT_TOUCH_NET_20", "level": "signal", "t": -15.86, "horizon": 1, "ic": -0.0399, "nearest": "MAX_RET_20D", "corr": 0.57,
+                     "t2": -6.87, "replicated": True, "reasons": ["与 MAX_RET_20D 相关 +0.57，增量有限", "t 值 -15.86，Rank IC -0.0399（1 日）", "在 csi300 上复现（t -6.87）"]}
+    assert parsed["factors"][2]["horizon"] == 20 and parsed["factors"][3]["corr"] == -0.85 and parsed["factors"][3]["t"] is None
+    assert c.parse_gate_summary("The hypothesis is supported.") is None and c.parse_gate_summary("") is None
+    # gate_records: persisted events win; rounds without one are recovered from their feedback; loop order.
+    messages = [
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "1", "content": {"hypothesis_evaluation": text}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "0", "content": {"hypothesis_evaluation": "no verdict here"}},
+        {"tag": "studio.gate", "loop_id": 2, "content": {"decision": False, "market": "csi1000", "factors": [{"name": "Z", "level": "noise"}]}},
+        {"tag": "feedback.hypothesis_feedback", "loop_id": "2", "content": {"hypothesis_evaluation": text}},
+    ]
+    gates = c.gate_records(messages, "csi1000")
+    assert [g["loop_id"] for g in gates] == [1, 2] and gates[0]["market"] == "csi1000" and gates[0]["recovered"] is True
+    assert gates[1]["factors"] == [{"name": "Z", "level": "noise"}] and "recovered" not in gates[1]
+
+
+@pytest.mark.offline
+def test_review_gaps_memory_route_submit_branch_replay_and_reflection_failure(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_llm
+
+    trace_folder = server.app.config["LOG_FOLDER_PATH"]
+    # GET /studio/memory: the lines a run on the market would start with; the market is validated.
+    data = studio_client.get("/studio/memory?market=csi300").get_json()
+    assert data["market"] == "csi300" and any(line.startswith("本股票池 csi300") for line in data["lines"])
+    assert studio_client.get("/studio/memory?market=../x").status_code == 400
+    # A hand-written direction submitted through /user_interaction/submit gets the memory attached too.
+    task = server.rdagent_processes[str(trace_folder / "Finance Data Building/demo")]
+    replies = []
+    task.user_response_q = type("Q", (), {"put": lambda self, payload, **k: replies.append(payload)})()
+    task.messages.append({"tag": "user_interaction.request", "timestamp": "2026-09-19T00:00:00+00:00", "content": {"user_instruction": None}})
+    assert studio_client.post("/user_interaction/submit", json={"id": "Finance Data Building/demo", "payload": {"user_instruction": "看成交额结构"}}).status_code == 200
+    assert replies[-1]["user_instruction"].startswith("看成交额结构\n\n研究记忆（Studio 自动附上）：") and task.confirm["instruction"] == "看成交额结构"
+    # Persisted events come back when the trace is reloaded from RD-Agent's log.
+    folder = trace_folder / "Finance Data Building/demo"
+    server.record_event(task, {"tag": "studio.gate", "timestamp": "t", "loop_id": 0, "content": {"decision": True, "factors": [], "market": "csi300"}})
+    monkeypatch.setattr(server, "FileStorage", lambda path: type("FS", (), {"iter_msg": lambda self: iter([])})())
+    monkeypatch.setattr(server, "WebStorage", lambda **k: None)
+    server.read_trace(folder, id=str(folder))
+    reloaded = server.rdagent_processes[str(folder)].messages
+    assert [m["tag"] for m in reloaded if m["tag"] == "studio.gate"] == ["studio.gate"] and reloaded[0]["content"]["decision"] is True
+    # A reflection whose model call fails is recorded on the verdict and does not raise.
+    monkeypatch.setattr(studio_llm, "complete", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("quota")))
+    with pytest.raises(RuntimeError):
+        server.reflect(task, "csi300", [{"loop_id": 0, "decision": False, "factors": []}], [], 0)
+    # OpenCode mirror without /v1: the Anthropic-format endpoint is still named in full, and the model list
+    # is fetched from the gateway root rather than the model's endpoint.
+    r = studio_llm.resolve({"provider": "opencode", "model": "qwen3.8-max", "base_url": "https://mirror.example"})
+    assert r["base_url"] == "https://mirror.example/v1/messages" and r["gateway_base"] == "https://mirror.example"
+    r = studio_llm.resolve({"provider": "opencode", "model": "qwen3.8-max", "base_url": "https://mirror.example/v1/"})
+    assert r["base_url"] == "https://mirror.example/v1/messages"
+    # Only failures that come from the signal itself are permanent; a transient one is retried.
+    assert studio_module.permanent_failure("factor has no valid values: all 10 rows are NaN") and not studio_module.permanent_failure("HDF5 file locked")
+    ws = tmp_path / "ws" / "f0"
+    (ws / "studio_analysis.csi300.json").write_text(json.dumps({"status": "failed", "source_mtime": (ws / "result.h5").stat().st_mtime, "error": "HDF5 file locked"}))
+    assert studio_module.failed_analysis(ws, "csi300") is None
+    (ws / "studio_analysis.csi300.json").write_text(json.dumps({"status": "failed", "source_mtime": (ws / "result.h5").stat().st_mtime, "error": "factor has no observations inside csi300"}))
+    assert studio_module.failed_analysis(ws, "csi300").startswith("factor has no observations")

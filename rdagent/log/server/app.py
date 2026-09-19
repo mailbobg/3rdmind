@@ -302,10 +302,52 @@ def default_reply(content, instruction: str = ""):
     return content
 
 
+# A reflection memo is written after every this many gated rounds (0 turns it off), and on demand.
+try:
+    REFLECT_EVERY = int(os.environ.get("STUDIO_REFLECT_EVERY", "3") or 0)
+except ValueError:
+    REFLECT_EVERY = 3
+
+
+def reflect(task: RDAgentTask, market: str, gates: list[dict], context: list[str], loop_id) -> dict:
+    """Write the campaign's reflection memo with the configured model and record it as a studio.reflection
+    event: what the verdicts so far show, why, and where the next hypotheses should go. Raises on failure."""
+    from rdagent.log.server import studio_campaign
+
+    stats = studio_campaign.campaign_stats(gates)
+    prompt = studio_campaign.reflection_prompt(stats, gates, context, task.confirm.get("instruction", ""))
+    # Reasoning models think before they write; the budget covers both.
+    memo = studio_llm.complete(prompt, system="你是严格的量化研究复盘人，只依据给出的判定和统计写结论，不引用回测收益，不建议放宽标准。", max_tokens=8000, timeout=300)
+    event = {"tag": "studio.reflection", "timestamp": datetime.now(timezone.utc).isoformat(), "loop_id": loop_id,
+             "content": {"market": market, "rounds": stats["rounds"], "stats": stats, "memo": memo, "model": (studio_llm.resolve() or {}).get("model")}}
+    record_event(task, event)
+    return event["content"]
+
+
+def research_instruction(task: RDAgentTask) -> str:
+    """The run's research direction plus the campaign memory for its universe (what this sample can
+    certify, what every market has judged), so the first hypothesis already knows what not to try."""
+    instruction = task.confirm.get("instruction", "")
+    if not task.confirm.get("gate", True):
+        return instruction
+    try:
+        from rdagent.log.server.studio import campaign_context, run_market
+
+        lines = campaign_context(rdagent_processes, log_folder_path, run_market(task_trace(task)))
+    except Exception:  # noqa: BLE001 - the direction alone is still a valid instruction
+        app.logger.exception("campaign context failed")
+        return instruction
+    if not lines:
+        return instruction
+    return (instruction + "\n\n" if instruction else "") + "研究记忆（Studio 自动附上）：\n" + "\n".join(lines)
+
+
 def auto_answer(task: RDAgentTask, message: dict, why: str) -> None:
     """Continue a pending request as proposed, and record that the Studio did so and why."""
     try:
-        task.user_response_q.put(default_reply(message.get("content"), task.confirm.get("instruction", "")), block=False)
+        content = message.get("content")
+        instruction = research_instruction(task) if request_kind(content) == "instruction" else task.confirm.get("instruction", "")
+        task.user_response_q.put(default_reply(content, instruction), block=False)
     except Exception:  # noqa: BLE001
         app.logger.exception("Failed to auto-answer a user request")
         return
@@ -395,6 +437,41 @@ def _drain_user_requests_into_messages(task: RDAgentTask) -> None:
 GATED_SCENARIOS = ("Finance Data Building", "Finance Whole Pipeline")
 
 
+STUDIO_EVENTS = "studio-events.jsonl"
+
+
+_EVENTS_LOCK = threading.Lock()  # the gate thread and a reflect request may write the same file
+
+
+def record_event(task: RDAgentTask, event: dict) -> None:
+    """Append a Studio-made event (a gate verdict, a reflection) to the task's messages and to
+    ``studio-events.jsonl`` beside the trace, so it is still there after the server reloads the trace from
+    RD-Agent's own log. One line per event, written whole, under a lock."""
+    task.messages.append(event)
+    try:
+        line = (json.dumps(event, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+        folder = log_folder_path / task_trace(task)
+        folder.mkdir(parents=True, exist_ok=True)
+        with _EVENTS_LOCK, (folder / STUDIO_EVENTS).open("ab") as handle:
+            handle.write(line)
+    except (OSError, ValueError, TypeError):
+        app.logger.exception("could not persist a studio event")
+
+
+def studio_events(folder: Path) -> list[dict]:
+    """The Studio's persisted events of a trace folder, in the order they were written."""
+    path = folder / STUDIO_EVENTS
+    if not path.is_file():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
 def task_trace(task: RDAgentTask) -> str:
     """``scenario/name`` of a task; tasks loaded from disk carry it only in their trace path."""
     if task.scenario and task.trace_name:
@@ -429,7 +506,7 @@ def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> N
     verdict as a ``studio.gate`` event for the round view. Any failure leaves the agent's proposal as is.
     """
     from rdagent.log.server import studio_gate
-    from rdagent.log.server.studio import analyze_factor, factor_correlation, factor_library, factor_workspace, rank_ic_t, refresh_dir, run_market, run_refresh
+    from rdagent.log.server.studio import analyze_factor, campaign_context, factor_correlation, factor_library, factor_workspace, refresh_dir, run_market, run_refresh
 
     trace = task_trace(task)
     gate: dict = {"skipped": "no factor round"}
@@ -446,11 +523,13 @@ def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> N
                 for f in factor_library(rdagent_processes, log_folder_path):
                     if f.get("market") != market or not f.get("analysis") or (f["trace"] == trace and f["loop_id"] == round_["loop_id"]):
                         continue
-                    t = rank_ic_t(f["analysis"])
-                    if t is None or abs(t) < studio_gate.T_WEAK:
+                    # Membership follows the same horizon-aware bar the verdict uses, so a factor that only
+                    # clears it at 10 or 20 days still counts as library signal.
+                    t, horizon, _ = studio_gate.best_stats(f["analysis"])
+                    if t is None or abs(t) < studio_gate.bar(studio_gate.T_WEAK_BY_HORIZON, horizon):
                         continue
                     try:
-                        library.append((f["name"], str(factor_workspace(f["trace"], f["loop_id"], f["name"])), abs(t)))
+                        library.append((f["name"], str(factor_workspace(f["trace"], f["loop_id"], f["name"])), abs(t) / studio_gate.bar(studio_gate.T_SIGNAL_BY_HORIZON, horizon)))
                     except (ValueError, KeyError, IndexError):
                         continue
                 library.sort(key=lambda x: -x[2])
@@ -469,6 +548,18 @@ def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> N
                 gate = studio_gate.gate_round(factors, market, library, analyze=lambda path, m: analyze_factor(Path(path), m),
                                               correlate=factor_correlation, replicate=replicate, families=families, existing=existing)
                 gate["loop_id"] = round_["loop_id"]
+                # The campaign memory is built after the verdict so this round's analyses are in it; the
+                # hint is rebuilt with it (what every market has judged, what this sample can certify, how
+                # the run is going).
+                try:
+                    from rdagent.log.server.studio_campaign import gate_records
+
+                    gates = [g for g in gate_records(task.messages, market) if g["loop_id"] != round_["loop_id"]] + [gate]
+                    gate["context"] = campaign_context(rdagent_processes, log_folder_path, market, gates=gates)
+                    gate["hint"] = studio_gate.next_hint(gate["factors"], families, existing, gate["context"])
+                except Exception:  # noqa: BLE001 - memory is an extra; the verdict stands without it
+                    app.logger.exception("campaign context failed")
+                    gates = None
                 content = dict(msg.get("content") or {})
                 original = content.get("decision")
                 content["decision"] = gate["decision"]
@@ -478,8 +569,18 @@ def gate_feedback(task: RDAgentTask, msg: dict, wait_seconds: float = 60.0) -> N
                 # last round's reason and new_hypothesis, so the verdict also goes where it stays visible.
                 content["hypothesis_evaluation"] = f"【验收】{gate['summary']}\n{content.get('hypothesis_evaluation') or ''}".strip()
                 msg["content"] = content
-                task.messages.append({"tag": "studio.gate", "timestamp": datetime.now(timezone.utc).isoformat(),
-                                      "loop_id": round_["loop_id"], "content": gate})
+                record_event(task, {"tag": "studio.gate", "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "loop_id": round_["loop_id"], "content": gate})
+                # Every REFLECT_EVERY rounds the memo is written on the verdicts so far, and its direction
+                # goes to the agent after the hint.
+                if gates and REFLECT_EVERY and len(gates) % REFLECT_EVERY == 0:
+                    try:
+                        memo = reflect(task, market, gates, gate.get("context") or [], round_["loop_id"])
+                        content["new_hypothesis"] += f"\n\n【反思备忘录（{len(gates)} 轮后，{memo.get('model') or ''}）】\n{memo['memo']}"
+                        gate["reflection"] = True
+                    except Exception as error:  # noqa: BLE001 - the memo is advice; the loop goes on without it
+                        app.logger.exception("reflection failed")
+                        gate["reflection"] = f"failed: {str(error)[:200]}"
     except Exception as error:  # noqa: BLE001 - the agent's own verdict stands
         app.logger.exception("factor gate failed")
         gate = {"error": str(error)[:300]}
@@ -551,6 +652,11 @@ def read_trace(log_path: Path, id: str = "") -> None:
             else:
                 task.messages.append(data["msg"])
                 last_timestamp = msg.timestamp
+
+    # The Studio's own events (gate verdicts, reflections) are written beside the trace; the round views
+    # group by loop_id, so they can follow the loop's own messages.
+    for event in studio_events(log_path):
+        task.messages.append(event)
 
     now = datetime.now(timezone.utc)
     if last_timestamp and (now - last_timestamp).total_seconds() > 1800:
@@ -963,6 +1069,10 @@ def submit_user_interaction_response():
         # which the loop would take as the answer to its next question.
         return jsonify({"error": "这个确认已经处理过了", "answered": True}), 409
 
+    if request_kind(pending.get("content")) == "instruction" and isinstance(payload, dict) and task.confirm.get("gate", True):
+        # A hand-written direction gets the same campaign memory the policy would have attached.
+        task.confirm["instruction"] = str(payload.get("user_instruction") or "")
+        payload = {**payload, "user_instruction": research_instruction(task)}
     try:
         task.user_response_q.put(payload, block=False)
     except Exception:
@@ -1140,6 +1250,31 @@ def default_strategy_instruction(strategy, members):
     return (f"当前策略「{strategy['name']}」由这些因子组成并作为基础特征参与训练：{', '.join(members)}。"
             "请寻找与它们低相关、能提供增量信息的新因子，不要重新实现或微调这些已有因子；"
             "评估时以加入后组合的年化超额收益和回撤改善为准。")
+
+
+@app.route("/studio/research/reflect", methods=["POST"])
+def reflect_now():
+    """Write the reflection memo for a trace now (``{"id": "<scenario>/<name>"}``), on its gate verdicts
+    so far; the memo is recorded with the trace and returned."""
+    from rdagent.log.server.studio import campaign_context, run_market
+    from rdagent.log.server.studio_campaign import gate_records
+
+    data = request.get_json(silent=True) or {}
+    trace_id = str(data.get("id") or "")
+    task = rdagent_processes.get(str(log_folder_path / trace_id)) if trace_id else None
+    if task is None:
+        return jsonify({"error": "这条研究没有加载"}), 404
+    market = run_market(trace_id)
+    gates = gate_records(task.messages, market)
+    if not gates:
+        return jsonify({"error": "这条研究还没有验收判定，没有可反思的材料"}), 400
+    try:
+        context = campaign_context(rdagent_processes, log_folder_path, market, gates=gates)
+        memo = reflect(task, market, gates, context, gates[-1].get("loop_id"))
+    except Exception as error:  # noqa: BLE001
+        app.logger.exception("reflection failed")
+        return jsonify({"error": str(error).splitlines()[0][:300]}), 502
+    return jsonify(memo), 200
 
 
 @app.route("/control", methods=["POST"])

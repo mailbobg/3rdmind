@@ -64,6 +64,22 @@ export function ResearchPage() {
   // The form's universe must belong to this workspace; fall back to its first one (e.g. nasdaq100 for US).
   useEffect(() => { if (universes.length && !universes.some((u) => u.market === form.market)) setForm((f) => ({ ...f, market: universes[0].market })); }, [universes]); // eslint-disable-line react-hooks/exhaustive-deps
   const chosenUniverse = universes.find((u) => u.market === form.market);
+  const [memory, setMemory] = useState<{ market: string; lines: string[] } | null>(null);
+  useEffect(() => {
+    if (!form.scenario.startsWith("Finance") || !form.market) { setMemory(null); return; }
+    let live = true;
+    setMemory(null);
+    studio.researchMemory(form.market).then((m) => { if (live) setMemory(m); }).catch(() => { if (live) setMemory({ market: form.market, lines: [] }); });
+    return () => { live = false; };
+  }, [form.market, form.scenario]);
+  // 反思备忘录 on demand: written on the run's gate verdicts so far, then the trace refreshes to show it.
+  const [reflecting, setReflecting] = useState(false);
+  const reflectNow = async () => {
+    if (!trace.traceId) return;
+    setReflecting(true);
+    try { await studio.reflectResearch(trace.traceId); await trace.refresh(); } catch (e) { trace.setError(errorText(e)); } finally { setReflecting(false); }
+  };
+  const canReflect = !!trace.traceId && trace.events.some((e) => e.tag === "studio.gate");
   const [files, setFiles] = useState<File[]>([]);
   const [roundId, setRoundId] = useState("");
   const [predictionLoops, setPredictionLoops] = useState<Set<number>>(new Set());
@@ -282,6 +298,14 @@ export function ResearchPage() {
             </Section>
           )}
           {form.objective.trim() && mode.objective && <Section title={t("研究方向")}><p className="m-0 text-xs">{form.objective}</p></Section>}
+          {mode.objective && form.scenario.startsWith("Finance") && (
+            <Section title={t("研究记忆")} note={memory ? t("随研究方向一起发给 Agent") : t("加载中…")}>
+              {memory && memory.lines.length ? (
+                <div className="flex flex-col gap-1">{memory.lines.map((line, i) => <p key={i} className="m-0 text-[11px] text-muted" style={{ wordBreak: "break-word" }}>{line}</p>)}</div>
+              ) : memory ? <Hint>{t("这个股票池还没有任何检验记录。")}</Hint> : null}
+              <Hint>{t("这个股票池的样本能确认什么（各期限过验收线需要的 ICIR 与 |Rank IC|），以及所有市场已检验过的机制和判定。每轮验收后会更新并随提示再发一次。")}</Hint>
+            </Section>
+          )}
         </div>
       ) : (
         <div className="flex flex-col gap-3">
@@ -296,6 +320,9 @@ export function ResearchPage() {
           )}
           {trace.traceId && (progress.length > 0 || trace.active) && <LiveStatus traceId={trace.traceId} events={trace.events} running={trace.active} waiting={!!trace.interaction} roundId={activeRound?.id ?? null}
             confirm={summaries.find((x) => x.id === trace.traceId)?.confirm} autoAnswered={summaries.find((x) => x.id === trace.traceId)?.auto_answered} />}
+          {canReflect && !trace.interaction && (
+            <div className="mm-row"><Btn disabled={reflecting} onClick={reflectNow}>{reflecting ? t("模型写备忘录中…") : t("现在反思")}</Btn><span className="text-[11px] text-muted">{t("按到现在为止的验收判定写一份反思备忘录（每 3 轮也会自动写一次）。")}</span></div>
+          )}
           {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} testDays={env?.test_window?.days} /> : <Hint>{t("在左侧展开一个实验，点一轮查看假设、评估与代码。")}</Hint>}
         </div>
       )}

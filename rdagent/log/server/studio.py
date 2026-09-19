@@ -39,7 +39,6 @@ WORKSPACE_ROOT = Path(RD_AGENT_SETTINGS.workspace_path).resolve()
 PREFILTER_NOISE_RANK_IC = 0.005
 PREFILTER_NOISE_ICIR = 0.05
 # Rank IC t statistic below which a factor is noise; analyses without days/t fall back to the two bars above.
-PREFILTER_NOISE_T = 2.0
 PREFILTER_DUPLICATE_CORR = 0.7
 
 
@@ -215,6 +214,32 @@ def cached_analysis(workspace, market):
     return data
 
 
+def failed_analysis(workspace, market):
+    """The error of a stored analysis that failed on the current result.h5, or None: the factor produced
+    nothing the analysis could use (all NaN, no names inside the universe), which no re-run will change until
+    the signal is recomputed."""
+    path = analysis_cache_path(workspace, market)
+    source = Path(workspace) / "result.h5"
+    if not path.is_file() or not source.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except ValueError:
+        return None
+    if data.get("status") == "failed" and data.get("source_mtime") == source.stat().st_mtime and permanent_failure(data.get("error")):
+        return str(data.get("error"))
+    return None
+
+
+# Analysis errors that come from the signal itself and will not change on a retry; anything else (a data
+# directory not built yet, a timeout) is left for the next run.
+PERMANENT_FAILURES = ("no valid values", "no observations inside", "must be (datetime, instrument)", "share no observations")
+
+
+def permanent_failure(error) -> bool:
+    return any(mark in str(error or "") for mark in PERMANENT_FAILURES)
+
+
 def refresh_dir(trace, loop_id, name, market=None):
     """Where a factor's recomputed signal lives. The copy on the universe it was researched on keeps the
     original folder; a copy computed on another universe (a cross-universe backtest, the gate's replication)
@@ -273,6 +298,82 @@ def run_refresh(code_path, name, out_dir, market="csi300"):
     return data
 
 
+def tested_records(registry, log_folder, library=None):
+    """Every (factor, market) judgement the Studio holds, for the campaign memory: each library factor's
+    analysis on its own universe and on every universe it was copied to, plus the gate's verdicts (which
+    carry duplicate / replication information the analysis alone cannot)."""
+    from rdagent.log.server import studio_campaign
+
+    library = factor_library(registry, log_folder) if library is None else library
+    records = []
+    markets_by_region = {}
+    for record in studio_markets.universes():
+        markets_by_region.setdefault(record["region"], []).append(record["market"])
+    for f in library:
+        own = f.get("market")
+        level, t, horizon, ic = studio_campaign.level_of(f.get("analysis"))
+        if level:
+            records.append({"name": f["name"], "market": own, "level": level, "t": t, "horizon": horizon, "ic": ic,
+                            "trace": f["trace"], "loop_id": f["loop_id"], "source": "analysis"})
+        elif f.get("analysis_error"):
+            records.append({"name": f["name"], "market": own, "level": "error", "t": None, "horizon": None, "ic": None,
+                            "trace": f["trace"], "loop_id": f["loop_id"], "source": "analysis"})
+        for market in markets_by_region.get(studio_markets.region_of(own), []):
+            if market == own:
+                continue
+            copy = refresh_dir(f["trace"], f["loop_id"], f["name"], market)
+            level, t, horizon, ic = studio_campaign.level_of(cached_analysis(copy, market)) if (copy / "result.h5").is_file() else (None, None, None, None)
+            if level:
+                records.append({"name": f["name"], "market": market, "level": level, "t": t, "horizon": horizon, "ic": ic,
+                                "trace": f["trace"], "loop_id": f["loop_id"], "source": "analysis"})
+    root = Path(log_folder)
+    for key, task in registry.items():
+        try:
+            trace = Path(key).relative_to(root).as_posix()
+        except ValueError:
+            continue
+        for gate in studio_campaign.gate_records(task.messages, run_market(trace)):
+            for v in gate.get("factors") or []:
+                records.append({"name": v["name"], "market": gate.get("market"), "level": v["level"], "t": v.get("t"),
+                                "horizon": v.get("horizon"), "ic": v.get("ic"), "trace": trace, "loop_id": gate.get("loop_id"), "source": "gate"})
+    return records
+
+
+def market_days(library, market):
+    """How many trading days the single-factor analyses on ``market`` cover (their median), else the
+    universe's calendar from the refresh start; None when neither is known."""
+    days = sorted(int(f["analysis"]["days"]) for f in library if f.get("market") == market and f.get("analysis") and f["analysis"].get("days"))
+    if days:
+        return days[len(days) // 2]
+    try:
+        record = studio_markets.universe(market)
+    except ValueError:
+        return None
+    calendar = Path(record["provider_uri"]) / "calendars" / "day.txt"
+    if not calendar.is_file():
+        return None
+    start = os.environ.get("STUDIO_REFRESH_START", "2022-10-10")
+    return sum(1 for d in calendar.read_text().splitlines() if d.strip() >= start) or None
+
+
+def campaign_context(registry, log_folder, market, library=None, gates=None):
+    """The memory lines handed to the agent: this universe's power, the tested-mechanism map and, with
+    ``gates`` (a run's verdicts so far), the campaign statistics."""
+    from rdagent.log.server import studio_campaign
+
+    library = factor_library(registry, log_folder) if library is None else library
+    try:
+        members = studio_markets.universe(market).get("members")
+    except ValueError:
+        members = None
+    days = market_days(library, market)
+    lines = studio_campaign.power_lines(market, days, members, studio_campaign.power_table(days, studio_campaign.market_ic_std(library, market), members))
+    lines += studio_campaign.map_lines(studio_campaign.mechanism_map(tested_records(registry, log_folder, library)), market)
+    if gates:
+        lines += studio_campaign.stats_lines(studio_campaign.campaign_stats(gates))
+    return lines
+
+
 def factor_library(registry, log_folder):
     """Every factor with a workspace across all loaded traces, newest trace first."""
     root = Path(log_folder)
@@ -295,7 +396,9 @@ def factor_library(registry, log_folder):
                 detail = round_ctx["tasks"].get(name) or task_fallback(registry, name)
                 refreshed = refreshed_meta(trace, round_["loop_id"], name)
                 effective = refresh_dir(trace, round_["loop_id"], name) if refreshed else workspace
-                analysis = cached_analysis(effective, market) if refreshed or WORKSPACE_ROOT in workspace.parents else None
+                readable = refreshed or WORKSPACE_ROOT in workspace.parents
+                analysis = cached_analysis(effective, market) if readable else None
+                analysis_error = failed_analysis(effective, market) if readable and analysis is None else None
                 entries.append({
                     "trace": trace, "loop_id": round_["loop_id"], "name": name, "market": market,
                     "description": detail.get("description"), "formulation": detail.get("formulation"),
@@ -304,6 +407,7 @@ def factor_library(registry, log_folder):
                     "decision": round_ctx["decision"], "reason": round_ctx["reason"],
                     "metrics": round_["metrics"], "code": code,
                     "analysis": analysis,
+                    "analysis_error": analysis_error,
                     "refreshed": refreshed,
                     "coverage": ({"start": refreshed["start"], "end": refreshed["end"]} if refreshed
                                  else analysis.get("coverage") if analysis else None),
@@ -332,11 +436,11 @@ def analyze_factor(workspace, market):
     if not output.is_file():
         raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "analysis produced no output")
     data = json.loads(output.read_text())
-    if data.get("status") != "completed":
-        raise RuntimeError(data.get("error") or "analysis failed")
     data["source_mtime"] = (Path(workspace) / "result.h5").stat().st_mtime
     data["version"] = ANALYSIS_VERSION
     output.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False))
+    if data.get("status") != "completed":
+        raise RuntimeError(data.get("error") or "analysis failed")
     return data
 
 
@@ -404,6 +508,37 @@ def signal_stats(analysis):
     return t, horizon, ic, studio_gate.bar(studio_gate.T_WEAK_BY_HORIZON, horizon), studio_gate.bar(studio_gate.T_SIGNAL_BY_HORIZON, horizon)
 
 
+LIBRARY_PICK_LIMIT = 8  # candidates the screen keeps ticked when it picks from the whole library
+
+
+def own_workspace(factor):
+    """The workspace of a resolved factor's signal on the universe it was researched on."""
+    trace, loop_id, name = factor.get("trace") or "", factor.get("loop_id"), factor["name"]
+    try:
+        return factor_workspace(trace, loop_id, name)
+    except (ValueError, KeyError, TypeError):
+        return Path(factor["path"])
+
+
+def unanalysed_copies(resolved, market):
+    """Analysis jobs the pre-search screen leaves behind, as ``[(factor, market)]``: a factor whose copy on
+    ``market`` exists but has no current analysis there (the screen judged it by another universe's numbers),
+    and a factor that has no analysis on its own universe at all (the screen let it through unjudged). A
+    signal whose analysis already failed on this file is not retried."""
+    out = []
+    for f in resolved:
+        if f.get("kind", "factor") != "factor":
+            continue
+        own = run_market(f.get("trace") or "")
+        path = Path(f["path"])
+        if market and market != own and "recompute_for" not in f:
+            if cached_analysis(path, market) is None and failed_analysis(path, market) is None:
+                out.append((f, market))
+        elif cached_analysis(path, own) is None and failed_analysis(path, own) is None:
+            out.append((f, own))
+    return out
+
+
 def apply_search_prefilter(resolved, market=None):
     """Cheap pre-search filter over resolved factors (no backtest, no LLM call), judged the way the gate judges.
 
@@ -424,12 +559,16 @@ def apply_search_prefilter(resolved, market=None):
         target = market or own
         analysis, judged_on = cached_analysis(Path(factor["path"]), target), target
         if analysis is None and target != own:
-            analysis, judged_on = cached_analysis(Path(factor["path"]), own), own
+            # The path is the copy on the target universe when one exists; the own-universe numbers live
+            # with the original signal.
+            analysis, judged_on = cached_analysis(own_workspace(factor), own), own
+        failure = None if analysis is not None else (failed_analysis(Path(factor["path"]), target) or failed_analysis(own_workspace(factor), own))
         t, horizon, ic, t_weak, t_signal = signal_stats(analysis)
         rank_ic = ic if ic is not None else ((analysis.get("rank_ic") or {}).get("mean") if analysis else None)
         icir = (analysis.get("rank_ic") or {}).get("ir") if analysis else None
         scored.append({"factor": factor, "rank_ic": rank_ic, "icir": 0.0 if icir is None else abs(icir), "t": t, "horizon": horizon,
-                       "t_weak": t_weak, "t_signal": t_signal, "judged_on": judged_on, "target": target, "analyzed": analysis is not None})
+                       "t_weak": t_weak, "t_signal": t_signal, "judged_on": judged_on, "target": target, "analyzed": analysis is not None,
+                       "failure": failure})
     # Weak-signal test first, so the reason names the real problem even for a factor that
     # would also duplicate a stronger one.
     candidates, excluded = [], []
@@ -442,6 +581,9 @@ def apply_search_prefilter(resolved, market=None):
         return f"，按 {entry['judged_on']} 的数" if entry["judged_on"] != entry["target"] else ""
 
     for entry in scored:
+        if entry["failure"]:
+            excluded.append({**ref(entry["factor"]), "reason": f"没有产出可用的值（{entry['failure']}）：这个实现算不出信号，不是弱信号"})
+            continue
         if not entry["analyzed"]:
             candidates.append(entry)
             continue
@@ -455,16 +597,31 @@ def apply_search_prefilter(resolved, market=None):
             excluded.append({**ref(entry["factor"]), "reason": f"信号太弱（{why}）：先在因子库看单因子分析，达标再参与搜索"})
             continue
         candidates.append(entry)
-    # Strongest first (how far |t| clears its own horizon's bar), so a duplicate always loses to the better factor.
-    candidates.sort(key=lambda e: (-((abs(e["t"]) / e["t_signal"]) if e["t"] is not None else e["icir"]), e["factor"]["name"]))
-    try:
-        corr = factor_correlation([(e["factor"]["name"], Path(e["factor"]["path"])) for e in candidates])
-    except Exception:  # noqa: BLE001 -- unreadable workspaces just skip the duplicate check
-        corr = None
-    index = {name: i for i, name in enumerate(corr["names"])} if corr else {}
+    # Strongest first (how far |t| clears its own horizon's bar), so a duplicate always loses to the better
+    # factor; numbers measured on the search's own universe rank ahead of numbers borrowed from another.
+    candidates.sort(key=lambda e: (e["judged_on"] != e["target"], -((abs(e["t"]) / e["t_signal"]) if e["t"] is not None else e["icir"]), e["factor"]["name"]))
+    # Correlation only makes sense between signals on the same universe: the copies on the search's universe
+    # form one group, candidates still to be recomputed there sit with their own universe's signals. Pairs
+    # across groups go unchecked (noted on the row).
+    def signal_universe(entry):
+        return entry["factor"].get("recompute_for") and run_market(entry["factor"].get("trace") or "") or entry["target"] or "own"
+
+    groups = {}
+    for entry in candidates:
+        groups.setdefault(signal_universe(entry), []).append(entry)
+    corr_by_group, index_by_group = {}, {}
+    for universe, members in groups.items():
+        try:
+            corr = factor_correlation([(e["factor"]["name"], Path(e["factor"]["path"])) for e in members]) if len(members) >= 2 else None
+        except Exception:  # noqa: BLE001 -- unreadable workspaces just skip the duplicate check
+            corr = None
+        corr_by_group[universe] = corr
+        index_by_group[universe] = {name: i for i, name in enumerate(corr["names"])} if corr else {}
     kept, flipped = [], []
     for entry in candidates:
         clash = None
+        universe = signal_universe(entry)
+        corr, index = corr_by_group.get(universe), index_by_group.get(universe, {})
         if corr is not None:
             i = index.get(entry["factor"]["name"])
             for done in kept:
@@ -489,6 +646,8 @@ def apply_search_prefilter(resolved, market=None):
                 parts.append("偏弱")
             if entry["judged_on"] != entry["target"]:
                 parts.append(f"按 {entry['judged_on']} 的数")
+            if entry["factor"].get("recompute_for"):
+                parts.append("与本池已有信号的相关性未查（信号还没在本池重算）")
             factor["note"] = " · ".join(parts)
         elif not entry["analyzed"]:
             factor["note"] = "还没算指标，先放行"
@@ -555,6 +714,17 @@ def public_config(config):
 def regions():
     """The market workspaces: region, label, data directory, calendar span, markets, ready."""
     return jsonify(studio_markets.regions())
+
+
+@studio.get("/memory")
+def research_memory():
+    """The campaign memory a run on ``?market=`` would start with: the universe's power table and the
+    tested-mechanism map, as the lines attached to the research direction."""
+    market = (request.args.get("market") or "").strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", market):
+        return jsonify({"error": "Unsupported instrument universe"}), 400
+    lines = campaign_context(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"], market)
+    return jsonify({"market": market, "lines": lines})
 
 
 @studio.get("/environment")
@@ -788,7 +958,7 @@ ANALYSIS_YIELDS_TO = ("research", "backtest", "search", "diagnose", "strategy_up
 def pending_analyses(region):
     """Library factors of ``region`` without a current single-factor analysis (never analysed, stale, or older format)."""
     library = factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"])
-    return [f for f in library if in_region(f.get("market"), region) and f.get("analysis") is None]
+    return [f for f in library if in_region(f.get("market"), region) and f.get("analysis") is None and not f.get("analysis_error")]
 
 
 def run_pending_analyses(job, items, sleep=time.sleep):
@@ -800,12 +970,27 @@ def run_pending_analyses(job, items, sleep=time.sleep):
             sleep(15)
         studio_jobs.update(job["id"], done=i, message=f["name"])
         try:
-            analyze_factor(factor_workspace(f["trace"], f["loop_id"], f["name"]), f["market"])
+            analyze_factor(Path(f["path"]) if f.get("path") else factor_workspace(f["trace"], f["loop_id"], f["name"]), f["market"])
             done.append(f["name"])
         except Exception as error:  # noqa: BLE001 - one unreadable factor must not stop the rest
             failures.append({"name": f["name"], "error": str(error)[:200]})
     studio_jobs.update(job["id"], done=len(items))
     return {"analyzed": done, "failures": failures}
+
+
+def queue_copy_analyses(pending, market):
+    """Analyse the screen's leftovers (``[(factor, market)]`` from unanalysed_copies) in the background, one
+    factor_analysis job per region at a time; returns how many are queued, 0 when nothing is or a job is
+    already running."""
+    if not pending:
+        return 0
+    region = studio_markets.region_of(market) or "cn"
+    if studio_jobs.find("factor_analysis", region=region) is not None:
+        return 0
+    items = [{"name": f["name"], "trace": f.get("trace"), "loop_id": f.get("loop_id"), "market": on, "path": f["path"]} for f, on in pending]
+    studio_jobs.run("factor_analysis", f"分析 {len(items)} 个因子的指标（{market or region}）", in_app(lambda job: run_pending_analyses(job, items)),
+                    market=market or items[0]["market"], link={"page": "backtest", "region": region}, total=len(items))
+    return len(items)
 
 
 @studio.post("/factors/analyze-pending")
@@ -1139,17 +1324,53 @@ def search_preview():
     """
     body = request.get_json() or {}
     try:
-        if not body.get("factors"):
-            raise ValueError("Preview needs at least one candidate factor")
         market = str(body.get("market") or "").strip().lower() or None
         if market and not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", market):
             raise ValueError("Unsupported instrument universe")
-        resolved = resolve_factor_paths(str(body.get("trace") or "") or None, body.get("loop_id"),
-                                        body.get("factors") or [], market=market)
+        factors = body.get("factors") or []
+        limit = None
+        if not factors:
+            # No basket: screen the whole library of the market's region and keep the strongest few, the
+            # rest listed unticked so the user can still add them.
+            if not market:
+                raise ValueError("Preview needs candidate factors or a market to pick them from")
+            region = studio_markets.region_of(market)
+            by_name = {}
+            for f in factor_library(current_app.config["RDAGENT_PROCESSES"], current_app.config["LOG_FOLDER_PATH"]):
+                if not in_region(f.get("market"), region) or not isinstance(f.get("loop_id"), int):
+                    continue
+                rank = (f.get("market") == market, f["loop_id"])
+                if f["name"] not in by_name or rank > by_name[f["name"]][0]:
+                    by_name[f["name"]] = (rank, f)
+            factors = [{"name": f["name"], "trace": f["trace"], "loop_id": f["loop_id"], "weight": 1} for _, f in by_name.values()]
+            if len(factors) < 2:
+                raise ValueError("因子库里不够两个因子，没有可搜索的候选")
+            limit = max(1, min(int(body.get("limit") or LIBRARY_PICK_LIMIT), 50))
+        unresolved = []
+        if limit:
+            # A library entry whose workspace is gone (cleaned up, another machine) must not sink the whole
+            # screen: it is listed with its reason.
+            resolved = []
+            for factor in factors:
+                try:
+                    resolved.extend(resolve_factor_paths(None, None, [factor], market=market))
+                except (ValueError, KeyError, TypeError) as error:
+                    unresolved.append({"name": factor["name"], "trace": factor.get("trace"), "loop_id": factor.get("loop_id"), "kind": "factor",
+                                       "reason": f"读不到信号：{error}"})
+        else:
+            resolved = resolve_factor_paths(str(body.get("trace") or "") or None, body.get("loop_id"), factors, market=market)
         kept, excluded, flipped = apply_search_prefilter(resolved, market)
+        excluded.extend(unresolved)
+        if limit and len(kept) > limit:
+            # apply_search_prefilter returns the kept list strongest first.
+            for f in kept[limit:]:
+                excluded.append({"name": f["name"], "trace": f.get("trace"), "loop_id": f.get("loop_id"), "kind": f.get("kind", "factor"),
+                                 "weight": f.get("weight", 1), "reason": f"{f.get('note') or ''}；已有 {limit} 个更强的候选，需要的话勾上".lstrip("；")})
+            kept = kept[:limit]
         public = [{k: f[k] for k in ("name", "kind", "weight", "trace", "loop_id", "note") if k in f} for f in kept]
+        analyzing = queue_copy_analyses(unanalysed_copies(resolved, market), market)
         from rdagent.log.server import studio_gate
-        return jsonify({"kept": public, "excluded": excluded, "flipped": flipped, "market": market,
+        return jsonify({"kept": public, "excluded": excluded, "flipped": flipped, "market": market, "analyzing": analyzing,
                         "thresholds": {"t_weak": studio_gate.T_WEAK_BY_HORIZON, "t_signal": studio_gate.T_SIGNAL_BY_HORIZON, "ic_signal": studio_gate.IC_SIGNAL,
                                        "noise_rank_ic": PREFILTER_NOISE_RANK_IC, "noise_icir": PREFILTER_NOISE_ICIR, "duplicate_corr": PREFILTER_DUPLICATE_CORR}})
     except (ValueError, TypeError, KeyError) as error:

@@ -13,7 +13,6 @@ import { BacktestResultView } from "../components/BacktestResultView";
 import { SearchResultView } from "../components/SearchResultView";
 import { useSearches } from "../hooks/useSearches";
 import { shortTime } from "../hooks/experiments";
-import { pickByCorrelation, rankCandidates } from "../hooks/autoPick";
 import type { SearchObjective } from "../api/studio";
 import { Block, Btn, Empty, Field, FieldGrid, Link, Note, Num, NumberInput, P, SelectInput, StatusTag, Table, TextInput, TextTabs } from "../components/minimal";
 import { Hint } from "../components/widgets";
@@ -71,53 +70,25 @@ export function BacktestPage() {
   interface PreviewRow { name: string; trace: string; loop_id: number; kind: "factor"; weight: number; reason: string; checked: boolean; flipped: boolean }
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<PreviewRow[] | null>(null);
+  const [previewNote, setPreviewNote] = useState("");
   const [confirming, setConfirming] = useState(false);
   const previewSearch = async () => {
-    setPreviewing(true); setPreview(null); setPageError("");
+    setPreviewing(true); setPreview(null); setPreviewNote(""); setPageError("");
     try {
-      if (candidates.length >= 2) {
-        const data = await studio.previewSearch(candidates.map((f) => ({ trace: f.trace, loop_id: f.loop_id, name: f.name })), params.market);
-        const flippedReason = Object.fromEntries(data.flipped.map((f) => [f.name, f.reason]));
-        const basketWeight = Object.fromEntries(candidates.map((f) => [key(f), Number(f.weight)]));
-        setPreview([
-          ...data.kept.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: f.weight, reason: [f.note, flippedReason[f.name]].filter(Boolean).join("；"), checked: true, flipped: Boolean(flippedReason[f.name]) })),
-          ...data.excluded.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: basketWeight[key(f)] ?? 1, reason: f.reason, checked: false, flipped: false })),
-        ]);
-      } else {
-        // 篮子不够两个：从整个因子库按同样标准推荐一批，同样先预览再确认。
-        const all = Object.values(library);
-        const { ranked, noise, unanalyzed } = rankCandidates(all);
-        // Factors still without an analysis are queued for the background job; the screen only ranks what is analysed.
-        if (unanalyzed.length) studio.analyzePending().catch(() => {});
-        if (ranked.length < 2) { setPageError(t("因子库里只有 {0} 个因子有可用信号（{1} 个是噪声，{2} 个还没算指标，已在后台分析，稍后再点），不够搜索。", [ranked.length, noise.length, unanalyzed.length])); return; }
-        // Walk the whole ranking (not a short top slice): the strongest factors tend to be copies of one idea,
-        // and a short list would leave nothing else standing after the duplicate check.
-        const shortlist = ranked.slice(0, 30);
-        const corr = await studio.factorCorrelation(shortlist.map((r) => ({ trace: r.factor.trace, loop_id: r.factor.loop_id, name: r.factor.name })));
-        const { picked, duplicates } = pickByCorrelation(shortlist, corr, 8);
-        const pickedNames = new Set(picked.map((p) => p.name));
-        const dupReason = Object.fromEntries(duplicates.map((d) => [d.name, t("与 {0} 相关 {1}：两个基本是同一个信号，只留强的那个", [d.of, d.rho.toFixed(2)])]));
-        const noiseNames = new Set(noise.map((f) => f.name));
-        const unanalyzedNames = new Set(unanalyzed.map((f) => f.name));
-        const byName = new Map(all.map((f) => [f.name, f]));
-        const rows: PreviewRow[] = [];
-        for (const r of shortlist) {
-          if (pickedNames.has(r.factor.name)) {
-            const p = picked.find((x) => x.name === r.factor.name)!;
-            const g = shortlist.find((r) => r.factor.name === p.name)!;
-            rows.push({ name: p.name, trace: p.trace, loop_id: p.loop_id, kind: "factor", weight: p.weight, reason: [t("t {0}（{1} 日）· Rank IC {2} · 按 {3} 的数", [g.t.toFixed(2), g.horizon, g.rankIc.toFixed(4), g.factor.market]), p.weight < 0 ? t("方向为负，已反向") : ""].filter(Boolean).join("；"), checked: true, flipped: p.weight < 0 });
-          } else {
-            rows.push({ name: r.factor.name, trace: r.factor.trace, loop_id: r.factor.loop_id, kind: "factor", weight: r.rankIc < 0 ? -1 : 1, reason: dupReason[r.factor.name] || "", checked: false, flipped: false });
-          }
-        }
-        for (const f of [...noise, ...unanalyzed]) {
-          if (rows.some((r) => r.name === f.name)) continue;
-          const lib = byName.get(f.name);
-          if (!lib) continue;
-          rows.push({ name: f.name, trace: lib.trace, loop_id: lib.loop_id, kind: "factor", weight: 1, reason: noiseNames.has(f.name) ? t("市值中性 Rank IC 在每个期限上都没过线，与零区分不开") : t("还没算单因子指标（后台分析中）"), checked: false, flipped: false });
-        }
-        setPreview(rows);
-      }
+      // A basket of two or more is screened as given; with fewer, the server screens the whole library of this
+      // workspace for the chosen universe and ticks the strongest few (the rest stay listed, unticked).
+      const fromLibrary = candidates.length < 2;
+      const data = await studio.previewSearch(fromLibrary ? [] : candidates.map((f) => ({ trace: f.trace, loop_id: f.loop_id, name: f.name })), params.market);
+      if (data.analyzing) setPreviewNote(t("{0} 个候选还没有 {1} 上的指标，这次按已有的数判断或先放行；后台正在分析，跑完后再点一次预筛更准。", [data.analyzing, universeLabel(params.market)]));
+      const flippedReason = Object.fromEntries(data.flipped.map((f) => [f.name, f.reason]));
+      const basketWeight = Object.fromEntries(candidates.map((f) => [key(f), Number(f.weight)]));
+      const rows: PreviewRow[] = [
+        ...data.kept.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: f.weight, reason: [f.note, flippedReason[f.name]].filter(Boolean).join("；"), checked: true, flipped: Boolean(flippedReason[f.name]) })),
+        // A row cut by the library limit keeps the sign the screen gave it, so ticking it later searches the right way round.
+        ...data.excluded.map((f) => ({ name: f.name, trace: f.trace, loop_id: f.loop_id, kind: "factor" as const, weight: f.weight ?? basketWeight[key(f)] ?? 1, reason: f.reason, checked: false, flipped: (f.weight ?? 1) < 0 })),
+      ];
+      if (fromLibrary && data.kept.length < 2) { setPageError(t("因子库里在 {0} 上过线的因子不够两个（{1} 个被淘汰，原因见预筛表），不够搜索。", [universeLabel(params.market), data.excluded.length])); }
+      setPreview(rows);
     } catch (e) { setPageError(t("预筛预览失败：{0}", [errorText(e)])); } finally { setPreviewing(false); }
   };
   const confirmSearch = async () => {
@@ -531,7 +502,7 @@ export function BacktestPage() {
             </FieldGrid>
             <P>{t("点预筛候选，先看不花钱的预筛（单因子指标和两两相关），勾选确认后再跑回测：每个候选单独跑，再逐个加入、逐个剔除，在搜索区间上按目标挑选；推荐组合最后在验证区间上复核。")}</P>
           </Block>
-          <Block title={t("候选信号")} count={candidates.length} note={<><Link href={workspace.href("/factors?return=search")}>{t("去因子库增减")}</Link>{candidates.length < 2 ? t(" · 篮子不够两个会从全库推荐") : ""}</>}>
+          <Block title={t("候选信号")} count={candidates.length} note={<><Link href={workspace.href("/factors?return=search")}>{t("去因子库增减")}</Link>{candidates.length < 2 ? " · " + t("篮子不够两个会从全库推荐") : ""}</>}>
             <P>{t("先看预筛，勾选确认后再跑回测；确认结果会同步到信号篮。")}</P>
             {preview && (
               <div style={{ marginBottom: 12 }}>
@@ -545,7 +516,8 @@ export function BacktestPage() {
                   <Btn kind="primary" disabled={confirming} onClick={confirmSearch}>{confirming ? t("启动中…") : t("确认并开始搜索（{0} 个）", [preview.filter((r) => r.checked).length])}</Btn>
                   <Btn kind="text" onClick={() => setPreview(null)}>{t("取消")}</Btn>
                 </div>
-                <Hint>{t("这是软淘汰：这次没勾的不代表以后没用，换一批队友或换个窗口可以再试。")}</Hint>
+                {previewNote && <Note tone="info">{previewNote}</Note>}
+                <Hint>{t("这是软淘汰：这次没进搜索不代表以后没用，换一批队友或换个窗口可以再试。")}</Hint>
               </div>
             )}
             {candidates.length ? (

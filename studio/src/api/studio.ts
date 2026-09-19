@@ -43,6 +43,8 @@ export interface LibraryFactor extends Record<string, unknown> {
   description: string | null; formulation: string | null; variables: Record<string, string> | null;
   hypothesis: string | null; decision: boolean | null; reason: string | null;
   metrics: Record<string, number>; code: string | null; analysis: FactorAnalysis | null;
+  /** Why the analysis of the current signal failed (all NaN, nothing inside the universe): the implementation produced no usable values. */
+  analysis_error?: string | null;
   /** Set once the factor was recomputed on the latest data; the Studio then reads that copy instead of the workspace. */
   refreshed: RefreshMeta | null;
   /** Date span of the signal the Studio reads: the recomputed copy's, else the cached analysis's. */
@@ -157,7 +159,7 @@ export interface ExperimentSummary {
 export const traces = () => api<string[]>(scoped("/traces"));
 /** Instrument universes the Qlib data ships with; `ready` = factor input data already built for research. */
 export interface Universe { market: string; label: string; group: string; region: string; benchmark: string; open_cost: number; close_cost: number; min_cost: number; limit_threshold: number | null; members: number | null; ready: boolean }
-export const UNIVERSE_LABELS: Record<string, string> = { csi300: t("沪深300"), csi500: t("中证500"), csi800: t("中证800"), csi1000: t("中证1000"), csiall: t("中证全指"), all: t("全部 A 股"), nasdaq100: t("纳斯达克 100") };
+export const UNIVERSE_LABELS: Record<string, string> = { csi300: t("沪深300"), csi500: t("中证500"), csi800: t("中证800"), csi1000: t("中证1000"), csiall: t("中证全指"), all: t("全部 A 股"), nasdaq100: t("纳斯达克 100"), us500: t("美股大盘 500"), usmid: t("美股中盘") };
 /** Universe list from the server; its labels also feed universeLabel() for every later call. */
 // The server's labels are Chinese; in English the client's own names win.
 export const universes = () => api<Universe[]>("/universes").then((list) => { if (lang !== "en") for (const u of list) if (u.label) UNIVERSE_LABELS[u.market] = u.label; return list.filter((u) => u.region === apiRegion); });
@@ -185,6 +187,11 @@ export async function startResearch(form: FormData, onWait?: (j: Job) => void): 
   }
 }
 export const stopResearch = (id: string) => api<{ status: string }>("/control", { id, action: "stop" });
+/** A reflection memo written by the configured model on a run's gate verdicts so far (also written every few rounds). */
+export interface Reflection { market: string; rounds: number; memo: string; model?: string | null; stats: { rounds: number; rounds_passed: number; factors: number; levels: Record<string, number>; pass_rate: number; duplicate_rate: number; noise_rate: number; error_rate: number; reproposed: string[]; signals: string[] } }
+export const reflectResearch = (id: string) => api<Reflection>("/studio/research/reflect", { id });
+/** The campaign memory a run on `market` starts with: the universe's power table and the tested-mechanism map. */
+export const researchMemory = (market: string) => api<{ market: string; lines: string[] }>(`/studio/memory?market=${encodeURIComponent(market)}`);
 /** Continue a finished loop experiment for `loops` more rounds, appending to the same trace. */
 export const resumeResearch = (id: string, loops: number, confirm?: { mode: string; timeout: number }) =>
   api<{ id: string; loops: number; loop_n: number }>("/resume", { id, loops, ...(confirm ? { confirm_mode: confirm.mode, confirm_timeout: confirm.timeout } : {}) });
@@ -240,8 +247,10 @@ export const searches = () => api<SearchSummary[]>(scoped("/studio/searches"));
 /** Dry-run of the pre-search screen over these candidates; launches nothing. */
 export interface PrefilterPreview {
   /** Kept candidates carry a `note`: t, horizon, Rank IC (and its size), and which universe's numbers were used. */
-  kept: (FactorWeight & { note?: string })[]; excluded: (FactorRef & { kind?: SignalKind; reason: string })[];
+  kept: (FactorWeight & { note?: string })[]; excluded: (FactorRef & { kind?: SignalKind; reason: string; weight?: number })[];
   flipped: PrefilterItem[]; market?: string | null;
+  /** Candidates whose copy on `market` is being analysed in the background; they were judged by another universe's numbers this time. */
+  analyzing?: number;
   thresholds: { t_weak?: Record<string, number>; t_signal?: Record<string, number>; ic_signal?: number; noise_rank_ic: number; noise_icir: number; duplicate_corr: number };
 }
 export const previewSearch = (factors: FactorRef[], market?: string) =>
@@ -282,7 +291,8 @@ export interface RecentHorizon {
   return: number; benchmark: number; excess: number;
   /** Where the window's net return sits among every same-length rolling window of the run (0…1), and that distribution. */
   percentile: number; windows: number; low: number; p10: number; median: number; p90: number; high: number;
-  ic?: { recent: number; percentile: number; mean: number };
+  /** Newest complete IC window; `end` is its last day and `lag` how many trading days it trails the return window (the label horizon). */
+  ic?: { recent: number; percentile: number; mean: number; end?: string; lag?: number };
   attribution?: { actual: number; alpha: number; market: number; styles: Record<StyleName, number>; residual: number };
   reading: RecentReading;
 }

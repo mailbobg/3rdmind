@@ -152,15 +152,18 @@ export function StudioShell({ region }: { region: string }) {
           <div className="mt-auto px-2 pt-8 text-xs">
             <LlmSettings onSaved={reloadEnv} />
             {region === "us" ? <DataBuild onBuilt={() => { reloadEnv(); loadRegions(); }} /> : <DataSync onSynced={reloadEnv} />}
-            <div className="flex items-center gap-2">
-              <i className={`inline-block size-[7px] rounded-full ${env ? (env.data_ready ? "bg-success" : "bg-warning") : "bg-danger"}`} />
-              {env ? (env.data_ready ? t("{0}数据已就绪", [workspace.label]) : t("等待{0}数据", [workspace.label])) : t("后端未连接")}
+            {/* The data status sits right under the data entry, laid out like it: a 22px symbol column, the title, the span beneath. */}
+            <div className="-mx-2.5 mb-4 flex items-center gap-2.5 px-2.5 py-2">
+              <span className="flex w-[22px] justify-center" aria-hidden><i className={`inline-block size-[7px] rounded-full ${env ? (env.data_ready ? "bg-success" : "bg-warning") : "bg-danger"}`} /></span>
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="text-[13px] text-muted">{env ? (env.data_ready ? t("{0}数据已就绪", [workspace.label]) : t("等待{0}数据", [workspace.label])) : t("后端未连接")}</span>
+                {env ? (
+                  <small className="text-[11px] text-muted">{env.start || "—"} → {env.end || "—"}</small>
+                ) : (
+                  <small className="text-[11px] text-muted">{t("运行")} <code>scripts/start-backend.sh</code> {t("后")} <button className="text-accent underline" onClick={() => reloadEnv()}>{t("重试")}</button></small>
+                )}
+              </span>
             </div>
-            {env ? (
-              <small className="mb-4 mt-1.5 block text-muted">{env.start || "—"} → {env.end || "—"}</small>
-            ) : (
-              <small className="mb-4 mt-1.5 block text-muted">{t("运行")} <code>scripts/start-backend.sh</code> {t("后")} <button className="text-accent underline" onClick={() => reloadEnv()}>{t("重试")}</button></small>
-            )}
             <div className="mb-3"><LanguageTabs /></div>
             <a href={PLAYGROUND_URL} target="_blank" rel="noreferrer" className="text-muted">{t("原生 Playground ↗")}</a>
           </div>

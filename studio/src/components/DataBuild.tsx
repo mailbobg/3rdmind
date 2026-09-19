@@ -69,7 +69,7 @@ export function DataBuild({ onBuilt, compact }: { onBuilt: () => void; compact?:
     </>;
   }
   return (
-    <div className="mb-3 text-xs">
+    <div className="text-xs">
       <button type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open}
         className="-mx-2.5 flex w-[calc(100%+20px)] items-center gap-2.5 rounded-[10px] px-2.5 py-2 text-left text-foreground transition-colors hover:bg-surface-secondary">
         <span className={`w-[22px] text-center text-[17px] leading-none ${running ? "animate-spin" : ""}`} aria-hidden>⟳</span>
