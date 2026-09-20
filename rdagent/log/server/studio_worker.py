@@ -663,6 +663,7 @@ def staggered_scores(score, every, tranches):
 BOOKS = ("equal", "topk")
 LOTTERY_TOP10_SHARE = 0.5   # more than half the P&L from ten names: the result is a few stocks, not a selection edge
 LOTTERY_WITHOUT_TOP3 = 0.5  # or losing the best three names removes more than half of the return
+LOTTERY_MIN_NAMES = 60      # below this many traded names the shares are not judged (ten names is most of the book)
 
 
 def daily_closes(instruments, start, end):
@@ -762,9 +763,11 @@ def lottery_diagnosis(instruments, total_return, max_weight=None):
                 "positive_share": float(sum(1 for p in pnls if p > 0) / len(pnls)) if pnls else None, "max_weight": max_weight, "lottery": False}
     top3, top10 = sum(pnls[:3]) / total, sum(pnls[:10]) / total
     without = total_return * (1 - top3)
+    # Ten names are a third of a 30-name book: the shares only say something about a book of some breadth.
+    judged = len(pnls) >= LOTTERY_MIN_NAMES
     return {"names": len(pnls), "top10_share": top10, "top3_share": top3, "return_without_top3": without,
             "positive_share": float(sum(1 for p in pnls if p > 0) / len(pnls)), "max_weight": max_weight,
-            "lottery": bool(top10 > LOTTERY_TOP10_SHARE or (total_return > 0 and without < LOTTERY_WITHOUT_TOP3 * total_return))}
+            "lottery": bool(judged and (top10 > LOTTERY_TOP10_SHARE or (total_return > 0 and without < LOTTERY_WITHOUT_TOP3 * total_return)))}
 
 
 def book_report(score, config):

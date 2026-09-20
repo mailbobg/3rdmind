@@ -1751,6 +1751,8 @@ def test_lottery_diagnosis_flags_a_few_names_carrying_the_return() -> None:
     out = lottery_diagnosis(spread, 0.3)
     assert not out["lottery"] and out["top10_share"] < 0.1 and out["positive_share"] == pytest.approx(0.75)
     assert lottery_diagnosis([], 0.0)["lottery"] is False and lottery_diagnosis([{"pnl": -5.0}], -0.1)["top10_share"] is None
+    small = lottery_diagnosis([{"pnl": 900}, {"pnl": 50}, {"pnl": 50}, {"pnl": -100}, {"pnl": -100}], 0.4)  # a five-name book: shares reported, not judged
+    assert small["top3_share"] > 1 and small["lottery"] is False
 
 
 @pytest.mark.offline
