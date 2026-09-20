@@ -2671,6 +2671,13 @@ def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeyp
                                         "2025-01-03,sh.600000,10.5,2000000,21000000,0,8.9,0.95,1.3,-3.1,1\n")
     (cache / "SZ000001.csv").write_text("date,code,close,volume,amount,turn,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST\n")  # fetched, nothing there
     assert studio_extra.bs_code("SH600000") == "sh.600000" and studio_extra.qlib_code("sz.000001") == "SZ000001"
+    # Beijing codes are skipped without a query (baostock has no Beijing data): an empty cache file, counted as empty.
+    import sys as _sys, types
+    fake = types.SimpleNamespace(login=lambda: types.SimpleNamespace(error_code="0", error_msg=""), logout=lambda: None,
+                                 query_history_k_data_plus=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no query for BJ")))
+    monkeypatch.setitem(_sys.modules, "baostock", fake)
+    out = studio_extra.fetch(cache, ["BJ836504"], "2025-01-01", "2025-01-03")
+    assert out["empty"] == 1 and out["done"] == 1 and (cache / "BJ836504.csv").read_text().startswith("date,code")
     extra = studio_extra.load(cache, ["SH600000", "SZ000001", "SH600004"])
     assert list(extra.columns) == studio_extra.EXTRA_COLUMNS and len(extra) == 2
     first = extra.loc[(pd.Timestamp("2025-01-02"), "SH600000")]
@@ -2690,7 +2697,7 @@ def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeyp
     # Status and the job: member codes from the instrument lists, the fetch subprocess, exports rebuilt.
     monkeypatch.setattr(studio_module, "EXTRA_CACHE", cache)
     status = studio_client.get("/studio/data/extra").get_json()
-    assert status["instruments"] == 2 and status["last"] == "2025-01-03" and status["columns"] == studio_extra.EXTRA_COLUMNS
+    assert status["instruments"] == 3 and status["last"] == "2025-01-03" and status["columns"] == studio_extra.EXTRA_COLUMNS  # the BJ file counts as fetched
     calls = []
     monkeypatch.setattr(studio_module.subprocess, "Popen", fake_popen(calls, {"status": "completed", "done": 2, "updated": 2, "empty": 0, "failed": [], "failed_count": 0}))
     monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)

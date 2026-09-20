@@ -65,6 +65,13 @@ def fetch(cache: Path, codes, start: str, end: str, log=lambda *_: None) -> dict
     try:
         for i, code in enumerate(codes):
             path = cache_path(cache, code)
+            if code[:2].upper() not in ("SH", "SZ"):
+                # baostock covers Shanghai and Shenzhen only; a Beijing code would fail three times and wait.
+                if not path.is_file():
+                    path.write_text(",".join(BS_FIELDS.split(",")) + "\n")
+                    empty += 1
+                done += 1
+                continue
             since = start
             existing = None
             if path.is_file():
