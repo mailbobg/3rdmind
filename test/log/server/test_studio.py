@@ -284,6 +284,8 @@ def test_resume_appends_to_the_same_trace(studio_client, tmp_path: Path, monkeyp
     trace_folder = server.app.config["LOG_FOLDER_PATH"]
     trace_dir = trace_folder / "Finance Data Building/demo"
     (trace_dir / "__session__" / "0").mkdir(parents=True)
+    export = Path(server.UI_SETTING.trace_folder) / "studio_data" / "universe" / "csi300" / "full"
+    export.mkdir(parents=True); (export / "daily_pv.h5").write_bytes(b"")  # the universe's data is already prepared
     previous = server.rdagent_processes[str(trace_dir)]
     previous.messages = [
         {"tag": "research.hypothesis", "loop_id": "0", "content": {"hypothesis": "h"}},
@@ -996,7 +998,7 @@ def test_research_from_strategy_seeds_base_features(studio_client, tmp_path: Pat
 
 
 @pytest.mark.offline
-def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_universe_env_builds_every_universe_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     provider = tmp_path / "qlib"
     (provider / "instruments").mkdir(parents=True)
     for name in ("csi300", "csi1000", "all"):
@@ -1004,8 +1006,6 @@ def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, mo
     monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
     monkeypatch.setattr(server.UI_SETTING, "trace_folder", str(tmp_path / "traces"))
     assert server.available_universes() == ["csi300", "csi1000", "all"]
-    env = server.universe_env("csi300")
-    assert env["QLIB_FACTOR_MARKET"] == "csi300" and env["QLIB_MODEL_BENCHMARK"] == "SH000300" and "FACTOR_COSTEER_DATA_FOLDER" not in env
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -1014,6 +1014,10 @@ def test_universe_env_keeps_csi300_defaults_and_builds_others(tmp_path: Path, mo
         return type("P", (), {"stdout": '{"status": "completed"}', "stderr": ""})()
 
     monkeypatch.setattr(server.subprocess, "run", fake_run)
+    env = server.universe_env("csi300")  # CSI300 goes through the same export as the others (extra fields included)
+    assert env["QLIB_FACTOR_MARKET"] == "csi300" and env["QLIB_MODEL_BENCHMARK"] == "SH000300" and env["FACTOR_COSTEER_DATA_FOLDER"].endswith("universe/csi300/full")
+    assert calls[0][3] == "csi300"
+    calls.clear()
     env = server.universe_env("csi1000")
     assert env["QLIB_FACTOR_MARKET"] == "csi1000" and env["QLIB_FACTOR_BENCHMARK"] == "SH000852"
     assert env["QLIB_FACTOR_REGION"] == "cn" and env["QLIB_FACTOR_LIMIT_THRESHOLD"] == "0.095" and "QLIB_PROVIDER_URI" not in env

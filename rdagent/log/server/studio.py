@@ -2037,7 +2037,7 @@ def data_build_status():
 
 EXTRA_CACHE = TRACE_ROOT / "studio_data" / "extra" / "baostock"
 TUSHARE_CACHE = TRACE_ROOT / "studio_data" / "extra" / "tushare"
-EXTRA_MARKETS = ("csi300", "csi1000")  # the universes whose exports carry the fields
+EXTRA_MARKETS = tuple(studio_markets.CN_ORDER)  # every A-share universe: its export carries the fields
 EXTRA_SOURCES = ("baostock", "tushare")
 
 
@@ -2133,8 +2133,8 @@ def run_extra_fetch(job, markets, source="baostock"):
     rebuilt = []
     for market in markets:
         out = TRACE_ROOT / "studio_data" / "universe" / market
-        if not (out / "full" / "daily_pv.h5").is_file() or market == "csi300":
-            continue  # never exported (built on first research), or the .env folders RD-Agent ships for CSI300
+        if not (out / "full" / "daily_pv.h5").is_file():
+            continue  # never exported: built, with the fields, on first research
         studio_jobs.update(job["id"], message=f"重建 {market} 的因子数据")
         record = studio_markets.universe(market)
         meta = json.loads((out / "meta.json").read_text()) if (out / "meta.json").is_file() else {}
