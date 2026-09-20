@@ -85,6 +85,9 @@ def validate_config(config):
         train = int(wf.get("train_days", 252))
         select_t = float(wf.get("select_t", 2.0))
         max_factors = int(wf.get("max_factors", 8))
+        select_by = str(wf.get("select_by") or "book")
+        if select_by not in ("ic", "book"):
+            raise ValueError("select_by must be ic or book")
         if not 20 <= fold <= 252:
             raise ValueError("fold_days must be between 20 and 252 trading days")
         if not 120 <= train <= 1000:
@@ -93,7 +96,10 @@ def validate_config(config):
             raise ValueError("select_t must be between 0 and 10")
         if not 1 <= max_factors <= 80:
             raise ValueError("max_factors must be between 1 and 80")
-        result["walkforward"] = {"fold_days": fold, "train_days": train, "select_t": select_t, "max_factors": max_factors}
+        # select_by: how a fold picks its parts from the training window. "ic": the size-neutral 1-day Rank IC t
+        # (the gate's criterion); "book" (default): the t of the part's own equal-weight book over the window's
+        # holding periods (the portfolio's criterion; 2026-09-20).
+        result["walkforward"] = {"fold_days": fold, "train_days": train, "select_t": select_t, "max_factors": max_factors, "select_by": select_by}
     factors = result.get("factors", [])
     # A trained model (零件组合) takes many signals; the greedy search is quadratic in them and stays small.
     limit = MAX_SEARCH_FACTORS if "search" in result else MAX_FACTORS
@@ -1200,10 +1206,33 @@ def walkforward(config, progress=lambda *_: None):
         if window.empty:
             return None, None
         neutral = neutralize(window, size, industry)
+        if wf.get("select_by", "book") == "book":
+            return factor_book_t(neutral)
         ic, rank_ic = daily_ic(neutral, label1)
         if len(rank_ic) < 40 or rank_ic.std() == 0:
             return None, None
         return float(rank_ic.mean() / rank_ic.std() * np.sqrt(len(rank_ic))), float(rank_ic.mean())
+
+    def factor_book_t(neutral):
+        """The part's own book over the training window: every ``rebalance`` days, the top ``topk`` names by the
+        neutral score held ``horizon`` days at equal weight, minus every scored name; both directions are
+        tried and the better one is reported with its sign. Returns (t, mean excess in label units)."""
+        try:
+            from studio_analysis import book_series
+        except ImportError:  # imported as a package module (tests)
+            from rdagent.log.server.studio_analysis import book_series
+
+        best = (None, None)
+        for sign in (1.0, -1.0):
+            series = book_series(neutral * sign, prepared["label"], int(config["topk"]), int(config.get("rebalance", 1)))
+            if len(series) < 6 or series.std(ddof=1) == 0:
+                continue
+            t = float(series.mean() / series.std(ddof=1) * np.sqrt(len(series)))
+            if t <= 0:
+                continue
+            if best[0] is None or t > best[0]:
+                best = (t * sign, float(series.mean()) * sign)
+        return best
 
     # Each fold's selection scores its own dates; the pieces are stitched into one signal and backtested once,
     # so the book carries over between folds (restarting it every fold resets the rebalance cadence, which

@@ -56,6 +56,11 @@ def daily_ic(factor, label):
 HORIZONS = (1, 5, 10, 20)
 # |t| of the Rank IC at the best horizon: what a factor has to clear to count as a signal, and as weak.
 T_SIGNAL, T_WEAK = 3.0, 2.0
+# The book a universe's strategies actually trade: this many names at equal weight, held BOOK_HORIZON days
+# and refreshed every BOOK_HORIZON days. A factor's IC says whether it knows something; the book statistic
+# says whether that knowledge survives into the portfolio the Studio builds (2026-09-20: it often does not).
+BOOK_TOPK = {"csi300": 50, "csi500": 100, "csi1000": 200, "all": 300, "nasdaq100": 15, "us500": 50, "usmid": 50}
+BOOK_HORIZON = 20
 
 
 def label_expression(horizon):
@@ -84,6 +89,67 @@ def residualize(label, size):
     return frame.groupby(level="datetime", group_keys=False).apply(fit)
 
 
+def size_neutral_rank(factor, size):
+    """Per day: the factor's cross-sectional percentile rank with its linear dependence on log size removed."""
+    import numpy as np
+
+    frame = factor.rename("f").to_frame().join(np.log(size.clip(lower=1)).rename("x"), how="inner").dropna()
+    if frame.empty:
+        return frame["f"]
+    frame["f"] = frame.groupby(level="datetime")["f"].rank(pct=True)
+
+    def fit(day):
+        if len(day) < 10 or day["x"].std() == 0:
+            return day["f"] - day["f"].mean()
+        slope, intercept = np.polyfit(day["x"], day["f"], 1)
+        return day["f"] - (intercept + slope * day["x"])
+
+    return frame.groupby(level="datetime", group_keys=False).apply(fit)
+
+
+def book_series(neutral, forward, topk, every=BOOK_HORIZON):
+    """Every ``every`` trading days: the equal-weight return of the ``topk`` names ranked highest by ``neutral``
+    over the next ``every`` days, minus the equal-weight return of every ranked name. Non-overlapping, so
+    each value is one independent holding period."""
+    import pandas as pd
+
+    days = neutral.index.get_level_values("datetime").unique().sort_values()[::every]
+    rows = {}
+    for day in days:
+        try:
+            cross = neutral.xs(day, level="datetime")
+            fwd = forward.xs(day, level="datetime").reindex(cross.index).dropna()
+        except KeyError:
+            continue
+        if len(fwd) < 2 * topk:
+            continue
+        top = cross.reindex(fwd.index).nlargest(topk).index
+        rows[day] = float(fwd[top].mean() - fwd.mean())
+    return pd.Series(rows, dtype=float)
+
+
+def book_stats(series):
+    """Mean holding-period excess, its t over the periods, the share of periods above zero, and how much of
+    the summed excess the best three periods hold (a lottery in time when that is most of it)."""
+    if series is None or len(series) < 6:
+        return None
+    total = float(series.sum())
+    positive = sorted((v for v in series if v > 0), reverse=True)
+    best3 = float(sum(positive[:3]) / total) if total > 0 and positive else None
+    return {**stats(series), "periods": int(len(series)), "best3_share": best3}
+
+
+def book(factor, forward, size, topk, every=BOOK_HORIZON):
+    """The book statistic for both directions of a factor: ``plus`` holds the highest-ranked names, ``minus``
+    the lowest. The gate reads the side that matches the factor's IC sign."""
+    neutral = size_neutral_rank(factor, size)
+    if neutral.empty:
+        return None
+    return {"topk": int(topk), "horizon": int(every),
+            "plus": book_stats(book_series(neutral, forward, topk, every)),
+            "minus": book_stats(book_series(-neutral, forward, topk, every))}
+
+
 def stats(series, horizon=1):
     """Mean, dispersion, ICIR and a t statistic; overlapping labels at ``horizon`` > 1 leave about n / horizon
     independent days, and the t is scaled to that rather than to the raw count."""
@@ -109,7 +175,7 @@ def verdict(horizons):
     return {"best_horizon": best, "t": t, "level": "signal" if t >= T_SIGNAL else "weak" if t >= T_WEAK else "noise"}
 
 
-def summarize(ic, rank_ic, coverage_start, coverage_end, universe_rows, horizons=None):
+def summarize(ic, rank_ic, coverage_start, coverage_end, universe_rows, horizons=None, book_result=None):
     monthly = (
         ic.groupby(ic.index.to_period("M")).mean().rename("ic").to_frame()
         .join(rank_ic.groupby(rank_ic.index.to_period("M")).mean().rename("rank_ic"))
@@ -121,6 +187,7 @@ def summarize(ic, rank_ic, coverage_start, coverage_end, universe_rows, horizons
         "ic": stats(ic),
         "rank_ic": stats(rank_ic),
         "horizons": horizons or [],
+        "book": book_result,
         "verdict": verdict(horizons or []),
         "monthly": [
             {"month": str(period), "ic": None if math.isnan(row["ic"]) else float(row["ic"]),
@@ -159,7 +226,8 @@ def run(workspace, provider_uri, market, region="cn"):
         _, residual_rank_ic = daily_ic(factor, residual) if not residual.empty else (None, None)
         horizons.append({"days": h, "ic": stats(h_ic, h), "rank_ic": stats(h_rank_ic, h), "residual_rank_ic": stats(residual_rank_ic, h)})
     ic, rank_ic = daily_ic(factor, frame[1])
-    return summarize(ic, rank_ic, start, end, len(factor), horizons)
+    book_result = book(factor, frame[BOOK_HORIZON], frame["size"], BOOK_TOPK.get(market, 50))
+    return summarize(ic, rank_ic, start, end, len(factor), horizons, book_result)
 
 
 def main(argv):

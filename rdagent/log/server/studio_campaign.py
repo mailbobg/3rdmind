@@ -91,6 +91,8 @@ def level_of(analysis):
         level = "noise"
     elif abs(t) < signal or (ic is not None and abs(ic) < studio_gate.IC_SIGNAL):
         level = "weak"
+    elif studio_gate.book_verdict(analysis, t)[0] is False:
+        level = "no_book"
     else:
         level = "signal"
     return level, t, horizon, ic
@@ -121,7 +123,7 @@ def _verdict_text(r):
 def map_lines(mapping, market, limit=80):
     """Two lines: what this market has judged (name: verdict), and what other markets judged on names this
     market has not tried. Strong verdicts come first; the lists are cut at ``limit`` names each."""
-    order = {"signal": 0, "unreplicated": 1, "weak": 2, "duplicate": 3, "noise": 4, "error": 5}
+    order = {"signal": 0, "unreplicated": 1, "no_book": 2, "weak": 3, "duplicate": 4, "noise": 5, "error": 6}
     here, elsewhere = [], []
     for name, by_market in mapping.items():
         if market in by_market:

@@ -1756,6 +1756,48 @@ def test_lottery_diagnosis_flags_a_few_names_carrying_the_return() -> None:
 
 
 @pytest.mark.offline
+def test_book_statistic_separates_a_slow_signal_from_a_fast_one() -> None:
+    import numpy as np
+    from rdagent.log.server import studio_analysis as A
+
+    rng = np.random.RandomState(1)
+    days = pd.bdate_range("2023-01-02", periods=400)
+    names = [f"S{i}" for i in range(120)]
+    index = pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"])
+    size = pd.Series(np.tile(np.exp(np.linspace(10, 14, 120)), 400), index=index)
+    quality = np.tile(rng.permutation(np.linspace(-1, 1, 120)), 400)  # a slow trait, unrelated to size: the same ranking every day
+    forward = pd.Series(0.03 * quality + rng.normal(0, 0.08, len(index)), index=index)
+    slow = pd.Series(quality, index=index)
+    fast = pd.Series(rng.normal(0, 1, len(index)), index=index)  # no relation to the 20-day return
+    result_slow, result_fast = A.book(slow, forward, size, topk=20), A.book(fast, forward, size, topk=20)
+    assert result_slow["plus"]["t"] > 2 and result_slow["plus"]["mean"] > 0 and result_slow["minus"]["mean"] < 0
+    assert abs(result_fast["plus"]["t"]) < 2 and result_fast["plus"]["periods"] == result_slow["plus"]["periods"] == 20
+    assert 0 < result_slow["plus"]["best3_share"] < 0.5  # spread over the periods, not three lucky months
+    assert A.book_stats(pd.Series([0.01, 0.02])) is None  # too few periods to judge
+
+
+@pytest.mark.offline
+def test_gate_book_criterion_turns_a_fast_signal_into_no_book() -> None:
+    from rdagent.log.server import studio_gate as G
+
+    strong_ic = {"horizons": [{"days": 1, "residual_rank_ic": {"t": 9.0, "mean": 0.03}}]}
+    without_book = dict(strong_ic)
+    fast = {**strong_ic, "book": {"topk": 200, "horizon": 20, "plus": {"mean": 0.001, "t": 0.4, "periods": 40, "best3_share": 0.9}, "minus": {"mean": -0.001, "t": -0.4, "periods": 40, "best3_share": None}}}
+    slow = {**strong_ic, "book": {"topk": 200, "horizon": 20, "plus": {"mean": 0.006, "t": 3.1, "periods": 40, "best3_share": 0.3}, "minus": {"mean": -0.006, "t": -3.1, "periods": 40, "best3_share": None}}}
+    lucky = {**strong_ic, "book": {"topk": 200, "horizon": 20, "plus": {"mean": 0.006, "t": 2.5, "periods": 40, "best3_share": 0.85}, "minus": None}}
+    assert G.book_verdict(without_book, 9.0) == (None, "组合口径未算")
+    assert G.book_verdict(fast, 9.0)[0] is False and "进不了组合" in G.book_verdict(fast, 9.0)[1]
+    assert G.book_verdict(slow, 9.0)[0] is True and G.book_verdict(slow, -9.0)[0] is False  # the IC's sign picks the side
+    assert G.book_verdict(lucky, 9.0)[0] is False and "3 期" in G.book_verdict(lucky, 9.0)[1]
+    verdict = G.judge_factor("F", "/w/F", "csi1000", [], analyze=lambda p, m: fast, correlate=lambda pairs: {"names": [], "matrix": []}, replicate=lambda n, p, m: slow)
+    assert verdict["level"] == "no_book" and verdict["book"]["t"] == 0.4 and verdict["replicated"] is None
+    verdict = G.judge_factor("F", "/w/F", "csi1000", [], analyze=lambda p, m: slow, correlate=lambda pairs: {"names": [], "matrix": []}, replicate=lambda n, p, m: slow)
+    assert verdict["level"] == "signal" and any("组合口径：" in r for r in verdict["reasons"])
+    hint = G.next_hint([verdict | {"level": "no_book"}], [])
+    assert "组合口径" in hint and "F" in hint
+
+
+@pytest.mark.offline
 def test_hold_scores_repeats_each_blocks_first_day() -> None:
     from rdagent.log.server.studio_worker import hold_scores
 

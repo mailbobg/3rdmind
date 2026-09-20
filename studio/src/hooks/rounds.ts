@@ -19,7 +19,7 @@ export interface RoundView {
   status: string;
 }
 
-export interface GateFactor { name: string; level: "signal" | "weak" | "noise" | "duplicate" | "unreplicated" | "error"; t: number | null; horizon: number | null; nearest: string | null; corr: number | null; second_market: string | null; t2: number | null; replicated: boolean | null; reasons: string[] }
+export interface GateFactor { name: string; level: "signal" | "weak" | "noise" | "duplicate" | "unreplicated" | "no_book" | "error"; t: number | null; horizon: number | null; nearest: string | null; corr: number | null; second_market: string | null; t2: number | null; replicated: boolean | null; book?: { mean: number; t: number; periods: number; best3_share: number | null } | null; reasons: string[] }
 export interface GateResult { factors: GateFactor[]; decision: boolean; summary: string; hint: string; market: string; second_market: string | null; thresholds: Record<string, number>;
   /** 研究记忆 handed to the agent with the hint: power, the tested-mechanism map, the run's statistics. */
   context?: string[]; reflection?: boolean | string }

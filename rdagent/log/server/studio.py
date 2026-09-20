@@ -202,7 +202,7 @@ def analysis_cache_path(workspace, market):
 
 
 # Bump when studio_analysis.py's output gains fields the UI relies on; older caches are recomputed on request.
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3  # 3: carries the book statistic (studio_analysis.book)
 
 
 def source_stamp(source: Path) -> dict:
@@ -615,7 +615,7 @@ def apply_search_prefilter(resolved, market=None, duplicate_corr=PREFILTER_DUPLI
         icir = (analysis.get("rank_ic") or {}).get("ir") if analysis else None
         scored.append({"factor": factor, "rank_ic": rank_ic, "icir": 0.0 if icir is None else abs(icir), "t": t, "horizon": horizon,
                        "t_weak": t_weak, "t_signal": t_signal, "judged_on": judged_on, "target": target, "analyzed": analysis is not None,
-                       "failure": failure})
+                       "failure": failure, "analysis": analysis or {}})
     # Weak-signal test first, so the reason names the real problem even for a factor that
     # would also duplicate a stronger one.
     candidates, excluded = [], []
@@ -642,6 +642,11 @@ def apply_search_prefilter(resolved, market=None, duplicate_corr=PREFILTER_DUPLI
             why = f"Rank IC {entry['rank_ic']:.4f}，ICIR {entry['icir']:.3f}"
         if weak:
             excluded.append({**ref(entry["factor"]), "reason": f"信号太弱（{why}）：先在因子库看单因子分析，达标再参与搜索"})
+            continue
+        # The book criterion: a part has to carry its universe's book alone (studio_gate.book_verdict).
+        passes, reason = studio_gate.book_verdict(entry["analysis"], entry["t"]) if entry["t"] is not None else (None, "")
+        if passes is False:
+            excluded.append({**ref(entry["factor"]), "reason": f"{reason}{where(entry)}：过了 IC 但进不了组合，不作零件"})
             continue
         candidates.append(entry)
     # Strongest first (how far |t| clears its own horizon's bar), so a duplicate always loses to the better

@@ -10,7 +10,7 @@ import { t } from "../i18n";
 
 /** A round's full detail in the results column. */
 /** `onContinue` adds "继续研究" beside the agent's next hypothesis: the caller resumes the experiment. */
-const GATE_LEVELS: Record<string, string> = { signal: t("通过"), weak: t("偏弱"), noise: t("噪声"), duplicate: t("重复"), unreplicated: t("未复现"), error: t("未能判断") };
+const GATE_LEVELS: Record<string, string> = { signal: t("通过"), weak: t("偏弱"), noise: t("噪声"), duplicate: t("重复"), unreplicated: t("未复现"), no_book: t("有信号无贡献"), error: t("未能判断") };
 
 export function RoundDetail({ round, onContinue, testDays }: { round: RoundView; onContinue?: () => void; testDays?: number | null }) {
   const [file, setFile] = useState(0);
