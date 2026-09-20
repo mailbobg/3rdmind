@@ -2564,6 +2564,16 @@ def test_review_gaps_memory_route_submit_branch_replay_and_reflection_failure(st
     assert studio_module.failed_analysis(ws, "csi300").startswith("factor has no observations")
 
 
+def fake_popen(calls, status):
+    """A stand-in for the extra-field fetch subprocess: two progress lines on stderr, the status line on stdout.
+    The universe rebuild that follows is a real subprocess.run, so only Popen is faked."""
+    def popen(cmd, **kwargs):
+        calls.append(cmd)
+        return type("P", (), {"stderr": iter(["10/20 fetches\n", "20/20 fetches\n"]),
+                              "communicate": lambda self, timeout=None: (json.dumps(status), ""), "returncode": 0})()
+    return popen
+
+
 @pytest.mark.offline
 def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from rdagent.log.server import studio_extra
@@ -2596,10 +2606,7 @@ def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeyp
     status = studio_client.get("/studio/data/extra").get_json()
     assert status["instruments"] == 2 and status["last"] == "2025-01-03" and status["columns"] == studio_extra.EXTRA_COLUMNS
     calls = []
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return type("P", (), {"stdout": json.dumps({"status": "completed", "done": 2, "updated": 2, "empty": 0, "failed": [], "failed_count": 0}), "stderr": "", "returncode": 0})()
-    monkeypatch.setattr(studio_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(studio_module.subprocess, "Popen", fake_popen(calls, {"status": "completed", "done": 2, "updated": 2, "empty": 0, "failed": [], "failed_count": 0}))
     monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)
     started = studio_client.post("/studio/data/extra", json={"markets": ["csi1000"]})
     assert started.status_code == 202, started.get_json()
@@ -2670,10 +2677,7 @@ def test_tushare_fields_point_in_time_and_job(studio_client, tmp_path: Path, mon
     assert studio_client.post("/studio/data/extra", json={"source": "nowhere"}).status_code == 400
     monkeypatch.setenv("DATAHUB_API_KEY", "k"); monkeypatch.setenv("DATAHUB_BASE", "http://x")
     calls = []
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return type("P", (), {"stdout": json.dumps({"status": "completed", "planned": 3, "done": 3, "failed": [], "failed_count": 0}), "stderr": "", "returncode": 0})()
-    monkeypatch.setattr(studio_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(studio_module.subprocess, "Popen", fake_popen(calls, {"status": "completed", "planned": 3, "done": 3, "failed": [], "failed_count": 0}))
     monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)
     started = studio_client.post("/studio/data/extra", json={"source": "tushare"})
     assert started.status_code == 202, started.get_json()

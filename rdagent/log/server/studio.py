@@ -2115,12 +2115,19 @@ def run_extra_fetch(job, markets, source="baostock"):
         codes_file.write_text("\n".join(codes))
         studio_jobs.update(job["id"], message=f"从 baostock 取 {len(codes)} 只股票的字段")
         command = [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_extra.py")), "fetch", str(EXTRA_CACHE), str(codes_file), start, end]
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=12 * 3600)
-    line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    # The fetcher reports progress on stderr one line at a time; relay it as the job message.
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    last_note = ""
+    for note in process.stderr:
+        last_note = note.strip() or last_note
+        if last_note:
+            studio_jobs.update(job["id"], message=last_note)
+    stdout, _ = process.communicate(timeout=60)
+    line = stdout.strip().splitlines()[-1] if stdout.strip() else ""
     try:
         status = json.loads(line)
     except ValueError:
-        raise RuntimeError(completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "extra field fetch produced no output")
+        raise RuntimeError(last_note or "extra field fetch produced no output")
     if status.get("status") != "completed":
         raise RuntimeError(status.get("error") or "extra field fetch failed")
     rebuilt = []
