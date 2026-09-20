@@ -41,8 +41,9 @@ ROW_CAP = 5000            # rows per page on the main server
 MIRROR_CAP = 6000         # the mirror answers at most this many rows and cannot page
 PERIOD_OPEN_DAYS = 150    # a report period keeps receiving announcements this long after it ends
 UNLOCK_AHEAD_DAYS = 120   # unlock windows this far ahead are fetched so $unlock_30d is known in advance
-MIRROR_PACE = 3.0         # seconds between calls, per server
-MAIN_PACE = 1.5
+MIRROR_PACE = 1.5         # seconds between calls, per worker
+MAIN_PACE = 0.5
+WORKERS = {"mirror": 2, "main": 1}  # parallel workers per server (the mirror tolerates ~1 call/s in total)
 BACKOFFS = (15, 45, 120)  # sleep after the 1st, 2nd, 3rd consecutive failure of a server
 REST = 300                # a server that failed every attempt on a task rests this long before the next
 
@@ -338,7 +339,7 @@ def fetch(cache: Path, calendar, start: str, end: str, log=lambda *_: None, env=
                 if done[0] % 25 == 0:
                     log(f"{done[0]}/{total} fetches")
 
-    threads = [threading.Thread(target=worker, args=(make,), daemon=True) for _, make in available]
+    threads = [threading.Thread(target=worker, args=(make,), daemon=True) for name, make in available for _ in range(WORKERS.get(name, 1))]
     for thread in threads:
         thread.start()
     for thread in threads:
