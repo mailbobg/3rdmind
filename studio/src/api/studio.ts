@@ -198,6 +198,8 @@ export const stopResearch = (id: string) => api<{ status: string }>("/control", 
 export interface Reflection { market: string; rounds: number; memo: string; model?: string | null; stats: { rounds: number; rounds_passed: number; factors: number; levels: Record<string, number>; pass_rate: number; duplicate_rate: number; noise_rate: number; error_rate: number; reproposed: string[]; signals: string[] } }
 export const reflectResearch = (id: string) => api<Reflection>("/studio/research/reflect", { id });
 /** The campaign memory a run on `market` starts with: the universe's power table and the tested-mechanism map. */
+/** The research direction the latest run on `market` was given, for reuse in the new-research form. */
+export const lastDirection = (market: string) => api<{ market: string; direction: string; trace: string | null; started: string | null }>(`/studio/research/last-direction?market=${encodeURIComponent(market)}`);
 export const researchMemory = (market: string) => api<{ market: string; lines: string[] }>(`/studio/memory?market=${encodeURIComponent(market)}`);
 /** Continue a finished loop experiment for `loops` more rounds, appending to the same trace. */
 export const resumeResearch = (id: string, loops: number, confirm?: { mode: string; timeout: number }) =>

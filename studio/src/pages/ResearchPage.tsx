@@ -72,6 +72,17 @@ export function ResearchPage() {
     studio.researchMemory(form.market).then((m) => { if (live) setMemory(m); }).catch(() => { if (live) setMemory({ market: form.market, lines: [] }); });
     return () => { live = false; };
   }, [form.market, form.scenario]);
+  // 沿用上次方向: the direction the latest run on this universe was given (however it was started) fills the box.
+  const [reusing, setReusing] = useState(false);
+  const [reuseNote, setReuseNote] = useState("");
+  const reuseDirection = async () => {
+    setReusing(true); setReuseNote("");
+    try {
+      const last = await studio.lastDirection(form.market);
+      if (!last.direction) setReuseNote(t("这个股票池还没有带方向的研究。"));
+      else { setForm((f) => ({ ...f, objective: last.direction })); setReuseNote(t("来自 {0}", [last.trace || ""])); }
+    } catch (e) { setReuseNote(errorText(e)); } finally { setReusing(false); }
+  };
   // 反思备忘录 on demand: written on the run's gate verdicts so far, then the trace refreshes to show it.
   const [reflecting, setReflecting] = useState(false);
   const reflectNow = async () => {
@@ -365,6 +376,10 @@ export function ResearchPage() {
               <Field label={t("研究方向（可选）")} wide>
                 <textarea rows={5} className="mm-control" value={form.objective} onChange={(e) => setForm((f) => ({ ...f, objective: e.target.value }))}
                   placeholder={t("留空则由 Agent 自行选题。填了会作为总体指示进入每一轮的假设生成，例如：研究沪深300中量价动量因子的增量信息。")} />
+                <div className="mt-1 flex items-center gap-2">
+                  <Btn kind="text" disabled={reusing} onClick={reuseDirection}>{reusing ? t("查找中…") : t("沿用上次给这个池的方向")}</Btn>
+                  {reuseNote && <span className="text-[11px] text-muted">{reuseNote}</span>}
+                </div>
               </Field>
             )}
           </FieldGrid>

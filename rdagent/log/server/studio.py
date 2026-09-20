@@ -768,6 +768,29 @@ def regions():
     return jsonify(studio_markets.regions())
 
 
+@studio.get("/research/last-direction")
+def last_direction():
+    """The research direction the most recent run on ``?market=`` was given (studio-run.json), so a new run
+    can start from it. Runs without a direction are skipped; ``direction`` is empty when none was ever given."""
+    market = (request.args.get("market") or "").strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,30}", market):
+        return jsonify({"error": "Unsupported instrument universe"}), 400
+    best = None
+    for path in TRACE_ROOT.glob("*/*/studio-run.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if data.get("market") != market or not (data.get("direction") or "").strip():
+            continue
+        stamp = data.get("started") or datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+        if best is None or stamp > best[0]:
+            best = (stamp, data["direction"], path.parent.relative_to(TRACE_ROOT).as_posix())
+    if best is None:
+        return jsonify({"market": market, "direction": "", "trace": None, "started": None})
+    return jsonify({"market": market, "direction": best[1], "trace": best[2], "started": best[0]})
+
+
 @studio.get("/memory")
 def research_memory():
     """The campaign memory a run on ``?market=`` would start with: the universe's power table and the

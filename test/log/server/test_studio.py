@@ -1798,6 +1798,21 @@ def test_gate_book_criterion_turns_a_fast_signal_into_no_book() -> None:
 
 
 @pytest.mark.offline
+def test_last_direction_is_the_latest_run_with_one(studio_client) -> None:
+    root = studio_module.TRACE_ROOT / "Finance Data Building"
+    for name, data in (("old-run", {"market": "csi300", "direction": "old", "started": "2026-09-01T00:00:00+00:00"}),
+                       ("new-run", {"market": "csi300", "direction": "use margin balances", "started": "2026-09-20T00:00:00+00:00"}),
+                       ("blank-run", {"market": "csi300", "direction": "", "started": "2026-09-21T00:00:00+00:00"}),
+                       ("other-run", {"market": "csi1000", "direction": "other", "started": "2026-09-22T00:00:00+00:00"})):
+        (root / name).mkdir(parents=True, exist_ok=True)
+        (root / name / "studio-run.json").write_text(json.dumps(data))
+    got = studio_client.get("/studio/research/last-direction?market=csi300").get_json()
+    assert got["direction"] == "use margin balances" and got["trace"] == "Finance Data Building/new-run"
+    assert studio_client.get("/studio/research/last-direction?market=csi500").get_json()["direction"] == ""
+    assert studio_client.get("/studio/research/last-direction?market=BAD!").status_code == 400
+
+
+@pytest.mark.offline
 def test_hold_scores_repeats_each_blocks_first_day() -> None:
     from rdagent.log.server.studio_worker import hold_scores
 

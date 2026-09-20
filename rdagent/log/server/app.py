@@ -794,12 +794,13 @@ def list_traces():
     return jsonify(trace_ids), 200
 
 
-def record_run_market(log_trace_path, market: str) -> None:
-    """Remember which universe a run was started on (studio-run.json beside the trace) for the Studio's summaries."""
+def record_run_market(log_trace_path, market: str, direction: str = "") -> None:
+    """Remember which universe a run was started on, and the research direction it was given (studio-run.json
+    beside the trace), for the Studio's summaries and for reusing the direction on the next run."""
     try:
         folder = Path(log_trace_path)
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / "studio-run.json").write_text(json.dumps({"market": market}))
+        (folder / "studio-run.json").write_text(json.dumps({"market": market, "direction": direction, "started": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False))
     except OSError as error:
         app.logger.warning(f"Could not record the universe of {log_trace_path}: {error}")
 
@@ -1013,7 +1014,7 @@ def upload_file():
     )
     task.confirm = confirm
     task.start()
-    record_run_market(log_trace_path, market)
+    record_run_market(log_trace_path, market, confirm.get("instruction", ""))
     app.logger.warning(f"Task {log_trace_path} started (universe {market}).")
     rdagent_processes[str(log_trace_path)] = task
     return (
