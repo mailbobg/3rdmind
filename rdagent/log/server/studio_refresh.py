@@ -46,6 +46,7 @@ def ensure_data(provider, data_path, start, market="csi300", region="cn"):
     frame = frame.sort_index().astype("float32")
     frame.index = frame.index.set_names(["datetime", "instrument"])
     if region == "cn":
+        frame = frame[~frame.index.get_level_values("instrument").str.startswith("BJ")]  # see studio_universe
         import studio_extra
         import studio_tushare
 

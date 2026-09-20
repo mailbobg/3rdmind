@@ -33,6 +33,10 @@ def main(provider, market, start, end, out_dir, region="cn"):
     frame.index = frame.index.set_names(["datetime", "instrument"])
     extra_note = ""
     if region == "cn":
+        # Beijing-exchange names are left out of A-share universes: neither baostock nor Tushare covers them,
+        # they trade under 30% limits and thin books, and the all-A list sorts them first, so a debug sample
+        # taken from the top would have carried nothing but NaN.
+        frame = frame[~frame.index.get_level_values("instrument").str.startswith("BJ")]
         # Turnover, valuation, float cap and the ST flag from the baostock cache beside the universe exports.
         import studio_extra
         import studio_tushare
@@ -50,7 +54,11 @@ def main(provider, market, start, end, out_dir, region="cn"):
     frame.to_hdf(out / "full" / "daily_pv.h5", key="data", mode="w")
     dates = frame.index.get_level_values("datetime")
     debug_end = min(pd.Timestamp(start) + pd.DateOffset(months=6), end_ts)
-    instruments = frame.index.get_level_values("instrument").unique()[:100]
+    # Debug sample: the 100 names with the fullest rows in the first half year, so every column the full set
+    # carries has values to develop against (a factor on $pb cannot be debugged on names without it).
+    early = frame[dates <= debug_end]
+    coverage = early.notna().sum(axis=1).groupby(level="instrument").sum().sort_values(ascending=False)
+    instruments = coverage.index[:100]
     debug = frame[(dates <= debug_end) & frame.index.get_level_values("instrument").isin(instruments)]
     debug.to_hdf(out / "debug" / "daily_pv.h5", key="data", mode="w")
     summary = {"market": market, "start": str(dates.min().date()), "end": str(dates.max().date()),

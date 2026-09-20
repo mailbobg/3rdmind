@@ -498,6 +498,8 @@ def prepare(config):
     # the book never holds a name because it was a member a year earlier (or later).
     spans = D.list_instruments(D.instruments(config["market"]), start_time=feature_start, end_time=config["end"], as_list=False)
     features = members_only(features, spans, calendar)
+    if (config.get("region") or "cn") == "cn":
+        features = features[~features.index.get_level_values("instrument").str.startswith("BJ")]  # see studio_universe
     if features.empty:
         raise ValueError("No factor observations inside the selected universe")
     # Cross-sectional percentile ranks per signal. Rows are not dropped here: a variant only needs its own
