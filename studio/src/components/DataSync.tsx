@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import * as studio from "../api/studio";
-import type { ExtraStatus, SyncStatus } from "../api/studio";
+import type { ExtraSource, ExtraStatus, SyncStatus } from "../api/studio";
 import { universeLabel } from "../api/studio";
 import { errorText } from "../hooks/studioContext";
 import { Btn, SelectInput } from "./minimal";
@@ -9,6 +9,7 @@ import { locale, t } from "../i18n";
 
 const PHASES: Record<string, string> = { starting: t("准备"), downloading: t("下载"), extracting: t("校验解包"), swapping: t("替换目录"), done: t("完成"), failed: t("失败") };
 const fmtTime = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(locale(), { hour12: false }) : "—");
+const tushareDays = (s: { tables: Record<string, number> }) => Math.max(0, ...Object.values(s.tables));
 
 /**
  * The rail's data line plus a bottom sheet that slides up over the page: local and upstream versions, a
@@ -43,9 +44,9 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
     }, 5000);
     return () => clearInterval(timer);
   }, [extraJob, onSynced]);
-  const startExtra = async () => {
+  const startExtra = async (source: ExtraSource) => {
     setBusy(true); setMessage("");
-    try { setExtraJob((await studio.startExtraData()).job); } catch (e) { setMessage(errorText(e)); } finally { setBusy(false); }
+    try { setExtraJob((await studio.startExtraData(source)).job); } catch (e) { setMessage(errorText(e)); } finally { setBusy(false); }
   };
   useEffect(() => {
     if (!running) return;
@@ -135,7 +136,15 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
                   {extra ? (extra.instruments ? t("{0} 只股票已缓存，数据到 {1}；股票池数据带这些字段：{2}", [extra.instruments, extra.last || "—", Object.entries(extra.exports).filter(([, ok]) => ok).map(([m]) => universeLabel(m)).join("、") || t("暂无")]) : t("还没有取过。")) : t("检查中…")}
                 </div>
                 <p className="m-0 text-[11px] leading-relaxed text-muted">{t("从 baostock 取换手率、PE / PB / PS / PCF、流通市值、ST 标记，按日拼进沪深300 和中证1000 的因子数据（$turnover、$pe_ttm、$pb、$float_cap…），研究和重算都能用。首次约半小时，之后增量。")}</p>
-                <div><Btn disabled={busy || extraRunning} onClick={startExtra}>{extraRunning ? t("取字段中…") : extra?.instruments ? t("增量更新扩展字段") : t("取扩展字段")}</Btn></div>
+                <div><Btn disabled={busy || extraRunning} onClick={() => startExtra("baostock")}>{extraRunning ? t("取字段中…") : extra?.instruments ? t("增量更新扩展字段") : t("取扩展字段")}</Btn></div>
+              </div>
+              <div className="flex flex-col gap-2 border-t border-border pt-3">
+                <div className="text-[12px] font-medium">{t("扩展字段（Tushare）")}</div>
+                <div className="text-[11px] text-muted">
+                  {extra ? (!extra.tushare.configured ? t("没有配置 Tushare 服务器。") : tushareDays(extra.tushare) ? t("{0} 个交易日已缓存，数据到 {1}；股票池数据带这些字段：{2}", [tushareDays(extra.tushare), extra.tushare.last || "—", Object.entries(extra.tushare.exports).filter(([, ok]) => ok).map(([m]) => universeLabel(m)).join("、") || t("暂无")]) : t("还没有取过。")) : t("检查中…")}
+                </div>
+                <p className="m-0 text-[11px] leading-relaxed text-muted">{t("按交易日取全市场的大小单资金流、融资融券、北向持股、筹码分布、自由流通换手和市值、龙虎榜、大宗交易，以及按公告日对齐的财务指标、业绩预告快报、股东户数、限售解禁（$mf_net_xl、$rz_bal、$north_ratio、$winner_rate、$roe、$unlock_30d…）。两台服务器并行、有限速，首次约三小时，之后增量。")}</p>
+                {extra?.tushare.configured && <div><Btn disabled={busy || extraRunning} onClick={() => startExtra("tushare")}>{extraRunning ? t("取字段中…") : tushareDays(extra.tushare) ? t("增量更新 Tushare 字段") : t("取 Tushare 字段")}</Btn></div>}
               </div>
               <div className="flex flex-col gap-2 border-t border-border pt-3">
                 <label className="flex items-center gap-2">

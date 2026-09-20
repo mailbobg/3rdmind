@@ -34,11 +34,16 @@ def main(provider, market, start, end, out_dir, region="cn"):
     extra_note = ""
     if region == "cn":
         # Turnover, valuation, float cap and the ST flag from the baostock cache beside the universe exports.
-        from studio_extra import README_NOTE, attach
+        import studio_extra
+        import studio_tushare
 
-        frame, attached = attach(frame, Path(out_dir).parent.parent / "extra" / "baostock")
+        extra_root = Path(out_dir).parent.parent / "extra"
+        frame, attached = studio_extra.attach(frame, extra_root / "baostock")
         if attached:
-            extra_note = README_NOTE
+            extra_note = studio_extra.README_NOTE
+        frame, attached = studio_tushare.attach(frame, extra_root / "tushare")
+        if attached:
+            extra_note += studio_tushare.README_NOTE
     out = Path(out_dir)
     (out / "full").mkdir(parents=True, exist_ok=True)
     (out / "debug").mkdir(parents=True, exist_ok=True)

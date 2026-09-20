@@ -34,7 +34,10 @@ def ensure_data(provider, data_path, start, market="csi300", region="cn"):
     if data_path.is_file():
         existing = pd.read_hdf(data_path)
         dates = existing.index.get_level_values("datetime")
-        extra_ready = region != "cn" or not (data_path.parent / "extra" / "baostock").is_dir() or "$turnover" in existing.columns
+        extra_root = data_path.parent / "extra"
+        tushare_cached = (extra_root / "tushare").is_dir() and any((extra_root / "tushare").iterdir())
+        extra_ready = region != "cn" or ((not (extra_root / "baostock").is_dir() or "$turnover" in existing.columns)
+                                         and (not tushare_cached or "$mf_net_xl" in existing.columns))
         if pd.Timestamp(dates.max()) >= last and pd.Timestamp(dates.min()) <= pd.Timestamp(start) and extra_ready:
             return str(dates.min().date()), str(dates.max().date()), int(len(existing))
     frame = D.features(D.instruments(market), FIELDS, start_time=start, end_time=str(last.date()), freq="day")
@@ -43,9 +46,11 @@ def ensure_data(provider, data_path, start, market="csi300", region="cn"):
     frame = frame.sort_index().astype("float32")
     frame.index = frame.index.set_names(["datetime", "instrument"])
     if region == "cn":
-        from studio_extra import attach
+        import studio_extra
+        import studio_tushare
 
-        frame, _ = attach(frame, data_path.parent / "extra" / "baostock")
+        frame, _ = studio_extra.attach(frame, data_path.parent / "extra" / "baostock")
+        frame, _ = studio_tushare.attach(frame, data_path.parent / "extra" / "tushare")
     data_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_hdf(data_path, key="data", mode="w")
     dates = frame.index.get_level_values("datetime")

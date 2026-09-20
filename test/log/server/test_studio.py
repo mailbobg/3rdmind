@@ -2612,6 +2612,122 @@ def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeyp
 
 
 @pytest.mark.offline
+def test_tushare_fields_point_in_time_and_job(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_tushare
+
+    cache = tmp_path / "traces" / "studio_data" / "extra" / "tushare"
+    for name in ("moneyflow", "margin", "toplist", "fina", "express", "holders", "unlock"):
+        (cache / name).mkdir(parents=True)
+    (cache / "moneyflow" / "20250102.csv").write_text("ts_code,trade_date,buy_sm_amount,sell_sm_amount,buy_md_amount,sell_md_amount,buy_lg_amount,sell_lg_amount,buy_elg_amount,sell_elg_amount\n"
+                                                      "600000.SH,20250102,1,2,3,4,5,6,10,4\n920000.BJ,20250102,1,1,1,1,1,1,1,1\n")
+    (cache / "margin" / "20250102.csv").write_text("trade_date,ts_code,rzye,rqye,rzmre,rqyl,rzche,rqchl,rqmcl,rzrqye\n20250102,600000.SH,100,5,20,0,10,0,3,105\n")
+    (cache / "toplist" / "20250103.csv").write_text("trade_date,ts_code,name,net_amount,reason\n20250103,600000.SH,x,-50,a\n20250103,600000.SH,x,80,b\n")
+    # A report announced on 01-02 is visible from 01-03; the earlier one fills 01-02.
+    (cache / "fina" / "20241231.csv").write_text("ts_code,ann_date,end_date,roe,roe_dt,netprofit_yoy,dt_netprofit_yoy,or_yoy,q_sales_yoy,grossprofit_margin,debt_to_assets,ocfps,bps\n"
+                                                 "600000.SH,20250102,20241231,12,11,30,25,8,9,40,55,1.5,10\n")
+    (cache / "fina" / "20240930.csv").write_text("ts_code,ann_date,end_date,roe,roe_dt,netprofit_yoy,dt_netprofit_yoy,or_yoy,q_sales_yoy,grossprofit_margin,debt_to_assets,ocfps,bps\n"
+                                                 "600000.SH,20241025,20240930,9,8,20,15,6,7,38,56,1.2,9\n")
+    (cache / "express" / "20241231.csv").write_text("ts_code,ann_date,end_date,n_income,yoy_net_profit\n600000.SH,20241230,20241231,130,100\n")
+    (cache / "holders" / "20241230.csv").write_text("ts_code,ann_date,end_date,holder_num\n600000.SH,20241230,20241231,110\n600000.SH,20241001,20240930,100\n")
+    (cache / "unlock" / "20250106.csv").write_text("ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type\n"
+                                                   "600000.SH,20241220,20250110,1000,0.5,a,b\n600000.SH,20250105,20250108,500,0.25,a,b\n")
+    days = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])
+    grid = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
+    ohlcv = pd.DataFrame({"$close": 1.0}, index=grid)
+    joined, attached = studio_tushare.attach(ohlcv, cache)
+    assert attached and set(joined.columns) == {"$close", *studio_tushare.EXTRA_COLUMNS}
+    row = joined.loc[(days[0], "SH600000")]
+    assert row["$mf_net_xl"] == pytest.approx(6e4) and row["$mf_net_sm"] == pytest.approx(-1e4) and row["$rz_bal"] == 100
+    assert pd.isna(joined.loc[(days[0], "SH600004"), "$rz_bal"]) and "BJ" not in {i[1][:2] for i in joined.index}
+    assert joined.loc[(days[1], "SH600000"), "$lhb"] == 1 and joined.loc[(days[1], "SH600000"), "$lhb_net"] == 30 and joined.loc[(days[0], "SH600000"), "$lhb"] == 0
+    # Point in time: 01-02 still sees the Q3 report; 01-03 sees the annual one announced on 01-02.
+    assert joined.loc[(days[0], "SH600000"), "$roe"] == pytest.approx(0.09) and joined.loc[(days[1], "SH600000"), "$roe"] == pytest.approx(0.12)
+    assert joined.loc[(days[0], "SH600000"), "$rep_days"] == (days[0] - pd.Timestamp("2024-10-25")).days
+    assert joined.loc[(days[0], "SH600000"), "$ex_np_yoy"] == pytest.approx(0.3)  # growth from last year's absolute profit
+    assert joined.loc[(days[0], "SH600000"), "$holder_num"] == 110 and joined.loc[(days[0], "SH600000"), "$holder_chg"] == pytest.approx(0.1)
+    # Unlocks: on 01-02 only the one announced in December is known (1000 shares); by 01-06 both are.
+    assert joined.loc[(days[0], "SH600000"), "$unlock_30d"] == 1000 and joined.loc[(days[2], "SH600000"), "$unlock_30d"] == 1500
+    assert joined.loc[(days[0], "SH600004"), "$unlock_30d"] == 0
+    assert studio_tushare.attach(ohlcv, tmp_path / "nowhere")[1] is False
+    # Plan: day keys missing are fetched, finished ones are not; open periods and the current week are refreshed.
+    (cache / "fina" / "20240630.csv").write_text("ts_code,ann_date,end_date\n")  # a closed period: never re-fetched
+    tasks = studio_tushare.plan(cache, ["2025-01-02", "2025-01-03", "2025-01-06"], "2025-01-02", "2025-01-06")
+    names = {(t[0], t[1]) for t in tasks}
+    assert ("moneyflow", "20250102") not in names and ("moneyflow", "20250103") in names
+    assert ("fina", "20241231") in names and ("fina", "20240630") not in names and ("fina", "20240331") in names
+    (cache / "holders" / "20241216.csv").write_text("ts_code,ann_date,end_date,holder_num\n")  # an old week: finished
+    tasks = studio_tushare.plan(cache, ["2025-01-02", "2025-01-03", "2025-01-06"], "2025-01-02", "2025-01-06")
+    names = {(t[0], t[1]) for t in tasks}
+    assert ("holders", "20241216") not in names and ("holders", "20250106") in names and ("unlock", "20250106") in names
+    assert all("_retried" not in t[2] for t in tasks)
+    # Status and the route: unconfigured servers are refused before a job starts.
+    monkeypatch.setattr(studio_module, "TUSHARE_CACHE", cache)
+    status = studio_client.get("/studio/data/extra").get_json()["tushare"]
+    assert status["tables"]["moneyflow"] == 1 and status["last"] == "2025-01-03" and status["columns"] == studio_tushare.EXTRA_COLUMNS
+    for key in ("TUSHARE_MIRROR_TOKEN", "TUSHARE_MIRROR_URL", "DATAHUB_API_KEY", "DATAHUB_BASE"):
+        monkeypatch.delenv(key, raising=False)
+    assert studio_client.post("/studio/data/extra", json={"source": "tushare"}).status_code == 400
+    assert studio_client.post("/studio/data/extra", json={"source": "nowhere"}).status_code == 400
+    monkeypatch.setenv("DATAHUB_API_KEY", "k"); monkeypatch.setenv("DATAHUB_BASE", "http://x")
+    calls = []
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return type("P", (), {"stdout": json.dumps({"status": "completed", "planned": 3, "done": 3, "failed": [], "failed_count": 0}), "stderr": "", "returncode": 0})()
+    monkeypatch.setattr(studio_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)
+    started = studio_client.post("/studio/data/extra", json={"source": "tushare"})
+    assert started.status_code == 202, started.get_json()
+    job = wait_job(studio_client, started.get_json()["job"])
+    assert job["status"] == "completed" and job["result"]["done"] == 3
+    assert calls[0][1].endswith("studio_tushare.py") and calls[0][2] == "fetch" and calls[0][3] == str(cache)
+
+
+@pytest.mark.offline
+def test_tushare_fetch_shares_work_and_hands_capped_answers_to_the_paging_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_tushare
+
+    monkeypatch.setattr(studio_tushare, "MIRROR_PACE", 0.0)
+    monkeypatch.setattr(studio_tushare, "MAIN_PACE", 0.0)
+    monkeypatch.setattr(studio_tushare, "BACKOFFS", (0.0,))
+    monkeypatch.setattr(studio_tushare, "REST", 0.0)
+    seen = {"mirror": [], "main": []}
+
+    class FakeMirror(studio_tushare.Server):
+        def __init__(self):
+            super().__init__("mirror", 0.0)
+
+        def query(self, api, params):
+            seen["mirror"].append((api, params))
+            if api == "margin_detail":
+                raise RuntimeError("EOF occurred in violation of protocol")  # throttled: handed over
+            if api == "stk_holdernumber":
+                raise studio_tushare.Capped("6000 rows")
+            return pd.DataFrame({"ts_code": ["600000.SH"], "trade_date": [params.get("trade_date", "20250102")], "x": [1.0]})
+
+    class FakeMain(studio_tushare.Server):
+        def __init__(self):
+            super().__init__("main", 0.0)
+
+        def query(self, api, params):
+            seen["main"].append((api, params))
+            return pd.DataFrame({"ts_code": ["600000.SH", "600004.SH"], "trade_date": ["20250102"] * 2, "x": [1.0, 2.0]})
+
+    monkeypatch.setattr(studio_tushare, "servers", lambda env=None: [("mirror", FakeMirror), ("main", FakeMain)])
+    cache = tmp_path / "tushare"
+    result = studio_tushare.fetch(cache, ["2025-01-02"], "2025-01-02", "2025-01-02")
+    assert result["failed"] == [] and result["done"] == result["planned"]
+    day_tables = [n for n, t in studio_tushare.TABLES.items() if t.key == "day"]
+    assert all((cache / n / "20250102.csv").is_file() for n in day_tables)
+    # The unlock table goes straight to the paging server; capped and throttled mirror answers end up there too.
+    assert all(api != "share_float" for api, _ in seen["mirror"]) and any(api == "share_float" for api, _ in seen["main"])
+    assert any(api == "stk_holdernumber" for api, _ in seen["main"]) and any(api == "margin_detail" for api, _ in seen["main"])
+    assert len(pd.read_csv(cache / "margin" / "20250102.csv")) == 2  # the main server's answer was the one written
+    # A second run plans only the still-open keys: no day table is fetched again.
+    again = studio_tushare.plan(cache, ["2025-01-02"], "2025-01-02", "2025-01-02")
+    assert not any(studio_tushare.TABLES[n].key == "day" for n, _, _ in again)
+
+
+@pytest.mark.offline
 def test_analysis_cache_survives_a_rewrite_with_the_same_content(tmp_path: Path) -> None:
     days = pd.bdate_range("2025-01-01", periods=4)
     index = pd.MultiIndex.from_product([days, ["A", "B"]], names=["datetime", "instrument"])

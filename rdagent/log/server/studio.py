@@ -2032,14 +2032,38 @@ def data_build_status():
                     "finished_at": datetime.fromtimestamp(BUILD_LOG.stat().st_mtime, tz=timezone.utc).isoformat() if BUILD_LOG.is_file() and not running else None})
 
 
-# ---- Extra daily fields for A-shares (baostock): turnover, valuation, float cap, ST -------------------------
+# ---- Extra fields for A-shares: baostock (turnover, valuation, float cap, ST) and Tushare (money flow, margin,
+# northbound, chips, fundamentals, events) ---------------------------------------------------------------------
 
 EXTRA_CACHE = TRACE_ROOT / "studio_data" / "extra" / "baostock"
+TUSHARE_CACHE = TRACE_ROOT / "studio_data" / "extra" / "tushare"
 EXTRA_MARKETS = ("csi300", "csi1000")  # the universes whose exports carry the fields
+EXTRA_SOURCES = ("baostock", "tushare")
+
+
+def export_carries(column):
+    """Which universe exports already carry ``column``."""
+    exports = {}
+    for market in EXTRA_MARKETS:
+        meta = TRACE_ROOT / "studio_data" / "universe" / market / "meta.json"
+        try:
+            exports[market] = column in (json.loads(meta.read_text()).get("columns") or [])
+        except (OSError, ValueError):
+            exports[market] = False
+    return exports
+
+
+def tushare_status():
+    """Per-table cache counts, last day, whether keys are configured, and which exports carry the columns."""
+    from rdagent.log.server import studio_tushare
+
+    return {**studio_tushare.status(TUSHARE_CACHE), "columns": list(studio_tushare.EXTRA_COLUMNS),
+            "exports": export_carries(studio_tushare.EXTRA_COLUMNS[0])}
 
 
 def extra_status():
-    """How much of the baostock cache there is: instruments, last date, and which universe exports carry the columns."""
+    """How much of the baostock cache there is: instruments, last date, and which universe exports carry the
+    columns; plus the Tushare cache under ``tushare``."""
     files = list(EXTRA_CACHE.glob("*.csv")) if EXTRA_CACHE.is_dir() else []
     last = ""
     for path in files[:2000]:
@@ -2049,14 +2073,8 @@ def extra_status():
             continue
         if "," in tail and not tail.startswith("date"):
             last = max(last, tail.split(",")[0])
-    exports = {}
-    for market in EXTRA_MARKETS:
-        meta = TRACE_ROOT / "studio_data" / "universe" / market / "meta.json"
-        try:
-            exports[market] = "$turnover" in (json.loads(meta.read_text()).get("columns") or [])
-        except (OSError, ValueError):
-            exports[market] = False
-    return {"instruments": len(files), "last": last or None, "columns": studio_extra_columns(), "exports": exports}
+    return {"instruments": len(files), "last": last or None, "columns": studio_extra_columns(), "exports": export_carries("$turnover"),
+            "tushare": tushare_status()}
 
 
 def studio_extra_columns():
@@ -2079,20 +2097,25 @@ def member_codes(markets):
     return sorted(codes)
 
 
-def run_extra_fetch(job, markets):
-    """Fetch the baostock fields for the members of ``markets``, then rebuild those universes' exports so
-    research sees the new columns (recomputation rebuilds its latest file by itself)."""
-    codes = member_codes(markets)
-    EXTRA_CACHE.mkdir(parents=True, exist_ok=True)
-    codes_file = EXTRA_CACHE.parent / "codes.txt"
-    codes_file.write_text("\n".join(codes))
+def run_extra_fetch(job, markets, source="baostock"):
+    """Fetch the extra fields from ``source`` (baostock per member instrument, Tushare per trading day for the
+    whole market), then rebuild those universes' exports so research sees the new columns (recomputation
+    rebuilds its latest file by itself)."""
     calendar = studio_markets.provider_for("cn") / "calendars" / "day.txt"
     end = calendar.read_text().strip().splitlines()[-1] if calendar.is_file() else datetime.now().strftime("%Y-%m-%d")
     start = os.environ.get("STUDIO_REFRESH_START", "2022-10-10")
-    studio_jobs.update(job["id"], message=f"从 baostock 取 {len(codes)} 只股票的字段")
-    completed = subprocess.run(
-        [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_extra.py")), "fetch", str(EXTRA_CACHE), str(codes_file), start, end],
-        capture_output=True, text=True, timeout=4 * 3600)
+    if source == "tushare":
+        TUSHARE_CACHE.mkdir(parents=True, exist_ok=True)
+        studio_jobs.update(job["id"], message="从 Tushare 按交易日取全市场字段")
+        command = [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_tushare.py")), "fetch", str(TUSHARE_CACHE), str(calendar), start, end]
+    else:
+        codes = member_codes(markets)
+        EXTRA_CACHE.mkdir(parents=True, exist_ok=True)
+        codes_file = EXTRA_CACHE.parent / "codes.txt"
+        codes_file.write_text("\n".join(codes))
+        studio_jobs.update(job["id"], message=f"从 baostock 取 {len(codes)} 只股票的字段")
+        command = [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_extra.py")), "fetch", str(EXTRA_CACHE), str(codes_file), start, end]
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=12 * 3600)
     line = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
     try:
         status = json.loads(line)
@@ -2129,18 +2152,26 @@ def data_extra_status():
 
 @studio.post("/data/extra")
 def data_extra_start():
-    """Fetch (or extend) the baostock fields for the A-share research universes and rebuild their exports."""
+    """Fetch (or extend) the baostock or Tushare fields for the A-share research universes and rebuild their exports."""
     body = request.get_json() or {}
     markets = [m for m in (body.get("markets") or list(EXTRA_MARKETS)) if m in EXTRA_MARKETS]
     if not markets:
         return jsonify({"error": "markets must be among " + ", ".join(EXTRA_MARKETS)}), 400
+    source = body.get("source") or "baostock"
+    if source not in EXTRA_SOURCES:
+        return jsonify({"error": "source must be among " + ", ".join(EXTRA_SOURCES)}), 400
+    if source == "tushare":
+        from rdagent.log.server import studio_tushare
+
+        if not studio_tushare.configured():
+            return jsonify({"error": "没有配置 Tushare 服务器（TUSHARE_MIRROR_TOKEN/URL 或 DATAHUB_API_KEY/BASE）"}), 400
     running = studio_jobs.find("extra_data")
     if running is not None:
         return jsonify({"job": running["id"]}), 202
     if workers_busy(current_app):
         return jsonify({"error": "有回测或研究正在运行，等它们结束再取字段"}), 409
-    job = studio_jobs.run("extra_data", "取 baostock 扩展字段", in_app(lambda job: run_extra_fetch(job, markets)),
-                          market=markets[0], link={"page": "factors", "region": "cn"})
+    job = studio_jobs.run("extra_data", "取 Tushare 扩展字段" if source == "tushare" else "取 baostock 扩展字段",
+                          in_app(lambda job: run_extra_fetch(job, markets, source)), market=markets[0], link={"page": "factors", "region": "cn"})
     return jsonify({"job": job["id"]}), 202
 
 
