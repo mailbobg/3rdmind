@@ -305,8 +305,28 @@ def latest_data_path(market):
     return LATEST_DATA if market == "csi300" else LATEST_DATA.with_name(f"daily_pv_latest.{market}.h5")
 
 
+_REFRESH_LOCK = threading.Lock()
+
+
 def run_refresh(code_path, name, out_dir, market="csi300"):
-    """Recompute one factor on the latest data of its universe in a subprocess; returns its meta on success."""
+    """Recompute one factor on the latest data of its universe in a subprocess; returns its meta on success.
+
+    Recomputations run one at a time: every one may rebuild the universe's shared latest-data file, and two
+    runs asking for the same factor would write the same result.h5 (HDF5 refuses concurrent writers). A run
+    that waited for another to recompute the same factor finds the fresh result and returns its meta."""
+    with _REFRESH_LOCK:
+        meta_path = Path(out_dir) / "meta.json"
+        if meta_path.is_file() and (Path(out_dir) / "result.h5").is_file():
+            try:
+                meta = json.loads(meta_path.read_text())
+                if time.time() - meta_path.stat().st_mtime < 600:
+                    return meta  # just recomputed by the run that held the lock
+            except ValueError:
+                pass
+        return _run_refresh(code_path, name, out_dir, market)
+
+
+def _run_refresh(code_path, name, out_dir, market):
     record = studio_markets.universe(market)
     start = os.environ.get("STUDIO_REFRESH_START", "2022-10-10")
     completed = subprocess.run(

@@ -284,7 +284,8 @@ def test_resume_appends_to_the_same_trace(studio_client, tmp_path: Path, monkeyp
     trace_folder = server.app.config["LOG_FOLDER_PATH"]
     trace_dir = trace_folder / "Finance Data Building/demo"
     (trace_dir / "__session__" / "0").mkdir(parents=True)
-    export = Path(server.UI_SETTING.trace_folder) / "studio_data" / "universe" / "csi300" / "full"
+    monkeypatch.setattr(server.UI_SETTING, "trace_folder", str(trace_folder))
+    export = trace_folder / "studio_data" / "universe" / "csi300" / "full"
     export.mkdir(parents=True); (export / "daily_pv.h5").write_bytes(b"")  # the universe's data is already prepared
     previous = server.rdagent_processes[str(trace_dir)]
     previous.messages = [
@@ -2733,6 +2734,27 @@ def test_tushare_fetch_shares_work_and_hands_capped_answers_to_the_paging_server
     # A second run plans only the still-open keys: no day table is fetched again.
     again = studio_tushare.plan(cache, ["2025-01-02"], "2025-01-02", "2025-01-02")
     assert not any(studio_tushare.TABLES[n].key == "day" for n, _, _ in again)
+
+
+@pytest.mark.offline
+def test_concurrent_runs_recompute_a_factor_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    out = tmp_path / "refresh"; out.mkdir()
+    runs = []
+
+    def slow_refresh(code_path, name, out_dir, market):
+        runs.append(name)
+        (Path(out_dir) / "result.h5").write_bytes(b"")
+        (Path(out_dir) / "meta.json").write_text(json.dumps({"signal_end": "2026-09-18"}))
+        return {"signal_end": "2026-09-18"}
+
+    monkeypatch.setattr(studio_module, "_run_refresh", slow_refresh)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(studio_module.run_refresh(tmp_path / "factor.py", "F", out, "csi300"))) for _ in range(3)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert runs == ["F"] and all(r["signal_end"] == "2026-09-18" for r in results)
 
 
 @pytest.mark.offline
