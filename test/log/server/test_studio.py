@@ -1732,6 +1732,28 @@ def test_validate_config_accepts_horizon_and_rebalance() -> None:
 
 
 @pytest.mark.offline
+def test_validate_config_book_defaults_to_equal_weight() -> None:
+    assert validate_config(_config())["book"] == "equal"
+    assert validate_config(_config(book="topk"))["book"] == "topk"
+    with pytest.raises(ValueError):
+        validate_config(_config(book="hedge"))
+
+
+@pytest.mark.offline
+def test_lottery_diagnosis_flags_a_few_names_carrying_the_return() -> None:
+    from rdagent.log.server.studio_worker import lottery_diagnosis
+
+    # Strategy III's shape: three names hold 45% of the P&L, the median name makes nothing.
+    concentrated = [{"pnl": 220_000}, {"pnl": 120_000}, {"pnl": 85_000}] + [{"pnl": 1_000}] * 250 + [{"pnl": -1_000}] * 250 + [{"pnl": 50}] * 100
+    out = lottery_diagnosis(concentrated, 0.96, max_weight=0.25)
+    assert out["lottery"] and out["top3_share"] > 0.4 and out["return_without_top3"] < 0.6 and out["max_weight"] == 0.25
+    spread = [{"pnl": 1_000 + i} for i in range(300)] + [{"pnl": -500}] * 100
+    out = lottery_diagnosis(spread, 0.3)
+    assert not out["lottery"] and out["top10_share"] < 0.1 and out["positive_share"] == pytest.approx(0.75)
+    assert lottery_diagnosis([], 0.0)["lottery"] is False and lottery_diagnosis([{"pnl": -5.0}], -0.1)["top10_share"] is None
+
+
+@pytest.mark.offline
 def test_hold_scores_repeats_each_blocks_first_day() -> None:
     from rdagent.log.server.studio_worker import hold_scores
 

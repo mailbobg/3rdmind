@@ -171,7 +171,7 @@ export function StrategiesPage() {
               </div>
             </Section>
           )}
-          <Section title={t("成员")} note={t("{0} 个信号 · {1} · {2} · topk {3} / n_drop {4}", [detail.factors.length, detail.model.method === "lgbm" ? "LightGBM" : t("排名加权"), detail.params.market, detail.params.topk, detail.params.n_drop]) + ((detail.params.horizon ?? 1) > 1 ? t(" · 预测期限 {0} 天", [detail.params.horizon]) : "") + ((detail.params.rebalance ?? 1) > 1 ? t(" · 调仓间隔 {0} 天", [detail.params.rebalance]) : "") + (detail.params.neutral && detail.params.neutral !== "none" ? t(" · 中性化：{0}", [detail.params.neutral === "size" ? t("规模") : t("规模 + 行业")]) : "")}>
+          <Section title={t("成员")} note={t("{0} 个信号 · {1} · {2} · topk {3} / n_drop {4}", [detail.factors.length, detail.model.method === "lgbm" ? "LightGBM" : t("排名加权"), detail.params.market, detail.params.topk, detail.params.n_drop]) + ((detail.params.horizon ?? 1) > 1 ? t(" · 预测期限 {0} 天", [detail.params.horizon]) : "") + ((detail.params.rebalance ?? 1) > 1 ? t(" · 调仓间隔 {0} 天", [detail.params.rebalance]) : "") + (detail.params.neutral && detail.params.neutral !== "none" ? t(" · 中性化：{0}", [detail.params.neutral === "size" ? t("规模") : t("规模 + 行业")]) : "") + (detail.params.book === "topk" || !detail.params.book ? t(" · TopkDropout 账簿") : t(" · 等权账簿"))}>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               {detail.factors.map((f) => <span key={`${f.trace}#${f.loop_id}#${f.name}`} className="flex items-center gap-1 text-xs"><Mono>{f.name}</Mono><span className="text-muted">{t("×{0} · {1} 第 {2} 轮", [f.weight, shortName(f.trace), f.loop_id + 1])}</span></span>)}
             </div>

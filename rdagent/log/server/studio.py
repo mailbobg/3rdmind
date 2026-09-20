@@ -1633,7 +1633,7 @@ def backtest_diagnose(job_id):
 
 # ---- Strategies: a named factor portfolio with its evidence and its tracking runs -----------------------
 
-STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost", "horizon", "rebalance", "neutral", "stagger")
+STRATEGY_PARAMS = ("market", "benchmark", "topk", "n_drop", "account", "open_cost", "close_cost", "horizon", "rebalance", "neutral", "stagger", "book")
 
 
 def strategy_path(strategy_id):

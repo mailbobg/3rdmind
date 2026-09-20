@@ -47,6 +47,14 @@ def validate_config(config):
     if neutral not in NEUTRAL_MODES:
         raise ValueError("neutral must be none, size or size_industry")
     result["neutral"] = neutral
+    # book: how the score becomes positions. "equal" (default) puts the top names at equal weight on every
+    # rebalance day and lets them drift in between; "topk" is Qlib's TopkDropout, whose positions are sized by
+    # the cash of that day's swaps, so a name bought on a quiet day can grow to a quarter of the book (the
+    # 2026-09-20 finding: strategy III's +96% was three such names).
+    book = str(result.get("book") or "equal")
+    if book not in BOOKS:
+        raise ValueError("book must be equal or topk")
+    result["book"] = book
     for key in ("horizon", "rebalance"):
         value = float(1 if result.get(key) is None else result[key])
         if not math.isfinite(value) or not value.is_integer() or not 1 <= value <= 20:
@@ -652,6 +660,120 @@ def staggered_scores(score, every, tranches):
     return pd.concat(held, axis=1).mean(axis=1).sort_index()
 
 
+BOOKS = ("equal", "topk")
+LOTTERY_TOP10_SHARE = 0.5   # more than half the P&L from ten names: the result is a few stocks, not a selection edge
+LOTTERY_WITHOUT_TOP3 = 0.5  # or losing the best three names removes more than half of the return
+
+
+def daily_closes(instruments, start, end):
+    """Adjusted closes as a (datetime × instrument) frame, suspended days forward-filled."""
+    from qlib.data import D
+
+    frame = D.features(sorted(set(instruments)), ["$close"], start_time=start, end_time=end, freq="day")["$close"]
+    if frame.index.names[0] == "instrument":
+        frame = frame.swaplevel(0, 1)
+    return frame.unstack("instrument").sort_index().ffill()
+
+
+def equal_book(score, config, universe=None):
+    """The equal-weight book: on the trading day after each signal refresh, hold the top ``topk`` names by the
+    previous day's score at equal weight; positions drift with prices until the next refresh. Returns the daily
+    report Qlib's would (return, cost, bench, turnover, account), the trade log, the closing book, the
+    per-block membership, and the per-instrument P&L.
+
+    ``universe=True`` holds every name that has a score that day instead of the top names: the equal-weight
+    universe, the baseline a selection has to beat. Limit-up/down and lot sizes are ignored (noted in method).
+    """
+    import numpy as np
+    import pandas as pd
+    from qlib.data import D
+
+    rebalance = int(config.get("rebalance", 1))
+    held = hold_scores(score, rebalance)
+    days = held.index.get_level_values("datetime").unique().sort_values()
+    refresh_days = set(days[::rebalance])  # the block starts hold_scores() uses
+    start, end = pd.Timestamp(config["start"]), pd.Timestamp(config["end"])
+    calendar = pd.DatetimeIndex(D.calendar(freq="day"))
+    trade_days = calendar[(calendar >= start) & (calendar <= end)]
+    closes = daily_closes(held.index.get_level_values("instrument").unique(), calendar[max(0, calendar.searchsorted(start) - 1)], end)
+    bench = D.features([config.get("benchmark", "SH000300")], ["$close"], start_time=trade_days[0], end_time=end, freq="day")["$close"].droplevel(0).reindex(trade_days).ffill()
+    bench_ret = bench.pct_change().fillna(0.0)
+    topk = int(config["topk"])
+    account = float(config["account"])
+    open_cost, close_cost = float(config["open_cost"]), float(config["close_cost"])
+    value, weights = account, pd.Series(dtype=float)  # weights: instrument -> value held
+    rows, trades, blocks, pnl = [], [], [], {}
+    previous_day, current_set = None, None
+    for day in trade_days:
+        # Mark to market from the previous close.
+        if previous_day is not None and len(weights):
+            ratio = (closes.loc[day, weights.index] / closes.loc[previous_day, weights.index]).fillna(1.0)
+            gained = weights * (ratio - 1.0)
+            for inst, g in gained.items():
+                pnl[inst] = pnl.get(inst, 0.0) + float(g)
+            weights = weights * ratio
+            day_return = float(gained.sum() / value)
+            value += float(gained.sum())
+        else:
+            day_return = 0.0
+        # Yesterday's score decides today's book (Qlib's TopkDropout reads the previous day's prediction).
+        signal_day = calendar[calendar.searchsorted(day) - 1]
+        cost, turnover = 0.0, 0.0
+        if signal_day in refresh_days or (current_set is None and signal_day in days):
+            cross = held.xs(signal_day, level="datetime").dropna()
+            priced = cross.index.intersection(closes.columns[closes.loc[day].notna()])
+            cross = cross.reindex(priced)
+            chosen = set(cross.index) if universe else set(cross.nlargest(topk).index)
+            if chosen and chosen != current_set:
+                target = pd.Series(value / len(chosen), index=sorted(chosen))
+                merged = pd.concat([weights.rename("now"), target.rename("target")], axis=1).fillna(0.0)
+                delta = merged["target"] - merged["now"]
+                sold, bought = float(-delta[delta < 0].sum()), float(delta[delta > 0].sum())
+                cost = sold * close_cost + bought * open_cost
+                turnover = (sold + bought) / 2 / value if value else 0.0
+                for inst, d in delta[delta.abs() > 1e-9].items():
+                    trades.append({"date": str(day.date()), "instrument": str(inst), "direction": "buy" if d > 0 else "sell",
+                                   "amount": abs(float(d)) / float(closes.loc[day, inst]), "price": float(closes.loc[day, inst]), "value": abs(float(d)),
+                                   "cost": abs(float(d)) * (open_cost if d > 0 else close_cost)})
+                for inst in delta.index:
+                    pnl[inst] = pnl.get(inst, 0.0) - abs(float(delta[inst])) * (open_cost if delta[inst] > 0 else close_cost)
+                value -= cost
+                weights = target * (value / target.sum()) if target.sum() else target
+                current_set = chosen
+                blocks.append({"date": str(day.date()), "names": len(chosen)})
+        rows.append({"date": day, "return": day_return, "cost": cost / (value + cost) if value else 0.0, "bench": float(bench_ret.loc[day]), "turnover": turnover, "account": value})
+        previous_day = day
+    report = pd.DataFrame(rows).set_index("date")  # return is gross of cost, as in Qlib's report
+    positions = [{"instrument": str(inst), "amount": float(v / closes.loc[previous_day, inst]), "price": float(closes.loc[previous_day, inst]), "value": float(v), "weight": float(v / value)}
+                 for inst, v in weights.sort_values(ascending=False).items()] if len(weights) else []
+    holdings = {"positions": positions, "cash": 0.0, "total": float(value), "as_of": str(previous_day.date()) if previous_day is not None else None}
+    instruments = sorted(({"instrument": inst, "pnl": float(p), "held": inst in weights.index, "trades": sum(1 for t in trades if t["instrument"] == inst),
+                           "holding_value": float(weights.get(inst, 0.0))} for inst, p in pnl.items()), key=lambda r: -r["pnl"])
+    return report, trades, holdings, instruments, blocks
+
+
+def lottery_diagnosis(instruments, total_return, max_weight=None):
+    """Is the return a selection edge or a few names? Shares of the total P&L held by the best names, the
+    return left when the best three are taken out, and how many names made money at all."""
+    pnls = sorted((float(r["pnl"]) for r in instruments), reverse=True)
+    total = sum(pnls)
+    if not pnls or total <= 0:
+        return {"names": len(pnls), "top10_share": None, "top3_share": None, "return_without_top3": None,
+                "positive_share": float(sum(1 for p in pnls if p > 0) / len(pnls)) if pnls else None, "max_weight": max_weight, "lottery": False}
+    top3, top10 = sum(pnls[:3]) / total, sum(pnls[:10]) / total
+    without = total_return * (1 - top3)
+    return {"names": len(pnls), "top10_share": top10, "top3_share": top3, "return_without_top3": without,
+            "positive_share": float(sum(1 for p in pnls if p > 0) / len(pnls)), "max_weight": max_weight,
+            "lottery": bool(top10 > LOTTERY_TOP10_SHARE or (total_return > 0 and without < LOTTERY_WITHOUT_TOP3 * total_return))}
+
+
+def book_report(score, config):
+    """The daily report of the configured book: Qlib's TopkDropout or the equal-weight book."""
+    if config.get("book", "equal") == "topk":
+        return backtest_score(score, config)[0]
+    return equal_book(score, config)[0]
+
+
 def backtest_score(score, config):
     """Run Qlib's TopkDropout backtest on ``score``; returns the daily report and Qlib's positions/indicators."""
     from qlib.backtest import backtest
@@ -918,16 +1040,37 @@ def run(config):
     ic, rank_ic = daily_ic(score, prepared["label"])
     test_ic, test_rank_ic = (float(ic.mean()) if ic is not None and len(ic) else None, float(rank_ic.mean()) if rank_ic is not None and len(rank_ic) else None)
     signal = latest_scores(score, config["topk"])
-    report, positions, indicator = backtest_score(score, config)
-    trades = trades_from_indicator(getattr(indicator, "order_indicator_his", {}))
-    last_day = max(positions) if positions else None
-    holdings = holdings_from_position(positions[last_day]) if last_day is not None else {"positions": [], "cash": None, "total": None}
-    if last_day is not None:
-        holdings["as_of"] = str(getattr(last_day, "date", lambda: last_day)())
+    baseline = None
+    if config.get("book", "equal") == "topk":
+        report, positions, indicator = backtest_score(score, config)
+        trades = trades_from_indicator(getattr(indicator, "order_indicator_his", {}))
+        last_day = max(positions) if positions else None
+        holdings = holdings_from_position(positions[last_day]) if last_day is not None else {"positions": [], "cash": None, "total": None}
+        max_weight = max((float(positions[d].get_stock_weight(i)) for d in positions for i in positions[d].get_stock_list()), default=None)
+        if last_day is not None:
+            holdings["as_of"] = str(getattr(last_day, "date", lambda: last_day)())
+            traded = {t["instrument"] for t in trades} | {r["instrument"] for r in holdings["positions"]}
+            trades, holdings = unadjust_book(trades, holdings, load_factors(traded, config["start"], holdings["as_of"]))
+        instruments = instrument_summary(trades, holdings)
+    else:
+        report, trades, holdings, instruments, _ = equal_book(score, config)
+        max_weight = max((r["weight"] for r in holdings["positions"]), default=None)
         traded = {t["instrument"] for t in trades} | {r["instrument"] for r in holdings["positions"]}
         trades, holdings = unadjust_book(trades, holdings, load_factors(traded, config["start"], holdings["as_of"]))
-    instruments = instrument_summary(trades, holdings)
+        # The equal-weight universe on the same days: what holding everything with a score would have made.
+        universe_report = equal_book(score, config, universe=True)[0]
+        universe_metrics, universe_rows = summarize_report(universe_report)
+        baseline = {"universe_return": universe_metrics["total_return"], "universe_sharpe": universe_metrics["sharpe"],
+                    "equity": [[r["date"], round(r["equity"], 6)] for r in universe_rows]}
     metrics, rows = summarize_report(report)
+    lottery = lottery_diagnosis(instruments, metrics["total_return"], max_weight)
+    if baseline is not None:
+        baseline["selection_return"] = metrics["total_return"] - baseline["universe_return"]
+        net = (report["return"] - report["cost"]) - (universe_report["return"] - universe_report["cost"])
+        monthly = net.groupby(net.index.to_period("M")).sum()
+        baseline["selection_t"] = float(monthly.mean() / monthly.std(ddof=1) * (len(monthly) ** 0.5)) if len(monthly) > 2 and monthly.std(ddof=1) > 0 else None
+    if lottery["lottery"]:
+        prepared["notes"].append(f"彩票结构：前 10 只股票占盈亏 {lottery['top10_share']:.0%}，去掉前 3 只后收益 {lottery['return_without_top3']:+.1%}（原 {metrics['total_return']:+.1%}）")
     # Style spreads and exposures feed the recent-performance read-out; they are a side dish, so a failure
     # here is noted rather than failing the backtest.
     try:
@@ -937,13 +1080,15 @@ def run(config):
         style_rows, attribution = [], None
         prepared["notes"].append(f"风格归因未计算：{error}")
     return clean({"metrics": {**metrics, "signal_ic": test_ic, "signal_rank_ic": test_rank_ic},
-                  "model": model_report,
+                  "model": model_report, "lottery": lottery, "baseline": baseline,
                   "rows": rows, "config": config,
                   "ic_rows": ic_rows(ic, rank_ic), "style_rows": style_rows, "attribution": attribution,
                   "trades": trades, "holdings": holdings, "instruments": instruments, "latest_signal": signal,
                   "diagnosis": signal_diagnosis(prepared, score) if len(factors) > 1 else None,
                   "notes": prepared["notes"],
-                  "method": "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})
+                  "method": ("Equal-weight book: top names at equal weight on the day after each signal refresh, drifting in between; "
+                             "no lot sizes or price limits. " if config.get("book", "equal") == "equal" else "Qlib TopkDropout book. ")
+                            + "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})
 
 
 def diagnose(config, progress=lambda *_: None):
@@ -964,7 +1109,7 @@ def diagnose(config, progress=lambda *_: None):
     def variant(columns):
         score, _ = scored(prepared, columns, [weights[c] for c in columns], model)
         ic, rank_ic = information_coefficient(score, prepared["label"])
-        metrics, rows = summarize_report(backtest_score(score, config)[0])
+        metrics, rows = summarize_report(book_report(score, config))
         # Equity only, so the UI can overlay every variant's curve on the portfolio's without bloating the file.
         return {**metrics, "signal_ic": ic, "signal_rank_ic": rank_ic, "equity": [[r["date"], round(r["equity"], 6)] for r in rows]}
 
@@ -1104,7 +1249,7 @@ def walkforward(config, progress=lambda *_: None):
     def track(score_series, fold_list, with_selection):
         if score_series is None or score_series.empty:
             return None
-        metrics, rows = summarize_report(backtest_score(score_series, config)[0])
+        metrics, rows = summarize_report(book_report(score_series, config))
         per_fold = []
         for f in fold_list:
             m = window_metrics(rows, f["start"], f["end"])
@@ -1177,7 +1322,7 @@ def search(config, progress=lambda *_: None):
 
     def run_variant(columns, window, keep_curve=False):
         score, _ = scored(prepared, columns, [weights[c] for c in columns], model)
-        report = backtest_score(score, {**config, "start": window[0], "end": window[1]})[0]
+        report = book_report(score, {**config, "start": window[0], "end": window[1]})
         metrics, rows = summarize_report(report)
         if keep_curve:
             metrics["equity"] = [[r["date"], round(r["equity"], 6)] for r in rows]

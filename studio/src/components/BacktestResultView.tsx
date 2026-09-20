@@ -26,8 +26,19 @@ export function BacktestResultView({ result, onDiagnose }: { result: BacktestRes
     if (typeof m.sharpe === "number" && m.sharpe < 0.5 && ex >= 0) lines.push(tr("夏普低于 0.5，收益波动大，不宜据此下结论。"));
     if (result.model && result.model.best_iteration <= 20) lines.push(tr("LightGBM 在第 {0} 轮就早停：训练集里学不到多少东西，信号本身偏弱。", [result.model.best_iteration]));
     if ((m.days ?? 0) < 120) lines.push(tr("交易日不足 120 天，样本太短。"));
+    const b = result.baseline;
+    if (b) {
+      const sel = b.selection_return;
+      const tv = typeof b.selection_t === "number" ? b.selection_t.toFixed(2) : "—";
+      lines.push(sel >= 0
+        ? tr("比等权持有全池多 {0}（全池等权 {1}，月度超额 t 值 {2}）；t 值 2 以下的选股增量和零分不开。", [percent(sel), percent(b.universe_return), tv])
+        : tr("不如等权持有全池：少 {0}（全池等权 {1}）。", [percent(-sel), percent(b.universe_return)]));
+    }
+    const l = result.lottery;
+    if (l && l.lottery) lines.push(tr("彩票结构：前 10 只股票占了盈亏的 {0}，去掉前 3 只后收益只剩 {1}。这是几只股票的运气，不是选股能力。", [percent(l.top10_share ?? 0, 0), percent(l.return_without_top3 ?? 0)]));
+    else if (l && typeof l.top10_share === "number") lines.push(tr("盈亏分散：前 10 只占 {0}，{1} 的股票赚钱，最大单只权重 {2}。", [percent(l.top10_share, 0), percent(l.positive_share ?? 0, 0), percent(l.max_weight ?? 0)]));
     return lines;
-  }, [m, result.model]);
+  }, [m, result.model, result.baseline, result.lottery]);
   const importance = useMemo(() => Object.entries(result.model?.feature_importance || {}).sort((a, b) => b[1] - a[1]), [result.model]);
 
   return (
@@ -38,7 +49,7 @@ export function BacktestResultView({ result, onDiagnose }: { result: BacktestRes
             result.config.factors.map((f) => <Chip key={`${f.trace}#${f.loop_id}#${f.name}`} size="sm" variant="soft">{f.kind === "prediction" ? tr("模型 · ") : ""}{f.name}{f.weight !== 1 ? ` ×${f.weight}` : ""}</Chip>)}
         </div>
         <Hint>
-          {result.config.start} → {result.config.end} · {result.config.market} · {tr("基准")} {result.config.benchmark || "SH000300"} · topk {result.config.topk} / n_drop {result.config.n_drop}{(result.config.horizon ?? 1) > 1 ? ` · ${tr("预测期限")} ${result.config.horizon}d` : ""}{(result.config.rebalance ?? 1) > 1 ? ` · ${tr("调仓间隔")} ${result.config.rebalance}d` : ""}
+          {result.config.start} → {result.config.end} · {result.config.market} · {tr("基准")} {result.config.benchmark || "SH000300"} · topk {result.config.topk} / n_drop {result.config.n_drop} · {result.config.book === "topk" ? "TopkDropout" : tr("等权账簿")}{(result.config.horizon ?? 1) > 1 ? ` · ${tr("预测期限")} ${result.config.horizon}d` : ""}{(result.config.rebalance ?? 1) > 1 ? ` · ${tr("调仓间隔")} ${result.config.rebalance}d` : ""}
           {" · "}{result.config.model?.method === "lgbm" ? tr("LightGBM（训练 {0}，验证 {1}）", [result.config.model.train.join("→"), result.config.model.valid.join("→")]) : tr("排名加权")}
         </Hint>
         {result.error && <Alert status="danger"><Alert.Indicator /><Alert.Content><Alert.Title>{result.error}</Alert.Title></Alert.Content></Alert>}
@@ -58,12 +69,12 @@ export function BacktestResultView({ result, onDiagnose }: { result: BacktestRes
             ]} />
             <div className="flex flex-col gap-1">
               {verdict.map((line) => (
-                <Alert key={line} status={line.startsWith(tr("跑赢")) ? "success" : "default"} className="py-1.5">
+                <Alert key={line} status={line.startsWith(tr("跑赢")) ? "success" : line.startsWith(tr("彩票结构")) ? "danger" : "default"} className="py-1.5">
                   <Alert.Indicator /><Alert.Content><Alert.Title className="text-xs font-normal">{line}</Alert.Title></Alert.Content>
                 </Alert>
               ))}
             </div>
-            <EquityChart rows={result.rows || []} />
+            <EquityChart rows={result.rows || []} baseline={result.baseline?.equity} />
             <Hint>{result.method}</Hint>
           </>
         )}

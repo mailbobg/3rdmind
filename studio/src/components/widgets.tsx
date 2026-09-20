@@ -103,7 +103,7 @@ export function DataTable({ label, head, rows, minWidth }: { label: string; head
 }
 
 /** Equity, benchmark and drawdown lines (ECharts). */
-export function EquityChart({ rows }: { rows: BacktestRow[] }) {
+export function EquityChart({ rows, baseline }: { rows: BacktestRow[]; baseline?: [string, number][] | null }) {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!host.current) return;
@@ -111,9 +111,9 @@ export function EquityChart({ rows }: { rows: BacktestRow[] }) {
     const observer = new ResizeObserver(() => chart.resize());
     observer.observe(host.current);
     chart.setOption({
-      color: ["#14765a", "#989da5", "#c26052"],
+      color: ["#14765a", "#989da5", "#c26052", "#b08a3c"],
       tooltip: { trigger: "axis" },
-      legend: { top: 4, data: [t("策略净值（扣费）"), t("基准净值"), t("回撤")] },
+      legend: { top: 4, data: [t("策略净值（扣费）"), t("基准净值"), t("回撤"), ...(baseline ? [t("全池等权")] : [])] },
       grid: [{ left: 54, right: 18, top: 44, height: "49%" }, { left: 54, right: 18, top: "72%", height: "17%" }],
       xAxis: [{ type: "category", data: rows.map((r) => r.date), axisLabel: { show: false } }, { type: "category", gridIndex: 1, data: rows.map((r) => r.date) }],
       yAxis: [{ type: "value", scale: true, splitLine: { lineStyle: { color: "#edf0ec" } } }, { type: "value", gridIndex: 1, axisLabel: { formatter: "{value}%" } }],
@@ -121,10 +121,11 @@ export function EquityChart({ rows }: { rows: BacktestRow[] }) {
         { name: t("策略净值（扣费）"), type: "line", symbol: "none", data: rows.map((r) => r.equity) },
         { name: t("基准净值"), type: "line", symbol: "none", lineStyle: { type: "dashed" }, data: rows.map((r) => r.benchmark) },
         { name: t("回撤"), type: "line", symbol: "none", xAxisIndex: 1, yAxisIndex: 1, areaStyle: { opacity: 0.12 }, data: rows.map((r) => (r.drawdown == null ? null : +(r.drawdown * 100).toFixed(3))) },
+        ...(baseline ? [{ name: t("全池等权"), type: "line", symbol: "none", lineStyle: { type: "dotted" }, data: (() => { const by = new Map(baseline); return rows.map((r) => by.get(r.date) ?? null); })() }] : []),
       ],
     }, true);
     return () => { observer.disconnect(); chart.dispose(); };
-  }, [rows]);
+  }, [rows, baseline]);
   return <div ref={host} role="img" aria-label={t("策略净值、基准净值与回撤")} className="h-[340px] w-full" />;
 }
 

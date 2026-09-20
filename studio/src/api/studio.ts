@@ -70,6 +70,7 @@ export interface BacktestRequest {
   horizon?: number; rebalance?: number;
   /** What the score is purged of before ranking: nothing (legacy), log traded value, or that plus industry means. */
   neutral?: Neutral;
+  book?: Book;
   /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
   trace?: string; loop_id?: number;
 }
@@ -112,6 +113,10 @@ export interface BacktestResult extends BacktestSummary {
     best_iteration: number; valid_l2: number; train_rows: number; valid_rows: number;
     feature_importance: Record<string, number>;
   } | null;
+  /** Is the return a few names? Shares of the P&L held by the best names and what is left without the best three. */
+  lottery?: { names: number; top10_share: number | null; top3_share: number | null; return_without_top3: number | null; positive_share: number | null; max_weight: number | null; lottery: boolean } | null;
+  /** Equal-weight book only: the equal-weight universe on the same days, and the selection's excess over it. */
+  baseline?: { universe_return: number; universe_sharpe: number | null; selection_return: number; selection_t: number | null; equity: [string, number][] } | null;
 }
 
 export class ApiError extends Error {
@@ -266,7 +271,9 @@ export const search = async (id: string): Promise<SearchResult> => {
 };
 export const runSearch = (config: SearchRequest) => api<{ id: string }>("/studio/searches", config);
 export type Neutral = "none" | "size" | "size_industry";
-export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number; neutral?: Neutral }
+/** How the score becomes positions: equal weight on every rebalance day (the standard since 2026-09-20), or Qlib's TopkDropout. */
+export type Book = "equal" | "topk";
+export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number; neutral?: Neutral; book?: Book }
 export interface StrategyRun { id: string; kind: "evidence" | "update"; status?: string; start?: string; end?: string; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; benchmark_return?: number | null; error?: string; created?: string }
 export interface Strategy {
   id: string; name: string; note: string; created: string; updated: string;
