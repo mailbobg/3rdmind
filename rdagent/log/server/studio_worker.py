@@ -684,14 +684,35 @@ def daily_closes(instruments, start, end):
     return frame.unstack("instrument").sort_index().ffill()
 
 
+def universe_score(config):
+    """A constant score over every priced member of the universe on every day of the window: run through
+    equal_book it is the equal-weight universe, the baseline any selection (or screen) has to beat. Membership
+    is point-in-time; Beijing names are left out of A-share universes (see studio_universe)."""
+    import pandas as pd
+    from qlib.data import D
+
+    calendar = pd.DatetimeIndex(D.calendar(freq="day"))
+    start = calendar[max(0, calendar.searchsorted(pd.Timestamp(config["start"])) - 2)]
+    frame = D.features(D.instruments(config["market"]), ["$close"], start_time=start, end_time=config["end"], freq="day")["$close"]
+    if frame.index.names[0] == "instrument":
+        frame = frame.swaplevel(0, 1)
+    frame = frame.dropna().sort_index()
+    frame.index = frame.index.set_names(["datetime", "instrument"])
+    spans = D.list_instruments(D.instruments(config["market"]), start_time=start, end_time=config["end"], as_list=False)
+    frame = members_only(frame.to_frame("$close"), spans, calendar)["$close"]
+    if (config.get("region") or "cn") == "cn":
+        frame = frame[~frame.index.get_level_values("instrument").str.startswith("BJ")]
+    return pd.Series(1.0, index=frame.index)
+
+
 def equal_book(score, config, universe=None):
     """The equal-weight book: on the trading day after each signal refresh, hold the top ``topk`` names by the
     previous day's score at equal weight; positions drift with prices until the next refresh. Returns the daily
     report Qlib's would (return, cost, bench, turnover, account), the trade log, the closing book, the
     per-block membership, and the per-instrument P&L.
 
-    ``universe=True`` holds every name that has a score that day instead of the top names: the equal-weight
-    universe, the baseline a selection has to beat. Limit-up/down and lot sizes are ignored (noted in method).
+    ``universe=True`` holds every name that has a score that day instead of the top names (used with
+    universe_score() for the equal-weight universe baseline). Limit-up/down and lot sizes are ignored.
     """
     import numpy as np
     import pandas as pd
@@ -1068,8 +1089,8 @@ def run(config):
         max_weight = max((r["weight"] for r in holdings["positions"]), default=None)
         traded = {t["instrument"] for t in trades} | {r["instrument"] for r in holdings["positions"]}
         trades, holdings = unadjust_book(trades, holdings, load_factors(traded, config["start"], holdings["as_of"]))
-        # The equal-weight universe on the same days: what holding everything with a score would have made.
-        universe_report = equal_book(score, config, universe=True)[0]
+        # The equal-weight universe on the same days and cadence: what holding every member would have made.
+        universe_report = equal_book(universe_score(config), config, universe=True)[0]
         universe_metrics, universe_rows = summarize_report(universe_report)
         baseline = {"universe_return": universe_metrics["total_return"], "universe_sharpe": universe_metrics["sharpe"],
                     "equity": [[r["date"], round(r["equity"], 6)] for r in universe_rows]}
