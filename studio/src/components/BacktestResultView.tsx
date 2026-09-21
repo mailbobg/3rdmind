@@ -11,7 +11,7 @@ import { t as tr } from "../i18n";
 /** `onDiagnose` starts the take-apart diagnosis (the owner refetches and polls); absent, the button is hidden. */
 export function BacktestResultView({ result, onDiagnose }: { result: BacktestResult; onDiagnose?: () => void }) {
   const legacy = (result.config.loop_id === undefined || result.config.loop_id === null)
-    && !result.config.factors.some((f) => f.loop_id !== undefined && f.loop_id !== null);
+    && !result.config.factors.some((f) => f.kind === "rule" || (f.loop_id !== undefined && f.loop_id !== null));
   const m = result.metrics;
   const excess = m ? m.total_return - m.benchmark_return : null;
   const verdict = useMemo(() => {

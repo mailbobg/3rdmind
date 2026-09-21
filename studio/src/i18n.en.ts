@@ -869,6 +869,7 @@ export const EN: Record<string, string> = {
   "查找中…": "Looking…",
   "这个股票池还没有带方向的研究。": "No run on this universe was given a direction yet.",
   "来自 {0}": "from {0}",
+  "×{0} · 规则": "×{0} · rule",
   "规则": "Rules",
   "手写的信号，来自事件研究，不经验收": "Hand-written signals from event studies; they skip the gate",
   "研究时的账簿：持仓 {0}（全池）· {1} 日调仓 · 等权 · 适用 {2}": "Studied in: {0} positions (whole universe) · {1}-day rebalance · equal weight · for {2}",

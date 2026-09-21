@@ -41,5 +41,5 @@ export function download(name: string, content: string, type = "text/plain") {
 /** Upper-case a leading Latin letter, for display names and titles; text that starts otherwise is left alone. */
 export const capitalize = (s: string) => s.replace(/^[a-z]/, (m) => m.toUpperCase());
 /** Display name of an experiment: the part after the scenario prefix, capitalised. */
-export const shortName = (id: string) => capitalize(id.split("/").slice(1).join("/") || id);
+export const shortName = (id: string | null | undefined) => (id ? capitalize(id.split("/").slice(1).join("/") || id) : "");
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));

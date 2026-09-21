@@ -196,7 +196,7 @@ export function BacktestPage() {
     (f.kind === "prediction" ? undefined : info(f)?.coverage || info(f)?.analysis?.coverage) || fetched[key(f)] || undefined;
   useEffect(() => {
     for (const f of basket.items) {
-      if (coverageOf(f) || key(f) in fetched) continue;
+      if (f.kind === "rule" || coverageOf(f) || key(f) in fetched) continue;  // a rule is computed to the window's end on demand
       setFetched((m) => ({ ...m, [key(f)]: null }));
       const request = f.kind === "prediction" ? studio.predictionCoverage(f.trace, f.loop_id) : studio.factorCoverage(f);
       request.then((c) => setFetched((m) => ({ ...m, [key(f)]: { start: c.start, end: c.end } }))).catch(() => {});
@@ -263,7 +263,7 @@ export function BacktestPage() {
     if (!spans.length) return null;
     return { start: spans.reduce((a, c) => (c.start > a ? c.start : a), spans[0].start), end: spans.reduce((a, c) => (c.end < a ? c.end : a), spans[0].end) };
   }, [basket.items, library, fetched]); // eslint-disable-line react-hooks/exhaustive-deps
-  const coverageUnknown = basket.items.filter((f) => !coverageOf(f)).length;
+  const coverageUnknown = basket.items.filter((f) => f.kind !== "rule" && !coverageOf(f)).length;
   const dateWarning = useMemo(() => {
     if (!coverage || !params.start || !params.end) return "";
     if (params.start <= coverage.start) return t("回测开始日 {0} 不晚于信号首日 {1}：策略要用前一天的评分，请把开始日往后挪。", [params.start, coverage.start]);
@@ -583,7 +583,7 @@ export function BacktestPage() {
               <Table label={t("候选信号")} columns={[{ label: t("信号") }, { label: t("来源"), width: 200, optional: true }, { label: t("权重"), num: true, width: 70 }, { label: t("覆盖"), width: 156, optional: true }]}
                 rows={candidates.map((f) => ({ key: key(f), cells: [
                   <span key="n" className="mm-mono mm-name">{f.name}</span>,
-                  <span key="s" className="mm-dim block truncate">{t("{0} · 第 {1} 轮", [shortName(f.trace), f.loop_id + 1])}</span>,
+                  <span key="s" className="mm-dim block truncate">{f.kind === "rule" ? t("规则") : t("{0} · 第 {1} 轮", [shortName(f.trace), f.loop_id + 1])}</span>,
                   String(f.weight),
                   <span key="c" className="mm-mono mm-dim">{coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}` : "—"}</span>,
                 ] }))} />
