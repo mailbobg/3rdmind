@@ -217,13 +217,25 @@ def source_stamp(source: Path) -> dict:
     return {"source_mtime": stat.st_mtime, "source_size": stat.st_size, "source_hash": digest.hexdigest()}
 
 
-def same_source(data: dict, source: Path) -> bool:
-    """Whether a stored analysis was computed from the current result.h5 (by hash; older records by mtime)."""
+def same_source(data: dict, source: Path, record: Path | None = None) -> bool:
+    """Whether a stored analysis was computed from the current result.h5: same size and modification time says
+    yes at once; a changed time is settled by the content hash (RD-Agent rewrites accepted factors with the
+    same bytes), and a matching hash writes the new time into ``record`` so the file is not hashed again."""
+    stat = source.stat()
     if data.get("source_hash"):
-        if data.get("source_size") != source.stat().st_size:
+        if data.get("source_size") != stat.st_size:
             return False
-        return data["source_hash"] == source_stamp(source)["source_hash"]
-    return data.get("source_mtime") == source.stat().st_mtime
+        if data.get("source_mtime") == stat.st_mtime:
+            return True
+        if data["source_hash"] != source_stamp(source)["source_hash"]:
+            return False
+        if record is not None:
+            try:
+                record.write_text(json.dumps({**data, "source_mtime": stat.st_mtime}, ensure_ascii=False))
+            except OSError:
+                pass
+        return True
+    return data.get("source_mtime") == stat.st_mtime
 
 
 def cached_analysis(workspace, market):
@@ -236,7 +248,7 @@ def cached_analysis(workspace, market):
         data = json.loads(path.read_text())
     except ValueError:
         return None
-    if data.get("status") != "completed" or data.get("version") != ANALYSIS_VERSION or not same_source(data, source):
+    if data.get("status") != "completed" or data.get("version") != ANALYSIS_VERSION or not same_source(data, source, path):
         return None
     return data
 
@@ -767,6 +779,27 @@ def resolve_factor_paths(default_trace, default_loop_id, factors, prefer_refresh
     return resolved
 
 
+def result_summary(folder):
+    """A job's result without its bulk (studio_worker.summary_of), from summary.json; written on demand from
+    result.json for results that predate it, so a list view never parses a whole-universe trade log."""
+    summary_path, result_path = folder / "summary.json", folder / "result.json"
+    if not result_path.is_file():
+        return {"status": "queued"}
+    if summary_path.is_file() and summary_path.stat().st_mtime >= result_path.stat().st_mtime:
+        try:
+            return json.loads(summary_path.read_text())
+        except ValueError:
+            pass
+    try:
+        result = json.loads(result_path.read_text())
+    except ValueError:
+        return {"status": "running"}
+    summary = studio_worker.summary_of(result)
+    if result.get("status") in ("completed", "failed"):
+        write_json(summary_path, summary)
+    return summary
+
+
 def public_config(config):
     """A copy of ``config`` with each factor's on-disk workspace ``path`` stripped for API responses."""
     public = dict(config)
@@ -1220,8 +1253,7 @@ def backtests():
         region = wanted_region()
         jobs = []
         for path in sorted(ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
-            result_path = path.parent / "result.json"
-            result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
+            result = result_summary(path.parent)
             config = public_config(json.loads(path.read_text()))
             if not in_region(config.get("market"), region):
                 continue
@@ -1440,8 +1472,7 @@ def walkforwards():
         region = wanted_region()
         jobs = []
         for path in sorted(WALK_ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
-            result_path = path.parent / "result.json"
-            result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
+            result = result_summary(path.parent)
             config = public_config(json.loads(path.read_text()))
             if not in_region(config.get("market"), region):
                 continue
@@ -1557,8 +1588,7 @@ def searches():
         region = wanted_region()
         jobs = []
         for path in sorted(SEARCH_ROOT.glob("*/config.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
-            result_path = path.parent / "result.json"
-            result = json.loads(result_path.read_text()) if result_path.exists() else {"status": "queued"}
+            result = result_summary(path.parent)
             config = public_config(json.loads(path.read_text()))
             if not in_region(config.get("market"), region):
                 continue
@@ -1732,7 +1762,7 @@ def run_summary(job_id):
     if not (folder / "config.json").is_file():
         return {"id": job_id, "status": "missing"}
     config = json.loads((folder / "config.json").read_text())
-    result = json.loads((folder / "result.json").read_text()) if (folder / "result.json").is_file() else {"status": "queued"}
+    result = result_summary(folder)
     metrics = result.get("metrics") or {}
     return {"id": job_id, "status": result.get("status"), "start": config.get("start"), "end": config.get("end"),
             "total_return": metrics.get("total_return"), "sharpe": metrics.get("sharpe"), "max_drawdown": metrics.get("max_drawdown"),

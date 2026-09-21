@@ -269,6 +269,23 @@ def ic_rows(ic, rank_ic):
              "rank_ic": float(rank_ic[day]) if day in rank_ic.index else None} for day in days]
 
 
+SUMMARY_KEYS = ("status", "error", "metrics", "baseline", "lottery", "notes", "method", "recommended", "windows", "walk", "fixed", "walkforward")
+
+
+def summary_of(result):
+    """The part of a result the list views need (status, metrics, verdict blocks); the daily rows, trade log
+    and per-name tables stay in result.json. Curves inside the kept blocks are dropped too."""
+    out = {}
+    for key in SUMMARY_KEYS:
+        if key not in result:
+            continue
+        value = result[key]
+        if isinstance(value, dict):
+            value = {k: v for k, v in value.items() if not isinstance(v, list) or len(v) < 200}
+        out[key] = value
+    return out
+
+
 def write_json(path, data):
     target = Path(path)
     temporary = target.with_suffix(".tmp")
@@ -669,6 +686,7 @@ def staggered_scores(score, every, tranches):
 
 
 BOOKS = ("equal", "topk")
+TRADE_LOG_LIMIT = 5000  # trades kept in result.json; a whole-universe book turns over ~100k lines a year
 LOTTERY_TOP10_SHARE = 0.5   # more than half the P&L from ten names: the result is a few stocks, not a selection edge
 LOTTERY_WITHOUT_TOP3 = 0.5  # or losing the best three names removes more than half of the return
 LOTTERY_MIN_NAMES = 60      # below this many traded names the shares are not judged (ten names is most of the book)
@@ -1096,6 +1114,9 @@ def run(config):
                     "equity": [[r["date"], round(r["equity"], 6)] for r in universe_rows]}
     metrics, rows = summarize_report(report)
     lottery = lottery_diagnosis(instruments, metrics["total_return"], max_weight)
+    trades_total = len(trades)
+    if trades_total > TRADE_LOG_LIMIT:
+        trades = trades[-TRADE_LOG_LIMIT:]  # the most recent ones; the per-instrument P&L keeps the whole picture
     if baseline is not None:
         baseline["selection_return"] = metrics["total_return"] - baseline["universe_return"]
         net = (report["return"] - report["cost"]) - (universe_report["return"] - universe_report["cost"])
@@ -1115,7 +1136,7 @@ def run(config):
                   "model": model_report, "lottery": lottery, "baseline": baseline,
                   "rows": rows, "config": config,
                   "ic_rows": ic_rows(ic, rank_ic), "style_rows": style_rows, "attribution": attribution,
-                  "trades": trades, "holdings": holdings, "instruments": instruments, "latest_signal": signal,
+                  "trades": trades, "trades_total": trades_total, "holdings": holdings, "instruments": instruments, "latest_signal": signal,
                   "diagnosis": signal_diagnosis(prepared, score) if len(factors) > 1 else None,
                   "notes": prepared["notes"],
                   "method": ("Equal-weight book: top names at equal weight on the day after each signal refresh, drifting in between; "
@@ -1471,7 +1492,9 @@ if __name__ == "__main__":
         else:
             output = run(config)
         write_json(target, {"status": "completed", **output})
+        write_json(folder / "summary.json", summary_of({"status": "completed", **output}))
     except Exception as error:
         traceback.print_exc()
         write_json(target, {"status": "failed", "error": str(error)})
+        write_json(folder / "summary.json", {"status": "failed", "error": str(error)})
         sys.exit(1)
