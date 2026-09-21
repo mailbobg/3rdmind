@@ -36,8 +36,9 @@ def ensure_data(provider, data_path, start, market="csi300", region="cn"):
         dates = existing.index.get_level_values("datetime")
         extra_root = data_path.parent / "extra"
         tushare_cached = (extra_root / "tushare").is_dir() and any((extra_root / "tushare").iterdir())
+        import studio_tushare
         extra_ready = region != "cn" or ((not (extra_root / "baostock").is_dir() or "$turnover" in existing.columns)
-                                         and (not tushare_cached or "$mf_net_xl" in existing.columns))
+                                         and (not tushare_cached or all(c in existing.columns for c in studio_tushare.EXTRA_COLUMNS)))
         if pd.Timestamp(dates.max()) >= last and pd.Timestamp(dates.min()) <= pd.Timestamp(start) and extra_ready:
             return str(dates.min().date()), str(dates.max().date()), int(len(existing))
     frame = D.features(D.instruments(market), FIELDS, start_time=start, end_time=str(last.date()), freq="day")

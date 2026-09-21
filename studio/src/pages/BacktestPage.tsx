@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
-import type { Book, Neutral, BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor, Strategy, Universe } from "../api/studio";
+import type { Book, Neutral, BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor, RuleInfo, Strategy, Universe } from "../api/studio";
 import { universeLabel } from "../api/studio";
 import { DateInput } from "../components/DateInput";
 import { basketKey as key } from "../hooks/useFactorBasket";
@@ -178,6 +178,16 @@ export function BacktestPage() {
   const [source, setSource] = useState("");
   const [pageError, setPageError] = useState("");
   const [library, setLibrary] = useState<Record<string, LibraryFactor>>({});
+  // Hand-written rules (studio_rules): listed once; picking one puts it in the basket and, when the basket held
+  // nothing else, sets the book it was studied in (whole-universe equal weight).
+  const [ruleList, setRuleList] = useState<RuleInfo[]>([]);
+  useEffect(() => { studio.rules().then(setRuleList).catch(() => setRuleList([])); }, []);
+  const pickRule = (r: RuleInfo) => {
+    const wasPicked = basket.has({ name: r.name, trace: "", loop_id: 0, kind: "rule" });
+    const alone = basket.items.every((f) => f.kind === "rule");
+    basket.toggleRule(r.name);
+    if (alone && !wasPicked) setParams((p) => ({ ...p, ...(r.book as Partial<Params>) }));
+  };
   const info = (f: FactorWeight) => library[key(f)];
   // Every signal's date span: the library's cached analysis when a factor has one, otherwise read from its
   // result.h5 (or a prediction's pred.pkl) through the coverage endpoints, so the date warnings always apply.
@@ -477,7 +487,7 @@ export function BacktestPage() {
                     key: key(f),
                     cells: [
                       <span key="n" className="mm-mono mm-name">{f.name}</span>,
-                      <span key="s" className="mm-dim block truncate">{t("{0} · 第 {1} 轮", [shortName(f.trace), f.loop_id + 1])}</span>,
+                      <span key="s" className="mm-dim block truncate">{f.kind === "rule" ? t("规则") : t("{0} · 第 {1} 轮", [shortName(f.trace), f.loop_id + 1])}</span>,
                       <Num key="ic" value={info(f)?.analysis?.ic.mean} />,
                       <Num key="ric" value={info(f)?.analysis?.rank_ic.mean} />,
                       <span key="cov" className="mm-mono mm-dim">{coverageOf(f) ? `${coverageOf(f)!.start.slice(0, 7)} → ${coverageOf(f)!.end.slice(0, 7)}` : key(f) in fetched ? t("读取中…") : t("未知")}</span>,
@@ -494,6 +504,26 @@ export function BacktestPage() {
               <Empty>{t("还没有选信号。去")} <Link href={workspace.href("/factors")}>{t("因子库")}</Link> {t("勾选，或在研究轮次里点“用 N 个因子回测”。")}</Empty>
             )}
           </Block>
+          {ruleList.length > 0 && (
+            <Block title={t("规则")} count={ruleList.length} note={t("手写的信号，来自事件研究，不经验收")}>
+              <div className="flex flex-col gap-2">
+                {ruleList.map((r) => {
+                  const picked = basket.has({ name: r.name, trace: "", loop_id: 0, kind: "rule" });
+                  return (
+                    <div key={r.name} className="flex items-start gap-3 rounded-[10px] border border-border p-2.5">
+                      <input type="checkbox" className="mm-check mt-0.5" checked={picked} onChange={() => pickRule(r)} aria-label={r.label} />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13px] font-medium">{r.label} <span className="mm-mono mm-dim text-[11px]">{r.name}</span></div>
+                        <p className="m-0 mt-0.5 text-[11px] leading-relaxed text-muted">{r.description}</p>
+                        <p className="m-0 mt-0.5 text-[11px] text-muted">{t("研究时的账簿：持仓 {0}（全池）· {1} 日调仓 · 等权 · 适用 {2}", [String(r.book.topk ?? "—"), String(r.book.rebalance ?? 1), r.markets.map(universeLabel).join("、")])}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <P>{t("规则给保留的股票打 1、剔除的打 NaN；持仓数设成全池就是“持有所有没被剔的”。规则第一次用到某个股票池会先在它上面算一遍，几分钟。")}</P>
+            </Block>
+          )}
         </>
       ) : tab === "history" ? (
         <Block title={t("历史回测")} count={backtests.jobs.length} note={t("点一行在右栏查看结果")}>

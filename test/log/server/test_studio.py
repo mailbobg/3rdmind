@@ -1813,6 +1813,51 @@ def test_last_direction_is_the_latest_run_with_one(studio_client) -> None:
 
 
 @pytest.mark.offline
+def test_rules_resolve_refresh_and_list(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_rules
+
+    listed = studio_client.get("/studio/rules").get_json()
+    assert {r["name"] for r in listed} == set(studio_rules.RULES) and all(studio_rules.rule_file(r["name"]).is_file() for r in listed)
+    # A rule resolves to its per-universe folder; missing there, it is marked for recomputation and counted stale.
+    resolved = studio_module.resolve_factor_paths(None, None, [{"name": "attention_screen", "kind": "rule", "weight": 1}], market="csi1000")
+    assert resolved[0]["kind"] == "rule" and resolved[0]["recompute_for"] == "csi1000" and resolved[0]["trace"] is None
+    assert Path(resolved[0]["path"]) == studio_rules.rule_dir(studio_module.REFRESH_ROOT, "attention_screen", "csi1000")
+    config = {"market": "csi1000", "end": "2026-09-17", "factors": resolved}
+    stale = studio_module.stale_signals(config)
+    assert len(stale) == 1 and stale[0]["code_path"].endswith("rules/attention_screen.py") and stale[0]["signal_end"] is None
+    with pytest.raises(ValueError):
+        studio_module.resolve_factor_paths(None, None, [{"name": "no_such_rule", "kind": "rule", "weight": 1}], market="csi1000")
+    # Book sizes up to the whole universe are allowed now.
+    assert validate_config(_config(topk=6000, n_drop=6000))["topk"] == 6000
+    with pytest.raises(ValueError):
+        validate_config(_config(topk=6001))
+
+
+@pytest.mark.offline
+def test_attention_rule_flags_the_right_names() -> None:
+    import importlib.util
+    import numpy as np
+    from rdagent.log.server import studio_rules
+
+    spec = importlib.util.spec_from_file_location("attention_screen", studio_rules.rule_file("attention_screen"))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    days = pd.bdate_range("2025-01-01", periods=30)
+    names = ["SH600000", "SZ300001", "SH600004", "SH600005"]
+    index = pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"])
+    df = pd.DataFrame({"$close": 10.0, "$lhb": 0.0, "$holder_chg": 0.0, "$holder_ann_days": 200.0, "$unlock_ratio_30d": 0.0}, index=index)
+    df.loc[(days[5], "SH600000"), "$close"] = 11.0          # +10%: a main-board limit-up on day 5
+    df.loc[(days[5], "SZ300001"), "$close"] = 11.0          # +10% on ChiNext is not a limit-up (19.5%)
+    df.loc[(days[10], "SH600004"), "$lhb"] = 1.0             # dragon-tiger list on day 10
+    df.loc[(days[20], "SH600005"), ["$holder_chg", "$holder_ann_days"]] = [0.2, 0.0]  # dispersion announced day 20
+    flagged = mod.attention(df)
+    assert flagged.loc[(days[5], "SH600000")] and flagged.loc[(days[24], "SH600000")] and not flagged.loc[(days[26], "SH600000")]  # 20-day window
+    assert not flagged.loc[(days[5], "SZ300001")]
+    assert flagged.loc[(days[10], "SH600004")] and flagged.loc[(days[29], "SH600004")] and not flagged.loc[(days[9], "SH600004")]
+    assert flagged.loc[(days[20], "SH600005")] and not flagged.loc[(days[19], "SH600005")]
+    assert not flagged.loc[(days[0], "SH600000")]
+
+
+@pytest.mark.offline
 def test_hold_scores_repeats_each_blocks_first_day() -> None:
     from rdagent.log.server.studio_worker import hold_scores
 
@@ -2748,6 +2793,8 @@ def test_tushare_fields_point_in_time_and_job(studio_client, tmp_path: Path, mon
     # Unlocks: on 01-02 only the one announced in December is known (1000 shares); by 01-06 both are.
     assert joined.loc[(days[0], "SH600000"), "$unlock_30d"] == 1000 and joined.loc[(days[2], "SH600000"), "$unlock_30d"] == 1500
     assert joined.loc[(days[0], "SH600004"), "$unlock_30d"] == 0
+    assert joined.loc[(days[0], "SH600000"), "$unlock_past_30d"] == 0 and joined.loc[(days[0], "SH600000"), "$holder_ann_days"] == 0
+    assert joined.loc[(days[2], "SH600000"), "$holder_ann_days"] == (days[2] - days[0]).days
     assert studio_tushare.attach(ohlcv, tmp_path / "nowhere")[1] is False
     # Plan: day keys missing are fetched, finished ones are not; open periods and the current week are refreshed.
     (cache / "fina" / "20240630.csv").write_text("ts_code,ann_date,end_date\n")  # a closed period: never re-fetched

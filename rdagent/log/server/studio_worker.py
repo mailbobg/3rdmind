@@ -20,7 +20,7 @@ def validate_config(config):
     if result["start"] >= result["end"]:
         raise ValueError("Start date must be earlier than end date")
     for key, default, lower, upper in (
-        ("topk", 10, 1, 500), ("n_drop", 2, 0, 500),
+        ("topk", 10, 1, 6000), ("n_drop", 2, 0, 6000),  # 6000: "every name the rule keeps" on all A-shares
         ("account", 1000000, 1000, 10000000000),
         ("open_cost", 0.0005, 0, 0.1), ("close_cost", 0.0015, 0, 0.1),
     ):

@@ -82,8 +82,8 @@ COLUMNS = {
     "fina": ["$roe", "$roe_dt", "$np_yoy", "$np_dt_yoy", "$rev_yoy", "$q_rev_yoy", "$gp_margin", "$debt_ratio", "$ocf_ps", "$bps", "$rep_days"],
     "forecast": ["$fc_pchg", "$fc_days"],
     "express": ["$ex_np_yoy", "$ex_days"],
-    "holders": ["$holder_num", "$holder_chg"],
-    "unlock": ["$unlock_30d", "$unlock_ratio_30d"],
+    "holders": ["$holder_num", "$holder_chg", "$holder_ann_days"],
+    "unlock": ["$unlock_30d", "$unlock_ratio_30d", "$unlock_past_30d"],
 }
 EXTRA_COLUMNS = [column for table in TABLES for column in COLUMNS[table]]
 
@@ -103,9 +103,11 @@ README_NOTE = (
     " growth, $gp_margin gross margin, $debt_ratio debt to assets, $ocf_ps operating cash flow per share, $bps"
     " book per share, $rep_days days since the latest report. Earnings forecasts: $fc_pchg forecast profit"
     " change (fraction, midpoint), $fc_days days since it; express reports: $ex_np_yoy, $ex_days. Holder"
-    " counts: $holder_num, $holder_chg fraction change vs the previous count. Share unlocks known in advance:"
-    " $unlock_30d shares unlocking in the next 30 calendar days, $unlock_ratio_30d as a fraction of total"
-    " shares. Event columns ($fc_*, $ex_*, $lhb*, $block_*) are sparse by nature.\n"
+    " counts: $holder_num, $holder_chg fraction change vs the previous count, $holder_ann_days days since the"
+    " latest count was announced. Share unlocks known in advance: $unlock_30d shares unlocking in the next 30"
+    " calendar days, $unlock_ratio_30d as a fraction of total shares; $unlock_past_30d the fraction of total"
+    " shares unlocked in the past 30 calendar days. Event columns ($fc_*, $ex_*, $lhb*, $block_*) are sparse"
+    " by nature.\n"
 )
 
 
@@ -515,30 +517,41 @@ def event_frames(cache, grid, calendar):
         raw["available"] = next_trading_day(raw["ann_date"], calendar).values
         raw = raw.dropna(subset=["available", "holder_num"]).sort_values(["instrument", "end_date", "ann_date"]).drop_duplicates(["instrument", "end_date"], keep="last")
         raw["previous"] = raw.groupby("instrument")["holder_num"].shift(1)
-        events = pd.DataFrame({"available": raw["available"], "instrument": raw["instrument"], "$holder_num": raw["holder_num"].astype(float),
+        events = pd.DataFrame({"available": raw["available"], "instrument": raw["instrument"], "report": raw["available"],
+                               "$holder_num": raw["holder_num"].astype(float),
                                "$holder_chg": raw["holder_num"].astype(float) / raw["previous"].astype(float) - 1.0})
-        out["holders"] = as_of(events, grid, COLUMNS["holders"])[COLUMNS["holders"]]
+        filled = as_of(events, grid, ["$holder_num", "$holder_chg", "report"])
+        filled["$holder_ann_days"] = days_since(filled, "report")
+        out["holders"] = filled[COLUMNS["holders"]]
     raw = read_table(cache, "unlock")
     if raw is not None:
         raw = raw.copy()
         raw["known"] = pd.to_datetime(raw["ann_date"], format="%Y%m%d", errors="coerce")
         raw["unlock"] = pd.to_datetime(raw["float_date"], format="%Y%m%d", errors="coerce")
         raw = raw.dropna(subset=["known", "unlock"])
-        # For each grid day t: shares whose unlock date is in (t, t+30d] and whose announcement is ≤ t.
-        totals = pd.DataFrame(index=grid, columns=["$unlock_30d", "$unlock_ratio_30d"], dtype="float64")
-        per_day = []
+        # For each grid day t: shares whose unlock date is in (t, t+30d] and whose announcement is ≤ t (ahead),
+        # and the share of the company unlocked in (t-30d, t] (behind).
+        totals = pd.DataFrame(index=grid, columns=COLUMNS["unlock"], dtype="float64")
+        ahead, behind = [], []
         for day in pd.DatetimeIndex(dates.unique()):
             window = raw[(raw["unlock"] > day) & (raw["unlock"] <= day + pd.Timedelta(days=30)) & (raw["known"] <= day)]
-            if window.empty:
-                continue
-            summed = window.groupby("instrument").agg(shares=("float_share", "sum"), ratio=("float_ratio", "sum"))
-            summed["datetime"] = day
-            per_day.append(summed.reset_index())
-        if per_day:
-            summed = pd.concat(per_day, ignore_index=True).set_index(["datetime", "instrument"])
+            if not window.empty:
+                summed = window.groupby("instrument").agg(shares=("float_share", "sum"), ratio=("float_ratio", "sum"))
+                summed["datetime"] = day
+                ahead.append(summed.reset_index())
+            past = raw[(raw["unlock"] <= day) & (raw["unlock"] > day - pd.Timedelta(days=30))]
+            if not past.empty:
+                summed = past.groupby("instrument").agg(ratio=("float_ratio", "sum"))
+                summed["datetime"] = day
+                behind.append(summed.reset_index())
+        if ahead:
+            summed = pd.concat(ahead, ignore_index=True).set_index(["datetime", "instrument"])
             totals["$unlock_30d"] = summed["shares"]
             totals["$unlock_ratio_30d"] = summed["ratio"] / 100.0
-        totals[["$unlock_30d", "$unlock_ratio_30d"]] = totals[["$unlock_30d", "$unlock_ratio_30d"]].fillna(0.0)
+        if behind:
+            summed = pd.concat(behind, ignore_index=True).set_index(["datetime", "instrument"])
+            totals["$unlock_past_30d"] = summed["ratio"] / 100.0
+        totals[COLUMNS["unlock"]] = totals[COLUMNS["unlock"]].fillna(0.0)
         out["unlock"] = totals
     return out
 

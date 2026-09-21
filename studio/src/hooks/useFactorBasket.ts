@@ -24,6 +24,12 @@ export function useFactorBasket() {
     const additions = names.filter((name) => !keys.has(basketKey({ trace, loop_id, name }))).map((name) => ({ name, trace, loop_id, weight: 1, kind: "factor" as const }));
     if (additions.length) commit([...items, ...additions]);
   }, [items, keys, commit]);
+  /** A hand-written rule (studio_rules) as a member; it has no trace or round. */
+  const toggleRule = useCallback((name: string) => {
+    const item = { name, trace: "", loop_id: 0, kind: "rule" as const };
+    const index = items.findIndex((i) => basketKey(i) === basketKey(item));
+    commit(index >= 0 ? items.filter((_, i) => i !== index) : [...items, { ...item, weight: 1 }]);
+  }, [items, commit]);
   const addPrediction = useCallback((trace: string, loop_id: number) => {
     const item = { name: PREDICTION_NAME, trace, loop_id, kind: "prediction" as const };
     if (!keys.has(basketKey(item))) commit([...items, { ...item, weight: 1 }]);
@@ -32,6 +38,6 @@ export function useFactorBasket() {
   const clear = useCallback(() => commit([]), [commit]);
   /** Replace the whole basket, e.g. with a search's recommendation. */
   const replace = useCallback((next: FactorWeight[]) => commit(next), [commit]);
-  return { items, has, toggle, addRound, addPrediction, setWeight, clear, replace };
+  return { items, has, toggle, toggleRule, addRound, addPrediction, setWeight, clear, replace };
 }
 export type BasketStore = ReturnType<typeof useFactorBasket>;

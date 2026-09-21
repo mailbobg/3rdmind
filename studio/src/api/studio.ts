@@ -22,9 +22,13 @@ export interface Environment {
   test_window?: { start: string | null; end: string | null; days: number } | null;
 }
 export interface Round { loop_id: number; factors: string[]; metrics: Record<string, number>; prediction: boolean }
-export type SignalKind = "factor" | "prediction";
-/** One signal in the portfolio: a research factor's result.h5, or a round's Qlib model prediction (pred.pkl). */
+export type SignalKind = "factor" | "prediction" | "rule";
+/** One signal in the portfolio: a research factor's result.h5, a round's Qlib model prediction (pred.pkl), or a
+ * hand-written rule from studio_rules (`kind: "rule"`, no trace or round). */
 export interface FactorWeight { name: string; weight: number; trace: string; loop_id: number; kind?: SignalKind }
+/** A hand-written rule signal: name, what it does, and the book it was studied in. */
+export interface RuleInfo { name: string; label: string; description: string; book: Partial<StrategyParams> & { book?: Book }; markets: string[] }
+export const rules = () => api<RuleInfo[]>("/studio/rules");
 /** `t` is ICIR × √(days / horizon): overlapping labels at longer horizons leave fewer independent days. */
 export interface IcStats { mean: number; std: number; ir: number | null; t?: number | null; positive_ratio: number }
 export interface HorizonStats { days: number; ic: IcStats | null; rank_ic: IcStats | null; residual_rank_ic: IcStats | null }

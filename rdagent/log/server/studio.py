@@ -15,7 +15,7 @@ from pathlib import Path
 from flask import Blueprint, Response, current_app, jsonify, request
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.log.ui.conf import UI_SETTING
-from rdagent.log.server import studio_jobs, studio_llm, studio_markets, studio_sync
+from rdagent.log.server import studio_jobs, studio_llm, studio_markets, studio_rules, studio_sync
 from rdagent.log.server import studio_worker
 from rdagent.log.server.studio_worker import read_result, recent_context, validate_config, write_json
 
@@ -716,11 +716,23 @@ def resolve_factor_paths(default_trace, default_loop_id, factors, prefer_refresh
     factor researched elsewhere resolves to its copy on that universe, or is marked ``recompute_for`` so
     the run recomputes it there first.
     """
+    from rdagent.log.server import studio_rules
+
     resolved = []
     for factor in factors:
         if not isinstance(factor, dict):
             raise ValueError("Each factor must be an object with name and weight")
         name = factor.get("name")
+        if factor.get("kind") == "rule":
+            # A hand-written rule (studio_rules): its signal on this universe lives in rule_dir and is
+            # recomputed there when missing or stale, like a factor researched on another universe.
+            studio_rules.rule_file(name)  # raises for unknown names
+            path = studio_rules.rule_dir(REFRESH_ROOT, name, market or "csi300")
+            entry = {"name": name, "kind": "rule", "weight": float(factor.get("weight", 1)), "path": str(path), "trace": None, "loop_id": None}
+            if not (path / "result.h5").is_file():
+                entry["recompute_for"] = market or "csi300"
+            resolved.append(entry)
+            continue
         trace = factor.get("trace") or default_trace
         loop_id = normalize_loop_id(factor.get("loop_id", default_loop_id))
         messages = trace_messages(str(trace or ""))
@@ -766,6 +778,12 @@ def public_config(config):
 def regions():
     """The market workspaces: region, label, data directory, calendar span, markets, ready."""
     return jsonify(studio_markets.regions())
+
+
+@studio.get("/rules")
+def rules():
+    """The hand-written rule signals (studio_rules): name, label, description, the book they were studied in."""
+    return jsonify(studio_rules.listing())
 
 
 @studio.get("/research/last-direction")
@@ -1295,9 +1313,23 @@ def stale_signals(config):
     Each entry is the config's factor plus ``signal_end`` and ``code_path``. Signals whose file cannot be read
     are left to the worker, which reports them in its own words.
     """
+    from rdagent.log.server import studio_rules
+
     stale = []
     market = str(config.get("market") or "csi300")
     for f in config.get("factors", []):
+        if f.get("kind") == "rule":
+            signal = Path(f["path"]) / "result.h5"
+            end = None
+            if signal.is_file() and f.get("recompute_for") != market:
+                try:
+                    end = factor_coverage(Path(f["path"]))["end"]
+                except Exception:  # noqa: BLE001
+                    end = None
+                if end is not None and end >= str(config["end"]):
+                    continue
+            stale.append({**f, "signal_end": end, "code_path": str(studio_rules.rule_file(f["name"]))})
+            continue
         if f.get("kind", "factor") != "factor" or not f.get("trace"):
             continue
         signal = Path(f["path"]) / "result.h5"
@@ -1354,14 +1386,22 @@ def launch_worker(folder, config, args, running_key):
         try:
             for f in stale:
                 name, signal_end = f["name"], f.get("signal_end")
-                why = f"信号只到 {signal_end}，窗口到 {config['end']}" if signal_end else f"它是在 {run_market(f['trace'])} 上研究的，先在 {market} 上算一遍"
+                if f.get("kind") == "rule":
+                    why = f"信号只到 {signal_end}，窗口到 {config['end']}" if signal_end else f"规则先在 {market} 上算一遍"
+                    out = studio_rules.rule_dir(REFRESH_ROOT, f["name"], market)
+                else:
+                    why = f"信号只到 {signal_end}，窗口到 {config['end']}" if signal_end else f"它是在 {run_market(f['trace'])} 上研究的，先在 {market} 上算一遍"
+                    out = refresh_dir(f["trace"], f["loop_id"], f["name"], market)
                 write_json(folder / "result.json", {"status": "queued", "message": f"重算 {name}（{why}）"})
-                out = refresh_dir(f["trace"], f["loop_id"], f["name"], market)
                 for cached in out.glob("studio_analysis.*.json"):
                     cached.unlink()
                 run_refresh(Path(f["code_path"]), f["name"], out, market)
-            refreshed = {(f["trace"], f["loop_id"], f["name"]) for f in stale}
-            current = {**config, "factors": [{k: v for k, v in {**f, "path": str(refresh_dir(f["trace"], f["loop_id"], f["name"], market))}.items() if k != "recompute_for"}
+            refreshed = {(f.get("trace"), f.get("loop_id"), f["name"]) for f in stale}
+
+            def fresh_path(f):
+                return studio_rules.rule_dir(REFRESH_ROOT, f["name"], market) if f.get("kind") == "rule" else refresh_dir(f["trace"], f["loop_id"], f["name"], market)
+
+            current = {**config, "factors": [{k: v for k, v in {**f, "path": str(fresh_path(f))}.items() if k != "recompute_for"}
                                              if (f.get("trace"), f.get("loop_id"), f["name"]) in refreshed else f for f in config["factors"]]}
             write_json(folder / "result.json", {"status": "queued", "message": "信号已重算到最新，开始运行"})
             start(current)
@@ -1809,7 +1849,7 @@ def strategy_update(strategy_id):
     existing = studio_jobs.find("strategy_update", id=strategy_id)
     if existing:
         return jsonify({"job": existing["id"]}), 202
-    members = [f for f in strategy["factors"] if f.get("kind", "factor") == "factor"] if body.get("refresh", True) else []
+    members = [f for f in strategy["factors"] if f.get("kind", "factor") in ("factor", "rule")] if body.get("refresh", True) else []
     market = str((strategy.get("params") or {}).get("market") or "csi300")
 
     def work(job):
@@ -1817,11 +1857,15 @@ def strategy_update(strategy_id):
         for i, f in enumerate(members):
             studio_jobs.update(job["id"], done=i, total=len(members) + 1, message=f"重算 {f['name']}")
             try:
-                original = Path(resolve_factor_paths(f["trace"], f["loop_id"], [{"name": f["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
-                code_path = original / "factor.py"
-                if not code_path.is_file():
-                    raise ValueError("no factor.py")
-                out = refresh_dir(f["trace"], f["loop_id"], f["name"], market)
+                if f.get("kind") == "rule":
+                    code_path = studio_rules.rule_file(f["name"])
+                    out = studio_rules.rule_dir(REFRESH_ROOT, f["name"], market)
+                else:
+                    original = Path(resolve_factor_paths(f["trace"], f["loop_id"], [{"name": f["name"], "weight": 1}], prefer_refreshed=False)[0]["path"])
+                    code_path = original / "factor.py"
+                    if not code_path.is_file():
+                        raise ValueError("no factor.py")
+                    out = refresh_dir(f["trace"], f["loop_id"], f["name"], market)
                 for stale in out.glob("studio_analysis.*.json"):
                     stale.unlink()
                 run_refresh(code_path, f["name"], out, market)
