@@ -870,8 +870,6 @@ export const EN: Record<string, string> = {
   "这个股票池还没有带方向的研究。": "No run on this universe was given a direction yet.",
   "来自 {0}": "from {0}",
   "×{0} · 规则": "×{0} · rule",
-  "搜索标的": "Search instrument",
-  "搜索合约代码": "Search by code",
   "持仓 {0} 只，只显示前 {1} 只；用搜索缩小范围，完整清单在 CSV 里。": "{0} holdings, showing the first {1}; narrow with the search, the full list is in the CSV.",
   "评分 {0} 条，只显示前 {1} 条。": "{0} scores, showing the first {1}.",
   "规则": "Rules",
