@@ -55,6 +55,14 @@ def validate_config(config):
     if book not in BOOKS:
         raise ValueError("book must be equal or topk")
     result["book"] = book
+    # execution: when the equal book buys. "close" (default) trades at the close of the day after the signal;
+    # "open" buys at that day's open and sells at its close (A-share overnight returns are negative).
+    execution = str(result.get("execution") or "close")
+    if execution not in ("close", "open"):
+        raise ValueError("execution must be close or open")
+    if execution == "open" and book != "equal":
+        raise ValueError("open execution is only available with the equal-weight book")
+    result["execution"] = execution
     for key in ("horizon", "rebalance"):
         value = float(1 if result.get(key) is None else result[key])
         if not math.isfinite(value) or not value.is_integer() or not 1 <= value <= 20:
@@ -692,11 +700,11 @@ LOTTERY_WITHOUT_TOP3 = 0.5  # or losing the best three names removes more than h
 LOTTERY_MIN_NAMES = 60      # below this many traded names the shares are not judged (ten names is most of the book)
 
 
-def daily_closes(instruments, start, end):
-    """Adjusted closes as a (datetime × instrument) frame, suspended days forward-filled."""
+def daily_closes(instruments, start, end, field="$close"):
+    """Adjusted prices (closes by default) as a (datetime × instrument) frame, suspended days forward-filled."""
     from qlib.data import D
 
-    frame = D.features(sorted(set(instruments)), ["$close"], start_time=start, end_time=end, freq="day")["$close"]
+    frame = D.features(sorted(set(instruments)), [field], start_time=start, end_time=end, freq="day")[field]
     if frame.index.names[0] == "instrument":
         frame = frame.swaplevel(0, 1)
     return frame.unstack("instrument").sort_index().ffill()
@@ -743,7 +751,14 @@ def equal_book(score, config, universe=None):
     start, end = pd.Timestamp(config["start"]), pd.Timestamp(config["end"])
     calendar = pd.DatetimeIndex(D.calendar(freq="day"))
     trade_days = calendar[(calendar >= start) & (calendar <= end)]
-    closes = daily_closes(held.index.get_level_values("instrument").unique(), calendar[max(0, calendar.searchsorted(start) - 1)], end)
+    names = held.index.get_level_values("instrument").unique()
+    first = calendar[max(0, calendar.searchsorted(start) - 1)]
+    closes = daily_closes(names, first, end)
+    # execution "open": names entering the book are bought at the trading day's open and marked to its close, so
+    # the book earns that day's open→close on them (A-share overnight returns are negative, intraday positive;
+    # see the review doc §21). Names leaving are still sold at the close. Default "close" buys at the close.
+    at_open = config.get("execution", "close") == "open"
+    opens = daily_closes(names, first, end, "$open") if at_open else None
     bench = D.features([config.get("benchmark", "SH000300")], ["$close"], start_time=trade_days[0], end_time=end, freq="day")["$close"].droplevel(0).reindex(trade_days).ffill()
     bench_ret = bench.pct_change().fillna(0.0)
     topk = int(config["topk"])
@@ -753,6 +768,7 @@ def equal_book(score, config, universe=None):
     rows, trades, blocks, pnl = [], [], [], {}
     previous_day, current_set = None, None
     for day in trade_days:
+        value_open, gained_today = value, 0.0  # the day's return is everything earned today over the value it started with
         # Mark to market from the previous close.
         if previous_day is not None and len(weights):
             ratio = (closes.loc[day, weights.index] / closes.loc[previous_day, weights.index]).fillna(1.0)
@@ -760,10 +776,8 @@ def equal_book(score, config, universe=None):
             for inst, g in gained.items():
                 pnl[inst] = pnl.get(inst, 0.0) + float(g)
             weights = weights * ratio
-            day_return = float(gained.sum() / value)
+            gained_today += float(gained.sum())
             value += float(gained.sum())
-        else:
-            day_return = 0.0
         # Yesterday's score decides today's book (Qlib's TopkDropout reads the previous day's prediction).
         signal_day = calendar[calendar.searchsorted(day) - 1]
         cost, turnover = 0.0, 0.0
@@ -780,16 +794,30 @@ def equal_book(score, config, universe=None):
                 cost = sold * close_cost + bought * open_cost
                 turnover = (sold + bought) / 2 / value if value else 0.0
                 for inst, d in delta[delta.abs() > 1e-9].items():
+                    price = float(opens.loc[day, inst]) if at_open and d > 0 and pd.notna(opens.loc[day, inst]) else float(closes.loc[day, inst])
                     trades.append({"date": str(day.date()), "instrument": str(inst), "direction": "buy" if d > 0 else "sell",
-                                   "amount": abs(float(d)) / float(closes.loc[day, inst]), "price": float(closes.loc[day, inst]), "value": abs(float(d)),
+                                   "amount": abs(float(d)) / price, "price": price, "value": abs(float(d)),
                                    "cost": abs(float(d)) * (open_cost if d > 0 else close_cost)})
                 for inst in delta.index:
                     pnl[inst] = pnl.get(inst, 0.0) - abs(float(delta[inst])) * (open_cost if delta[inst] > 0 else close_cost)
                 value -= cost
                 weights = target * (value / target.sum()) if target.sum() else target
+                if at_open and len(weights):
+                    # Amounts bought at the open are worth open→close more (or less) by this close.
+                    bought_now = delta[delta > 1e-9].index.intersection(weights.index)
+                    if len(bought_now):
+                        ratio = (closes.loc[day, bought_now] / opens.loc[day, bought_now]).fillna(1.0)
+                        share = (delta[bought_now] / target[bought_now]).clip(upper=1.0)  # the part of the position bought today
+                        gain = weights[bought_now] * share * (ratio - 1.0)
+                        for inst, g in gain.items():
+                            pnl[inst] = pnl.get(inst, 0.0) + float(g)
+                        weights[bought_now] = weights[bought_now] + gain
+                        gained_today += float(gain.sum())
+                        value += float(gain.sum())
                 current_set = chosen
                 blocks.append({"date": str(day.date()), "names": len(chosen)})
-        rows.append({"date": day, "return": day_return, "cost": cost / (value + cost) if value else 0.0, "bench": float(bench_ret.loc[day]), "turnover": turnover, "account": value})
+        day_return = gained_today / value_open if value_open else 0.0
+        rows.append({"date": day, "return": day_return, "cost": cost / value_open if value_open else 0.0, "bench": float(bench_ret.loc[day]), "turnover": turnover, "account": value})
         previous_day = day
     report = pd.DataFrame(rows).set_index("date")  # return is gross of cost, as in Qlib's report
     positions = [{"instrument": str(inst), "amount": float(v / closes.loc[previous_day, inst]), "price": float(closes.loc[previous_day, inst]), "value": float(v), "weight": float(v / value)}
@@ -1140,7 +1168,8 @@ def run(config):
                   "diagnosis": signal_diagnosis(prepared, score) if len(factors) > 1 else None,
                   "notes": prepared["notes"],
                   "method": ("Equal-weight book: top names at equal weight on the day after each signal refresh, drifting in between; "
-                             "no lot sizes or price limits. " if config.get("book", "equal") == "equal" else "Qlib TopkDropout book. ")
+                             + ("buys at the open, sells at the close; " if config.get("execution") == "open" else "")
+                             + "no lot sizes or price limits. " if config.get("book", "equal") == "equal" else "Qlib TopkDropout book. ")
                             + "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})
 
 

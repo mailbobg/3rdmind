@@ -75,6 +75,7 @@ export interface BacktestRequest {
   /** What the score is purged of before ranking: nothing (legacy), log traded value, or that plus industry means. */
   neutral?: Neutral;
   book?: Book;
+  execution?: Execution;
   /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
   trace?: string; loop_id?: number;
 }
@@ -279,7 +280,9 @@ export const runSearch = (config: SearchRequest) => api<{ id: string }>("/studio
 export type Neutral = "none" | "size" | "size_industry";
 /** How the score becomes positions: equal weight on every rebalance day (the standard since 2026-09-20), or Qlib's TopkDropout. */
 export type Book = "equal" | "topk";
-export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number; neutral?: Neutral; book?: Book }
+/** When the equal-weight book buys: at the close of the day after the signal, or at that day's open (sells stay at the close). */
+export type Execution = "close" | "open";
+export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number; neutral?: Neutral; book?: Book; execution?: Execution }
 export interface StrategyRun { id: string; kind: "evidence" | "update"; status?: string; start?: string; end?: string; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; benchmark_return?: number | null; error?: string; created?: string }
 export interface Strategy {
   id: string; name: string; note: string; created: string; updated: string;

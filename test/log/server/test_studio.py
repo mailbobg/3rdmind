@@ -1737,6 +1737,9 @@ def test_validate_config_book_defaults_to_equal_weight() -> None:
     assert validate_config(_config(book="topk"))["book"] == "topk"
     with pytest.raises(ValueError):
         validate_config(_config(book="hedge"))
+    assert validate_config(_config())["execution"] == "close" and validate_config(_config(execution="open"))["execution"] == "open"
+    with pytest.raises(ValueError):
+        validate_config(_config(execution="open", book="topk"))  # only the equal book can buy at the open
 
 
 @pytest.mark.offline
