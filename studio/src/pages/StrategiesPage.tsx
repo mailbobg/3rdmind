@@ -32,6 +32,20 @@ export function StrategiesPage() {
   const [detail, setDetail] = useState<Strategy | null>(null);
   const [latestRun, setLatestRun] = useState<BacktestResult | null>(null);
   const [signal, setSignal] = useState<SignalExport | null>(null);
+  // The signal tables show at most SIGNAL_ROWS rows (a whole-universe rule holds thousands); ranks are indexed once.
+  const SIGNAL_ROWS = 100;
+  const [signalQuery, setSignalQuery] = useState("");
+  const signalView = useMemo(() => {
+    const rows = signal?.rows || [];
+    const q = signalQuery.trim().toUpperCase();
+    const match = (code: string) => !q || code.toUpperCase().includes(q);
+    const rankOf = new Map<string, number>();
+    for (const r of rows) if (r.type === "score" && typeof r.rank === "number") rankOf.set(r.instrument, r.rank);
+    const allHoldings = rows.filter((r) => r.type === "holding");
+    const allScores = rows.filter((r) => r.type === "score");
+    return { rankOf, holdingsTotal: allHoldings.length, holdings: allHoldings.filter((r) => match(r.instrument)).slice(0, SIGNAL_ROWS),
+             scoreCount: allScores.length, scores: allScores.filter((r) => match(r.instrument)).slice(0, Math.min(SIGNAL_ROWS, Math.max(20, (signal?.topk || 0) * 2))) };
+  }, [signal, signalQuery]);
   const [recent, setRecent] = useState<RecentContext | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
@@ -199,25 +213,28 @@ export function StrategiesPage() {
                 { label: t("持仓市值"), value: money(signal.rows.filter((r) => r.type === "holding").reduce((a, r) => a + (r.value || 0), 0), workspace.region) },
                 { label: t("现金"), value: money(signal.cash, workspace.region) },
               ]} />
+              <TextInput ariaLabel={t("搜索标的")} placeholder={t("搜索合约代码")} value={signalQuery} onChange={setSignalQuery} />
               <DataTable label={t("目标持仓")} head={[[t("标的")], [t("权重"), "end"], [t("数量"), "end"], [t("价格"), "end"], [t("市值"), "end"], [t("最新排名"), "end"]]}
-                rows={signal.rows.filter((r) => r.type === "holding").map((r) => {
-                  const rank = signal.rows.find((x) => x.type === "score" && x.instrument === r.instrument)?.rank;
+                rows={signalView.holdings.map((r) => {
+                  const rank = signalView.rankOf.get(r.instrument);
                   return { key: r.instrument, cells: [
                     <Instrument key="i" code={r.instrument} />,
                     <span key="w" className="tabular-nums">{typeof r.weight === "number" ? percent(r.weight, 1) : "—"}</span>,
                     <span key="a" className="tabular-nums">{typeof r.amount === "number" ? Math.round(r.amount).toLocaleString() : "—"}</span>,
                     <span key="p" className="tabular-nums">{typeof r.price === "number" ? r.price.toFixed(2) : "—"}</span>,
                     <span key="v" className="tabular-nums">{money(r.value, workspace.region)}</span>,
-                    <span key="r" className={`tabular-nums ${rank == null ? "text-muted" : rank <= signal.topk ? "" : "text-danger"}`}>{rank ?? `> ${signal.rows.filter((x) => x.type === "score").length}`}</span>,
+                    <span key="r" className={`tabular-nums ${rank == null ? "text-muted" : rank <= signal.topk ? "" : "text-danger"}`}>{rank ?? `> ${signalView.scoreCount}`}</span>,
                   ] };
                 })} />
+              {signalView.holdingsTotal > signalView.holdings.length && <Hint>{t("持仓 {0} 只，只显示前 {1} 只；用搜索缩小范围，完整清单在 CSV 里。", [signalView.holdingsTotal, signalView.holdings.length])}</Hint>}
               <DataTable label={t("最新评分")} head={[[t("排名"), "end"], [t("标的")], [t("评分"), "end"], [t("当前")]]}
-                rows={signal.rows.filter((r) => r.type === "score").slice(0, signal.topk * 2).map((r) => ({ key: `s-${r.instrument}`, cells: [
+                rows={signalView.scores.map((r) => ({ key: `s-${r.instrument}`, cells: [
                   <span key="r" className="tabular-nums">{r.rank}</span>,
                   <Instrument key="i" code={r.instrument} />,
                   <span key="s" className="tabular-nums">{typeof r.score === "number" ? r.score.toFixed(4) : "—"}</span>,
                   <span key="h" className={`text-[11px] ${r.held ? "text-success" : "text-muted"}`}>{r.held ? t("持有中") : (r.rank ?? 0) <= signal.topk ? t("待买入") : ""}</span>,
                 ] }))} />
+              {signalView.scoreCount > signalView.scores.length && <Hint>{t("评分 {0} 条，只显示前 {1} 条。", [signalView.scoreCount, signalView.scores.length])}</Hint>}
               <Hint>{t("排名跌出前 {0} 的持仓标红：按 TopkDropout 规则它们是下一次调仓最先被换出的候选。", [signal.topk])}</Hint>
             </Section>
           )}
