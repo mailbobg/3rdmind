@@ -171,6 +171,20 @@ export function ResearchPage() {
   const [moreLoops, setMoreLoops] = useState(3);
   const [resuming, setResuming] = useState(false);
   const canContinue = !!trace.traceId && !trace.active && MODES.some((m) => m.loops && trace.traceId.startsWith(m.value + "/"));
+  // A report run has no hypothesis generator to resume (its loop only reads more PDFs), so "continue" there means
+  // opening a factor-research run on the same universe with the agent's next hypothesis as the direction.
+  const isReportRun = !!trace.traceId && trace.traceId.startsWith("Finance Data Building (Reports)/");
+  const seedFromRound = useCallback((round: RoundView) => {
+    const summary = summaries.find((e) => e.id === trace.traceId);
+    const lines = [
+      round.hypothesis?.hypothesis ? t("上一份研报的因子假设：{0}", [round.hypothesis.hypothesis]) : "",
+      round.feedback?.hypothesis_evaluation ? t("评估结论：{0}", [round.feedback.hypothesis_evaluation]) : "",
+      round.feedback?.new_hypothesis ? t("从这里接着做：{0}", [round.feedback.new_hypothesis]) : "",
+    ].filter(Boolean);
+    setForm((f) => ({ ...f, scenario: MODES[0].value, market: summary?.market || f.market, objective: lines.join("\n\n") }));
+    setTab("new");
+    layout.openResults();
+  }, [summaries, trace.traceId, layout]);
   const continueResearch = useCallback(async () => {
     if (!canContinue) return;
     if (!Number.isInteger(moreLoops) || moreLoops < 1 || moreLoops > 30) { trace.setError(t("继续的轮数应为 1–30。")); return; }
@@ -334,7 +348,7 @@ export function ResearchPage() {
           {canReflect && !trace.interaction && (
             <div className="mm-row"><Btn disabled={reflecting} onClick={reflectNow}>{reflecting ? t("模型写备忘录中…") : t("现在反思")}</Btn><span className="text-[11px] text-muted">{t("按到现在为止的验收判定写一份反思备忘录（每 3 轮也会自动写一次）。")}</span></div>
           )}
-          {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} testDays={env?.test_window?.days} /> : <Hint>{t("在左侧展开一个实验，点一轮查看假设、评估与代码。")}</Hint>}
+          {activeRound ? <RoundDetail round={activeRound} onContinue={canContinue ? continueResearch : undefined} onSeed={isReportRun && !trace.active ? () => seedFromRound(activeRound) : undefined} testDays={env?.test_window?.days} /> : <Hint>{t("在左侧展开一个实验，点一轮查看假设、评估与代码。")}</Hint>}
         </div>
       )}
     >

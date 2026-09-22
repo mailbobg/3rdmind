@@ -9,10 +9,11 @@ import { CodeView, Formula, Hint, MetricTable, Mono, StatusChip } from "./widget
 import { t } from "../i18n";
 
 /** A round's full detail in the results column. */
-/** `onContinue` adds "继续研究" beside the agent's next hypothesis: the caller resumes the experiment. */
+/** `onContinue` adds "继续研究" beside the agent's next hypothesis: the caller resumes the experiment. `onSeed` is the
+ * report-run variant: the caller opens a new factor-research run seeded with that hypothesis. */
 const GATE_LEVELS: Record<string, string> = { signal: t("通过"), weak: t("偏弱"), noise: t("噪声"), duplicate: t("重复"), unreplicated: t("未复现"), no_book: t("有信号无贡献"), error: t("未能判断") };
 
-export function RoundDetail({ round, onContinue, testDays }: { round: RoundView; onContinue?: () => void; testDays?: number | null }) {
+export function RoundDetail({ round, onContinue, onSeed, testDays }: { round: RoundView; onContinue?: () => void; onSeed?: () => void; testDays?: number | null }) {
   const [file, setFile] = useState(0);
   useEffect(() => setFile(Math.max(0, round.files.length - 1)), [round.id, round.files.length]);
   const current = round.files[file];
@@ -67,6 +68,12 @@ export function RoundDetail({ round, onContinue, testDays }: { round: RoundView;
             <div className="flex flex-col gap-1.5">
               <Hint>{t("下一步：{0}", [round.feedback.new_hypothesis])}</Hint>
               {onContinue && <div><Btn onClick={onContinue}>{t("继续研究，让 Agent 接着这个假设跑")}</Btn></div>}
+              {!onContinue && onSeed && (
+                <div className="flex flex-col gap-1">
+                  <div><Btn onClick={onSeed}>{t("以这个假设开一个因子研究")}</Btn></div>
+                  <Hint>{t("研报提取的运行不能原地续跑（它的循环只会去读更多研报）；这个按钮把假设和评估填进「因子研发」的方向框，在同一股票池上开新研究。")}</Hint>
+                </div>
+              )}
             </div>
           )}
         </Section>
