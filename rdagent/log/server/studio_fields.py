@@ -80,6 +80,45 @@ TUSHARE_NOTE = (
 
 # ---- the store -----------------------------------------------------------------------------------------------
 
+SETTINGS_PATH = None  # <traces>/studio_data/quantdb.json: {"home": "..."}; empty means quantdb's default (~/.quantdb)
+
+
+def configure(settings_path: Path) -> None:
+    """Remember where the setting lives and apply a saved store location to this process (children inherit it)."""
+    global SETTINGS_PATH
+    SETTINGS_PATH = Path(settings_path)
+    home = saved_home()
+    if home:
+        os.environ["QUANTDB_HOME"] = home
+
+
+def saved_home() -> str:
+    if SETTINGS_PATH is None or not SETTINGS_PATH.is_file():
+        return ""
+    try:
+        return str(json.loads(SETTINGS_PATH.read_text()).get("home") or "")
+    except ValueError:
+        return ""
+
+
+def save_home(home: str) -> str:
+    """Point the Studio at a quantdb store: empty restores quantdb's default. The folder is created if needed
+    (quantdb does that on open), but its parent must exist, so a typo does not create a tree somewhere odd."""
+    home = (home or "").strip()
+    if home:
+        path = Path(home).expanduser()
+        if not path.parent.is_dir():
+            raise ValueError(f"目录不存在：{path.parent}")
+        home = str(path)
+        os.environ["QUANTDB_HOME"] = home
+    else:
+        os.environ.pop("QUANTDB_HOME", None)
+    if SETTINGS_PATH is not None:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_PATH.write_text(json.dumps({"home": home}, ensure_ascii=False))
+    return home
+
+
 def installed() -> bool:
     try:
         import quantdb  # noqa: F401
@@ -105,13 +144,15 @@ def status(exports=lambda column: {}) -> dict:
     """What the data sheet shows: where the store is, per-table coverage, whether the Tushare servers are
     configured, which universe exports already carry the columns."""
     db = store()
-    out = {"installed": db is not None, "home": str(db.root) if db else None, "configured": False, "tables": {}, "last": None,
-           "columns": list(EXTRA_COLUMNS), "baostock_exports": exports(BAOSTOCK_COLUMNS[0]), "tushare_exports": exports(TUSHARE_COLUMNS[0])}
+    out = {"installed": db is not None, "home": str(db.root) if db else None, "home_setting": saved_home(), "configured": False, "tables": {}, "last": None,
+           "settings": {}, "columns": list(EXTRA_COLUMNS), "baostock_exports": exports(BAOSTOCK_COLUMNS[0]), "tushare_exports": exports(TUSHARE_COLUMNS[0])}
     if db is None:
         return out
+    from quantdb.cli import SETTINGS
     from quantdb.sources.base import Config
 
     config = Config(db.root)
+    out["settings"] = {key: bool(config.get(key)) for key in SETTINGS}  # which keys .env (or the environment) provides, never the values
     out["configured"] = bool((config.get("TUSHARE_MIRROR_TOKEN") and config.get("TUSHARE_MIRROR_URL")) or (config.get("DATAHUB_API_KEY") and config.get("DATAHUB_BASE")))
     last = ""
     for name in TABLES:

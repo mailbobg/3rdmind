@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -2797,6 +2798,26 @@ def test_extra_fields_status_and_refresh_job(studio_client, quantdb_store, tmp_p
     monkeypatch.setattr(studio_fields, "installed", lambda: False)
     assert studio_client.post("/studio/data/extra", json={"source": "baostock"}).status_code == 400
     assert studio_client.get("/studio/data/extra").get_json()["installed"] is False
+
+
+@pytest.mark.offline
+def test_quantdb_home_setting(studio_client, quantdb_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_fields
+
+    monkeypatch.setattr(studio_fields, "SETTINGS_PATH", tmp_path / "quantdb.json")
+    status = studio_client.get("/studio/data/extra").get_json()
+    assert status["home"] == str(quantdb_store.root) and status["home_setting"] == "" and status["settings"]["DATAHUB_API_KEY"] is False
+    # point the Studio at another store: persisted, applied to the environment, visible in the status
+    other = tmp_path / "elsewhere"
+    saved = studio_client.put("/studio/data/extra/home", json={"home": str(other)})
+    assert saved.status_code == 200 and saved.get_json()["home"] == str(other) and saved.get_json()["tables"] == {}
+    assert json.loads((tmp_path / "quantdb.json").read_text()) == {"home": str(other)} and os.environ["QUANTDB_HOME"] == str(other)
+    assert studio_client.put("/studio/data/extra/home", json={"home": str(tmp_path / "no" / "such" / "parent")}).status_code == 400
+    # empty restores the default; configure() re-applies a saved setting at startup
+    assert studio_client.put("/studio/data/extra/home", json={"home": ""}).get_json()["home_setting"] == ""
+    (tmp_path / "quantdb.json").write_text(json.dumps({"home": str(quantdb_store.root)}))
+    studio_fields.configure(tmp_path / "quantdb.json")
+    assert os.environ["QUANTDB_HOME"] == str(quantdb_store.root) and studio_client.get("/studio/data/extra").get_json()["tables"]
 
 
 @pytest.mark.offline

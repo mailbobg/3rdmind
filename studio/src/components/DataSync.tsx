@@ -4,7 +4,7 @@ import * as studio from "../api/studio";
 import type { ExtraSource, ExtraStatus, SyncStatus } from "../api/studio";
 import { universeLabel } from "../api/studio";
 import { errorText } from "../hooks/studioContext";
-import { Btn, SelectInput } from "./minimal";
+import { Btn, SelectInput, TextInput } from "./minimal";
 import { locale, t } from "../i18n";
 
 const PHASES: Record<string, string> = { starting: t("准备"), downloading: t("下载"), extracting: t("校验解包"), swapping: t("替换目录"), done: t("完成"), failed: t("失败") };
@@ -45,6 +45,12 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
     }, 5000);
     return () => clearInterval(timer);
   }, [extraJob, onSynced]);
+  const [home, setHome] = useState("");
+  useEffect(() => { if (extra) setHome(extra.home_setting); }, [extra?.home_setting]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const saveHome = async () => {
+    setBusy(true); setMessage("");
+    try { setExtra(await studio.saveExtraHome(home)); } catch (e) { setMessage(errorText(e)); } finally { setBusy(false); }
+  };
   const startExtra = async (source: ExtraSource) => {
     setBusy(true); setMessage("");
     try { setExtraJob((await studio.startExtraData(source)).job); } catch (e) { setMessage(errorText(e)); } finally { setBusy(false); }
@@ -137,6 +143,18 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
                   {extra ? (extra.installed ? t("共享数据库 {0}", [extra.home || "—"]) : t("没有安装 quantdb：pip install -e <quantdb 仓库>，字段功能不可用。")) : t("检查中…")}
                 </div>
                 <p className="m-0 text-[11px] leading-relaxed text-muted">{t("A 股扩展字段从独立的 quantdb 数据库读取，其他程序共用同一份数据。位置由 QUANTDB_HOME 决定（默认 ~/.quantdb），密钥放在它的 .env 里。")}</p>
+                {extra?.installed && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <TextInput className="flex-1" value={home} onChange={setHome} placeholder={t("留空用默认 ~/.quantdb")} ariaLabel="QUANTDB_HOME" />
+                      <Btn disabled={busy || extraRunning || home === extra.home_setting} onClick={saveHome}>{t("保存位置")}</Btn>
+                    </div>
+                    <div className="text-[11px] text-muted">
+                      {t("{0}/.env 里的密钥：", [extra.home || "~/.quantdb"])}
+                      {Object.entries(extra.settings).map(([key, ok]) => <span key={key} className={ok ? "ml-2" : "ml-2 opacity-50"}>{ok ? "✓" : "✗"} {key}</span>)}
+                    </div>
+                  </>
+                )}
               </div>
               {extra?.installed && (
                 <>

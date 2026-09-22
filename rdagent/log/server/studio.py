@@ -2066,6 +2066,9 @@ def _configure_sync(state):
     app = state.app
     studio_sync.configure(TRACE_ROOT / "studio_data" / "sync.json", lambda: workers_busy(app))
     studio_llm.configure(TRACE_ROOT / "studio_data" / "llm.json")
+    from rdagent.log.server import studio_fields
+
+    studio_fields.configure(TRACE_ROOT / "studio_data" / "quantdb.json")
 
 
 @studio.get("/data/sync")
@@ -2260,6 +2263,18 @@ def run_extra_fetch(job, markets, source="baostock"):
 @studio.get("/data/extra")
 def data_extra_status():
     return jsonify(extra_status())
+
+
+@studio.route("/data/extra/home", methods=["PUT"])
+def data_extra_home():
+    """Point the Studio at a quantdb store (``{"home": path}``; empty = quantdb's default ~/.quantdb)."""
+    from rdagent.log.server import studio_fields
+
+    try:
+        studio_fields.save_home((request.get_json() or {}).get("home", ""))
+        return jsonify(extra_status())
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
 
 
 @studio.post("/data/extra")
