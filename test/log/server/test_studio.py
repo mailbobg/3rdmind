@@ -17,9 +17,9 @@ from rdagent.log.ui.storage import WebStorage
 
 
 @pytest.fixture(autouse=True)
-def _no_shared_quantdb(monkeypatch: pytest.MonkeyPatch):
-    """Tests never read the machine's ~/.quantdb; the quantdb-backed path is exercised with a store under tmp."""
-    monkeypatch.setenv("STUDIO_NO_QUANTDB", "1")
+def _no_shared_quantdb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Tests never read the machine's ~/.quantdb: the store is an empty folder under tmp unless a test fills it."""
+    monkeypatch.setenv("QUANTDB_HOME", str(tmp_path / "qdb"))
 
 
 class _FactorTask(Task):
@@ -2714,182 +2714,89 @@ def fake_popen(calls, status):
     return popen
 
 
-@pytest.mark.offline
-def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from rdagent.log.server import studio_extra
+@pytest.fixture
+def quantdb_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A quantdb store under tmp holding one row of every Studio table, Beijing rows included (to be dropped)."""
+    quantdb = pytest.importorskip("quantdb")
+    monkeypatch.setenv("QUANTDB_HOME", str(tmp_path / "qdb"))
+    db = quantdb.open()
+    row = lambda date, symbol, **fields: pd.DataFrame([{"date": pd.Timestamp(date), "symbol": symbol, **fields}])  # noqa: E731
+    db.upsert("cn.baostock", pd.concat([row("2025-01-02", "SH600000", turn=0.5, close=10.0, volume=1_000_000, amount=1e7, peTTM=8.5, pbMRQ=0.9, psTTM=1.2, pcfNcfTTM=-3.0, isST=0),
+                                        row("2025-01-03", "SH600000", turn=0.0, close=10.5, volume=2_000_000, amount=2.1e7, peTTM=8.9, pbMRQ=0.95, psTTM=1.3, pcfNcfTTM=-3.1, isST=1)]),
+              keys=("date", "symbol"), done=["SH600000", "SZ000001"], source="baostock")
+    db.upsert("cn.moneyflow", pd.concat([row("2025-01-02", "SH600000", trade_date=20250102, buy_sm_amount=1, sell_sm_amount=2, buy_md_amount=3, sell_md_amount=4, buy_lg_amount=5, sell_lg_amount=6, buy_elg_amount=10, sell_elg_amount=4),
+                                         row("2025-01-02", "BJ920000", trade_date=20250102, buy_sm_amount=1, sell_sm_amount=1, buy_md_amount=1, sell_md_amount=1, buy_lg_amount=1, sell_lg_amount=1, buy_elg_amount=1, sell_elg_amount=1)]),
+              done=["20250102"], source="tushare")
+    db.upsert("cn.margin", row("2025-01-02", "SH600000", trade_date=20250102, rzye=100, rqye=5, rzmre=20, rzche=10, rqmcl=3), done=["20250102"], source="tushare")
+    db.upsert("cn.toplist", pd.concat([row("2025-01-03", "SH600000", trade_date=20250103, net_amount=-50, reason="a"), row("2025-01-03", "SH600000", trade_date=20250103, net_amount=80, reason="b")]), done=["20250103"], source="tushare")
+    # A report announced on 01-02 is visible from 01-03; the earlier one fills 01-02. Same-day restatement: flag 1 wins.
+    fina = lambda ann, end, roe, flag: row(end, "SH600000", ann_date=ann, end_date=end.replace("-", ""), roe=roe, roe_dt=roe - 1, netprofit_yoy=30, dt_netprofit_yoy=25, or_yoy=8, q_sales_yoy=9, grossprofit_margin=40, debt_to_assets=55, ocfps=1.5, bps=10, update_flag=flag)  # noqa: E731
+    db.upsert("cn.fina", pd.concat([fina("20250102", "2024-12-31", 11, 0), fina("20250102", "2024-12-31", 12, 1), fina("20241025", "2024-09-30", 9, 1)]), done=["20241231", "20240930"], source="tushare")
+    db.upsert("cn.express", row("2024-12-31", "SH600000", ann_date=20241230, end_date=20241231, n_income=130, yoy_net_profit=100), done=["20241231"], source="tushare")
+    db.upsert("cn.holders", pd.concat([row("2024-12-30", "SH600000", ann_date=20241230, end_date=20241231, holder_num=110), row("2024-10-01", "SH600000", ann_date=20241001, end_date=20240930, holder_num=100)]), done=["20241230"], source="tushare")
+    db.upsert("cn.unlock", pd.concat([row("2025-01-10", "SH600000", ann_date=20241220, float_date=20250110, float_share=1000, float_ratio=0.5, holder_name="a"),
+                                      row("2025-01-08", "SH600000", ann_date=20250105, float_date=20250108, float_share=500, float_ratio=0.25, holder_name="a")]), done=["20250106"], source="tushare")
+    return db
 
-    cache = tmp_path / "traces" / "studio_data" / "extra" / "baostock"
-    cache.mkdir(parents=True)
-    (cache / "SH600000.csv").write_text("date,code,close,volume,amount,turn,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST\n"
-                                        "2025-01-02,sh.600000,10.0,1000000,10000000,0.5,8.5,0.9,1.2,-3.0,0\n"
-                                        "2025-01-03,sh.600000,10.5,2000000,21000000,0,8.9,0.95,1.3,-3.1,1\n")
-    (cache / "SZ000001.csv").write_text("date,code,close,volume,amount,turn,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST\n")  # fetched, nothing there
-    assert studio_extra.bs_code("SH600000") == "sh.600000" and studio_extra.qlib_code("sz.000001") == "SZ000001"
-    # Beijing codes are skipped without a query (baostock has no Beijing data): an empty cache file, counted as empty.
-    import sys as _sys, types
-    fake = types.SimpleNamespace(login=lambda: types.SimpleNamespace(error_code="0", error_msg=""), logout=lambda: None,
-                                 query_history_k_data_plus=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no query for BJ")))
-    monkeypatch.setitem(_sys.modules, "baostock", fake)
-    out = studio_extra.fetch(cache, ["BJ836504"], "2025-01-01", "2025-01-03")
-    assert out["empty"] == 1 and out["done"] == 1 and (cache / "BJ836504.csv").read_text().startswith("date,code")
-    extra = studio_extra.load(cache, ["SH600000", "SZ000001", "SH600004"])
-    assert list(extra.columns) == studio_extra.EXTRA_COLUMNS and len(extra) == 2
-    first = extra.loc[(pd.Timestamp("2025-01-02"), "SH600000")]
-    assert first["$turnover"] == pytest.approx(0.005) and first["$float_cap"] == pytest.approx(10.0 * 1_000_000 / 0.005) and first["$is_st"] == 0
-    second = extra.loc[(pd.Timestamp("2025-01-03"), "SH600000")]
-    assert pd.isna(second["$float_cap"]) and second["$is_st"] == 1  # zero turnover: no float cap
-    # attach: left join onto an OHLCV frame; rows without a source row stay NaN; a foreign universe stays untouched.
+
+@pytest.mark.offline
+def test_extra_fields_attach_point_in_time(quantdb_store) -> None:
+    from rdagent.log.server import studio_fields
+
     days = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])
-    index = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
-    ohlcv = pd.DataFrame({"$close": 1.0, "$volume": 2.0}, index=index)
-    joined, attached = studio_extra.attach(ohlcv, cache)
-    assert attached and list(joined.columns) == ["$close", "$volume", *studio_extra.EXTRA_COLUMNS]
-    assert joined.loc[(days[0], "SH600000"), "$pe_ttm"] == pytest.approx(8.5) and pd.isna(joined.loc[(days[2], "SH600000"), "$pe_ttm"])
-    assert pd.isna(joined.loc[(days[0], "SH600004"), "$turnover"])
+    grid = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
+    joined, note = studio_fields.attach(pd.DataFrame({"$close": 1.0}, index=grid))
+    assert note.startswith("\nExtra columns") and "Tushare columns" in note
+    assert list(joined.columns) == ["$close", *studio_fields.EXTRA_COLUMNS] and "BJ" not in {i[1][:2] for i in joined.index}
+    first, second = joined.loc[(days[0], "SH600000")], joined.loc[(days[1], "SH600000")]
+    # baostock: turnover fraction, float cap from close × volume ÷ turnover (none at zero turnover), ST flag
+    assert first["$turnover"] == pytest.approx(0.005) and first["$float_cap"] == pytest.approx(10.0 * 1_000_000 / 0.005) and first["$is_st"] == 0
+    assert pd.isna(second["$float_cap"]) and second["$is_st"] == 1 and pd.isna(joined.loc[(days[2], "SH600000"), "$pe_ttm"])
+    # day tables: money flow in yuan, margin, the dragon-tiger list summed over reasons and 0 elsewhere
+    assert first["$mf_net_xl"] == pytest.approx(6e4) and first["$mf_net_sm"] == pytest.approx(-1e4) and first["$rz_bal"] == 100
+    assert pd.isna(joined.loc[(days[0], "SH600004"), "$rz_bal"])
+    assert second["$lhb"] == 1 and second["$lhb_net"] == 30 and first["$lhb"] == 0
+    # point-in-time reports: the Q3 report on 01-02, the restated Q4 (flag 1) from 01-03
+    assert first["$roe"] == pytest.approx(0.09) and second["$roe"] == pytest.approx(0.12) and first["$rep_days"] == (days[0] - pd.Timestamp("2024-10-25")).days
+    assert first["$ex_np_yoy"] == pytest.approx(0.3)
+    assert first["$holder_num"] == 110 and first["$holder_chg"] == pytest.approx(0.1) and first["$holder_ann_days"] == 0
+    # unlocks: on 01-02 only the one announced in December is known (1000 shares); by 01-06 both are
+    assert first["$unlock_30d"] == 1000 and joined.loc[(days[2], "SH600000"), "$unlock_30d"] == 1500 and joined.loc[(days[0], "SH600004"), "$unlock_30d"] == 0
+    # a foreign universe gets the columns but nothing in them; a missing store attaches nothing
     us = pd.DataFrame({"$close": 1.0}, index=pd.MultiIndex.from_product([days, ["AAPL"]], names=["datetime", "instrument"]))
-    assert studio_extra.attach(us, cache)[1] is False and studio_extra.attach(us, tmp_path / "nowhere")[1] is False
-    # Status and the job: member codes from the instrument lists, the fetch subprocess, exports rebuilt.
-    monkeypatch.setattr(studio_module, "EXTRA_CACHE", cache)
+    assert studio_fields.attach(us)[0]["$turnover"].isna().all()
+
+
+@pytest.mark.offline
+def test_extra_fields_status_and_refresh_job(studio_client, quantdb_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server import studio_fields
+
+    (quantdb_store.root / ".env").write_text("DATAHUB_API_KEY=k\nDATAHUB_BASE=http://x\n")
     status = studio_client.get("/studio/data/extra").get_json()
-    assert status["instruments"] == 3 and status["last"] == "2025-01-03" and status["columns"] == studio_extra.EXTRA_COLUMNS  # the BJ file counts as fetched
+    assert status["installed"] and status["home"] == str(quantdb_store.root) and status["configured"]
+    assert status["tables"]["cn.moneyflow"]["keys"] == 1 and status["tables"]["cn.baostock"]["symbols"] == 1 and status["last"] == "2025-01-03"
+    assert status["columns"] == studio_fields.EXTRA_COLUMNS and set(status["tushare_exports"]) == set(studio_module.EXTRA_MARKETS)
+    # the refresh job: a subprocess per source, member codes written for baostock, exports rebuilt afterwards
     calls = []
-    monkeypatch.setattr(studio_module.subprocess, "Popen", fake_popen(calls, {"status": "completed", "done": 2, "updated": 2, "empty": 0, "failed": [], "failed_count": 0}))
+    monkeypatch.setattr(studio_module.subprocess, "Popen", fake_popen(calls, {"status": "completed", "planned": 3, "done": 3, "failed": [], "failed_count": 0}))
     monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)
     started = studio_client.post("/studio/data/extra", json={"markets": ["csi1000"]})
     assert started.status_code == 202, started.get_json()
     job = wait_job(studio_client, started.get_json()["job"])
-    assert job["status"] == "completed", job
-    assert job["result"]["updated"] == 2 and "rebuilt" in job["result"]
-    fetch_cmd = calls[0]
-    assert fetch_cmd[2] == "fetch" and fetch_cmd[3] == str(cache) and Path(fetch_cmd[4]).read_text().splitlines()  # member codes were written
+    assert job["status"] == "completed" and job["result"]["done"] == 3 and "rebuilt" in job["result"]
+    assert calls[0][1].endswith("studio_fields.py") and calls[0][2:4] == ["refresh", "baostock"] and Path(calls[0][6]).read_text().splitlines()
+    started = studio_client.post("/studio/data/extra", json={"source": "tushare"})
+    assert started.status_code == 202 and wait_job(studio_client, started.get_json()["job"])["status"] == "completed"
+    assert calls[1][2:4] == ["refresh", "tushare"] and len(calls[1]) == 6
     assert studio_client.post("/studio/data/extra", json={"markets": ["nasdaq100"]}).status_code == 400
-
-
-@pytest.mark.offline
-@pytest.mark.parametrize("backend", ["csv", "quantdb"])
-def test_tushare_fields_point_in_time_and_job(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
-    from rdagent.log.server import studio_tushare
-
-    cache = tmp_path / "traces" / "studio_data" / "extra" / "tushare"
-    for name in ("moneyflow", "margin", "toplist", "fina", "express", "holders", "unlock"):
-        (cache / name).mkdir(parents=True)
-    (cache / "moneyflow" / "20250102.csv").write_text("ts_code,trade_date,buy_sm_amount,sell_sm_amount,buy_md_amount,sell_md_amount,buy_lg_amount,sell_lg_amount,buy_elg_amount,sell_elg_amount\n"
-                                                      "600000.SH,20250102,1,2,3,4,5,6,10,4\n920000.BJ,20250102,1,1,1,1,1,1,1,1\n")
-    (cache / "margin" / "20250102.csv").write_text("trade_date,ts_code,rzye,rqye,rzmre,rqyl,rzche,rqchl,rqmcl,rzrqye\n20250102,600000.SH,100,5,20,0,10,0,3,105\n")
-    (cache / "toplist" / "20250103.csv").write_text("trade_date,ts_code,name,net_amount,reason\n20250103,600000.SH,x,-50,a\n20250103,600000.SH,x,80,b\n")
-    # A report announced on 01-02 is visible from 01-03; the earlier one fills 01-02.
-    (cache / "fina" / "20241231.csv").write_text("ts_code,ann_date,end_date,roe,roe_dt,netprofit_yoy,dt_netprofit_yoy,or_yoy,q_sales_yoy,grossprofit_margin,debt_to_assets,ocfps,bps\n"
-                                                 "600000.SH,20250102,20241231,12,11,30,25,8,9,40,55,1.5,10\n")
-    (cache / "fina" / "20240930.csv").write_text("ts_code,ann_date,end_date,roe,roe_dt,netprofit_yoy,dt_netprofit_yoy,or_yoy,q_sales_yoy,grossprofit_margin,debt_to_assets,ocfps,bps\n"
-                                                 "600000.SH,20241025,20240930,9,8,20,15,6,7,38,56,1.2,9\n")
-    (cache / "express" / "20241231.csv").write_text("ts_code,ann_date,end_date,n_income,yoy_net_profit\n600000.SH,20241230,20241231,130,100\n")
-    (cache / "holders" / "20241230.csv").write_text("ts_code,ann_date,end_date,holder_num\n600000.SH,20241230,20241231,110\n600000.SH,20241001,20240930,100\n")
-    (cache / "unlock" / "20250106.csv").write_text("ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type\n"
-                                                   "600000.SH,20241220,20250110,1000,0.5,a,b\n600000.SH,20250105,20250108,500,0.25,a,b\n")
-    if backend == "quantdb":  # the same rows through the shared store: import the CSVs there, then hide them
-        quantdb = pytest.importorskip("quantdb")
-        from quantdb.legacy import import_studio_tushare
-
-        monkeypatch.setenv("QUANTDB_HOME", str(tmp_path / "qdb"))
-        monkeypatch.delenv("STUDIO_NO_QUANTDB")
-        import_studio_tushare(quantdb.open(), cache, report=lambda *_: None)
-        assert studio_tushare.quantdb_store() is not None
-        for csv in cache.rglob("*.csv"):
-            csv.unlink()
-    days = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])
-    grid = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
-    ohlcv = pd.DataFrame({"$close": 1.0}, index=grid)
-    joined, attached = studio_tushare.attach(ohlcv, cache)
-    assert attached and set(joined.columns) == {"$close", *studio_tushare.EXTRA_COLUMNS}
-    row = joined.loc[(days[0], "SH600000")]
-    assert row["$mf_net_xl"] == pytest.approx(6e4) and row["$mf_net_sm"] == pytest.approx(-1e4) and row["$rz_bal"] == 100
-    assert pd.isna(joined.loc[(days[0], "SH600004"), "$rz_bal"]) and "BJ" not in {i[1][:2] for i in joined.index}
-    assert joined.loc[(days[1], "SH600000"), "$lhb"] == 1 and joined.loc[(days[1], "SH600000"), "$lhb_net"] == 30 and joined.loc[(days[0], "SH600000"), "$lhb"] == 0
-    # Point in time: 01-02 still sees the Q3 report; 01-03 sees the annual one announced on 01-02.
-    assert joined.loc[(days[0], "SH600000"), "$roe"] == pytest.approx(0.09) and joined.loc[(days[1], "SH600000"), "$roe"] == pytest.approx(0.12)
-    assert joined.loc[(days[0], "SH600000"), "$rep_days"] == (days[0] - pd.Timestamp("2024-10-25")).days
-    assert joined.loc[(days[0], "SH600000"), "$ex_np_yoy"] == pytest.approx(0.3)  # growth from last year's absolute profit
-    assert joined.loc[(days[0], "SH600000"), "$holder_num"] == 110 and joined.loc[(days[0], "SH600000"), "$holder_chg"] == pytest.approx(0.1)
-    # Unlocks: on 01-02 only the one announced in December is known (1000 shares); by 01-06 both are.
-    assert joined.loc[(days[0], "SH600000"), "$unlock_30d"] == 1000 and joined.loc[(days[2], "SH600000"), "$unlock_30d"] == 1500
-    assert joined.loc[(days[0], "SH600004"), "$unlock_30d"] == 0
-    assert joined.loc[(days[0], "SH600000"), "$unlock_past_30d"] == 0 and joined.loc[(days[0], "SH600000"), "$holder_ann_days"] == 0
-    assert joined.loc[(days[2], "SH600000"), "$holder_ann_days"] == (days[2] - days[0]).days
-    assert studio_tushare.attach(ohlcv, tmp_path / "nowhere")[1] is (backend == "quantdb")  # the store does not need the cache folder
-    if backend == "csv":  # the CSV planner: missing day keys are fetched, finished ones not; open periods and the current week are refreshed
-        (cache / "fina" / "20240630.csv").write_text("ts_code,ann_date,end_date\n")  # a closed period: never re-fetched
-        tasks = studio_tushare.plan(cache, ["2025-01-02", "2025-01-03", "2025-01-06"], "2025-01-02", "2025-01-06")
-        names = {(t[0], t[1]) for t in tasks}
-        assert ("moneyflow", "20250102") not in names and ("moneyflow", "20250103") in names
-        assert ("fina", "20241231") in names and ("fina", "20240630") not in names and ("fina", "20240331") in names
-        (cache / "holders" / "20241216.csv").write_text("ts_code,ann_date,end_date,holder_num\n")  # an old week: finished
-        tasks = studio_tushare.plan(cache, ["2025-01-02", "2025-01-03", "2025-01-06"], "2025-01-02", "2025-01-06")
-        names = {(t[0], t[1]) for t in tasks}
-        assert ("holders", "20241216") not in names and ("holders", "20250106") in names and ("unlock", "20250106") in names
-        assert all("_retried" not in t[2] for t in tasks)
-    # Status and the route: unconfigured servers are refused before a job starts.
-    monkeypatch.setattr(studio_module, "TUSHARE_CACHE", cache)
-    status = studio_client.get("/studio/data/extra").get_json()["tushare"]
-    assert status["tables"]["moneyflow"] == 1 and status["last"] == "2025-01-03" and status["columns"] == studio_tushare.EXTRA_COLUMNS
-    assert status["backend"] == backend
+    assert studio_client.post("/studio/data/extra", json={"source": "nowhere"}).status_code == 400
+    (quantdb_store.root / ".env").write_text("")
     for key in ("TUSHARE_MIRROR_TOKEN", "TUSHARE_MIRROR_URL", "DATAHUB_API_KEY", "DATAHUB_BASE"):
         monkeypatch.delenv(key, raising=False)
-    assert studio_client.post("/studio/data/extra", json={"source": "tushare"}).status_code == 400
-    assert studio_client.post("/studio/data/extra", json={"source": "nowhere"}).status_code == 400
-    monkeypatch.setenv("DATAHUB_API_KEY", "k"); monkeypatch.setenv("DATAHUB_BASE", "http://x")
-    calls = []
-    monkeypatch.setattr(studio_module.subprocess, "Popen", fake_popen(calls, {"status": "completed", "planned": 3, "done": 3, "failed": [], "failed_count": 0}))
-    monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)
-    started = studio_client.post("/studio/data/extra", json={"source": "tushare"})
-    assert started.status_code == 202, started.get_json()
-    job = wait_job(studio_client, started.get_json()["job"])
-    assert job["status"] == "completed" and job["result"]["done"] == 3
-    assert calls[0][1].endswith("studio_tushare.py") and calls[0][2] == "fetch" and calls[0][3] == str(cache)
-
-
-@pytest.mark.offline
-def test_tushare_fetch_shares_work_and_hands_capped_answers_to_the_paging_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from rdagent.log.server import studio_tushare
-
-    monkeypatch.setattr(studio_tushare, "MIRROR_PACE", 0.0)
-    monkeypatch.setattr(studio_tushare, "MAIN_PACE", 0.0)
-    monkeypatch.setattr(studio_tushare, "BACKOFFS", (0.0,))
-    monkeypatch.setattr(studio_tushare, "REST", 0.0)
-    seen = {"mirror": [], "main": []}
-
-    class FakeMirror(studio_tushare.Server):
-        def __init__(self):
-            super().__init__("mirror", 0.0)
-
-        def query(self, api, params):
-            seen["mirror"].append((api, params))
-            if api == "margin_detail":
-                raise RuntimeError("EOF occurred in violation of protocol")  # throttled: handed over
-            if api == "stk_holdernumber":
-                raise studio_tushare.Capped("6000 rows")
-            return pd.DataFrame({"ts_code": ["600000.SH"], "trade_date": [params.get("trade_date", "20250102")], "x": [1.0]})
-
-    class FakeMain(studio_tushare.Server):
-        def __init__(self):
-            super().__init__("main", 0.0)
-
-        def query(self, api, params):
-            seen["main"].append((api, params))
-            return pd.DataFrame({"ts_code": ["600000.SH", "600004.SH"], "trade_date": ["20250102"] * 2, "x": [1.0, 2.0]})
-
-    monkeypatch.setattr(studio_tushare, "servers", lambda env=None: [("mirror", FakeMirror), ("main", FakeMain)])
-    cache = tmp_path / "tushare"
-    result = studio_tushare.fetch(cache, ["2025-01-02"], "2025-01-02", "2025-01-02")
-    assert result["failed"] == [] and result["done"] == result["planned"]
-    day_tables = [n for n, t in studio_tushare.TABLES.items() if t.key == "day"]
-    assert all((cache / n / "20250102.csv").is_file() for n in day_tables)
-    # The unlock table goes straight to the paging server; capped and throttled mirror answers end up there too.
-    assert all(api != "share_float" for api, _ in seen["mirror"]) and any(api == "share_float" for api, _ in seen["main"])
-    assert any(api == "stk_holdernumber" for api, _ in seen["main"]) and any(api == "margin_detail" for api, _ in seen["main"])
-    assert len(pd.read_csv(cache / "margin" / "20250102.csv")) == 2  # the main server's answer was the one written
-    # A second run plans only the still-open keys: no day table is fetched again.
-    again = studio_tushare.plan(cache, ["2025-01-02"], "2025-01-02", "2025-01-02")
-    assert not any(studio_tushare.TABLES[n].key == "day" for n, _, _ in again)
+    assert studio_client.post("/studio/data/extra", json={"source": "tushare"}).status_code == 400  # servers not configured
+    monkeypatch.setattr(studio_fields, "installed", lambda: False)
+    assert studio_client.post("/studio/data/extra", json={"source": "baostock"}).status_code == 400
+    assert studio_client.get("/studio/data/extra").get_json()["installed"] is False
 
 
 @pytest.mark.offline

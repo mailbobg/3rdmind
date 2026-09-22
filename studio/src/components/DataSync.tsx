@@ -9,7 +9,8 @@ import { locale, t } from "../i18n";
 
 const PHASES: Record<string, string> = { starting: t("准备"), downloading: t("下载"), extracting: t("校验解包"), swapping: t("替换目录"), done: t("完成"), failed: t("失败") };
 const fmtTime = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(locale(), { hour12: false }) : "—");
-const tushareDays = (s: { tables: Record<string, number> }) => Math.max(0, ...Object.values(s.tables));
+const carriedBy = (exports: Record<string, boolean>) => Object.entries(exports).filter(([, ok]) => ok).map(([m]) => universeLabel(m)).join("、");
+const tushareKeys = (s: ExtraStatus) => Math.max(0, ...Object.entries(s.tables).filter(([name]) => name !== "cn.baostock").map(([, t]) => t.keys));
 
 /**
  * The rail's data line plus a bottom sheet that slides up over the page: local and upstream versions, a
@@ -131,21 +132,32 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
                 <Btn kind="text" disabled={busy} onClick={() => load(true, true)}>{t("重新检查")}</Btn>
               </div>
               <div className="flex flex-col gap-2 border-t border-border pt-3">
-                <div className="text-[12px] font-medium">{t("扩展字段（baostock）")}</div>
+                <div className="text-[12px] font-medium">{t("扩展字段（quantdb）")}</div>
                 <div className="text-[11px] text-muted">
-                  {extra ? (extra.instruments ? t("{0} 只股票已缓存，数据到 {1}；股票池数据带这些字段：{2}", [extra.instruments, extra.last || "—", Object.entries(extra.exports).filter(([, ok]) => ok).map(([m]) => universeLabel(m)).join("、") || t("暂无")]) : t("还没有取过。")) : t("检查中…")}
+                  {extra ? (extra.installed ? t("共享数据库 {0}", [extra.home || "—"]) : t("没有安装 quantdb：pip install -e <quantdb 仓库>，字段功能不可用。")) : t("检查中…")}
                 </div>
-                <p className="m-0 text-[11px] leading-relaxed text-muted">{t("从 baostock 取换手率、PE / PB / PS / PCF、流通市值、ST 标记，按日拼进各 A 股股票池的因子数据（$turnover、$pe_ttm、$pb、$float_cap…），研究和重算都能用。逐只取，全 A 首次约一个半小时，之后增量。")}</p>
-                <div><Btn disabled={busy || extraRunning} onClick={() => startExtra("baostock")}>{extraRunning ? t("取字段中…") : extra?.instruments ? t("增量更新扩展字段") : t("取扩展字段")}</Btn></div>
+                <p className="m-0 text-[11px] leading-relaxed text-muted">{t("A 股扩展字段从独立的 quantdb 数据库读取，其他程序共用同一份数据。位置由 QUANTDB_HOME 决定（默认 ~/.quantdb），密钥放在它的 .env 里。")}</p>
               </div>
-              <div className="flex flex-col gap-2 border-t border-border pt-3">
-                <div className="text-[12px] font-medium">{t("扩展字段（Tushare）")}</div>
-                <div className="text-[11px] text-muted">
-                  {extra ? (!extra.tushare.configured ? t("没有配置 Tushare 服务器。") : tushareDays(extra.tushare) ? t("{0} 个交易日已缓存，数据到 {1}；股票池数据带这些字段：{2}", [tushareDays(extra.tushare), extra.tushare.last || "—", Object.entries(extra.tushare.exports).filter(([, ok]) => ok).map(([m]) => universeLabel(m)).join("、") || t("暂无")]) : t("还没有取过。")) : t("检查中…")}
-                </div>
-                <p className="m-0 text-[11px] leading-relaxed text-muted">{t("按交易日取全市场的大小单资金流、融资融券、筹码分布、自由流通换手和市值、龙虎榜、大宗交易，以及按公告日对齐的财务指标、业绩预告快报、股东户数、限售解禁（$mf_net_xl、$rz_bal、$winner_rate、$roe、$unlock_30d…）。两台服务器并行、有限速，首次约三小时，之后增量。")}</p>
-                {extra?.tushare.configured && <div><Btn disabled={busy || extraRunning} onClick={() => startExtra("tushare")}>{extraRunning ? t("取字段中…") : tushareDays(extra.tushare) ? t("增量更新 Tushare 字段") : t("取 Tushare 字段")}</Btn></div>}
-              </div>
+              {extra?.installed && (
+                <>
+                  <div className="flex flex-col gap-2 border-t border-border pt-3">
+                    <div className="text-[12px] font-medium">{t("baostock 字段")}</div>
+                    <div className="text-[11px] text-muted">
+                      {extra.tables["cn.baostock"] ? t("{0} 只股票，数据到 {1}；股票池数据带这些字段：{2}", [extra.tables["cn.baostock"].symbols, extra.tables["cn.baostock"].end || "—", carriedBy(extra.baostock_exports) || t("暂无")]) : t("还没有取过。")}
+                    </div>
+                    <p className="m-0 text-[11px] leading-relaxed text-muted">{t("换手率、PE / PB / PS / PCF、流通市值、ST 标记，按日拼进各 A 股股票池的因子数据（$turnover、$pe_ttm、$pb、$float_cap…），研究和重算都能用。逐只取，全 A 首次约一个半小时，之后增量。")}</p>
+                    <div><Btn disabled={busy || extraRunning} onClick={() => startExtra("baostock")}>{extraRunning ? t("取字段中…") : extra.tables["cn.baostock"] ? t("增量更新 baostock 字段") : t("取 baostock 字段")}</Btn></div>
+                  </div>
+                  <div className="flex flex-col gap-2 border-t border-border pt-3">
+                    <div className="text-[12px] font-medium">{t("Tushare 字段")}</div>
+                    <div className="text-[11px] text-muted">
+                      {!extra.configured ? t("quantdb 没有配置 Tushare 服务器。") : tushareKeys(extra) ? t("{0} 个交易日，数据到 {1}；股票池数据带这些字段：{2}", [tushareKeys(extra), extra.last || "—", carriedBy(extra.tushare_exports) || t("暂无")]) : t("还没有取过。")}
+                    </div>
+                    <p className="m-0 text-[11px] leading-relaxed text-muted">{t("按交易日取全市场的大小单资金流、融资融券、筹码分布、自由流通换手和市值、龙虎榜、大宗交易，以及按公告日对齐的财务指标、业绩预告快报、股东户数、限售解禁（$mf_net_xl、$rz_bal、$winner_rate、$roe、$unlock_30d…）。两台服务器并行、有限速，首次约三小时，之后增量。")}</p>
+                    {extra.configured && <div><Btn disabled={busy || extraRunning} onClick={() => startExtra("tushare")}>{extraRunning ? t("取字段中…") : tushareKeys(extra) ? t("增量更新 Tushare 字段") : t("取 Tushare 字段")}</Btn></div>}
+                  </div>
+                </>
+              )}
               <div className="flex flex-col gap-2 border-t border-border pt-3">
                 <label className="flex items-center gap-2">
                   <input type="checkbox" className="mm-check" checked={!!status?.settings.auto} onChange={toggleAuto} />

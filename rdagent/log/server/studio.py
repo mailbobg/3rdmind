@@ -2164,17 +2164,14 @@ def data_build_status():
                     "finished_at": datetime.fromtimestamp(BUILD_LOG.stat().st_mtime, tz=timezone.utc).isoformat() if BUILD_LOG.is_file() and not running else None})
 
 
-# ---- Extra fields for A-shares: baostock (turnover, valuation, float cap, ST) and Tushare (money flow, margin,
-# northbound, chips, fundamentals, events) ---------------------------------------------------------------------
+# ---- Extra fields for A-shares, from the shared quantdb store (see studio_fields) ------------------------------
 
-EXTRA_CACHE = TRACE_ROOT / "studio_data" / "extra" / "baostock"
-TUSHARE_CACHE = TRACE_ROOT / "studio_data" / "extra" / "tushare"
 EXTRA_MARKETS = tuple(studio_markets.CN_ORDER)  # every A-share universe: its export carries the fields
 EXTRA_SOURCES = ("baostock", "tushare")
 
 
 def export_carries(column):
-    """Which universe exports already carry ``column``."""
+    """Which A-share universe exports already carry ``column`` (an extra field), by market."""
     exports = {}
     for market in EXTRA_MARKETS:
         meta = TRACE_ROOT / "studio_data" / "universe" / market / "meta.json"
@@ -2185,34 +2182,11 @@ def export_carries(column):
     return exports
 
 
-def tushare_status():
-    """Per-table cache counts, last day, whether keys are configured, and which exports carry the columns."""
-    from rdagent.log.server import studio_tushare
-
-    return {**studio_tushare.status(TUSHARE_CACHE), "columns": list(studio_tushare.EXTRA_COLUMNS),
-            "exports": export_carries(studio_tushare.EXTRA_COLUMNS[0])}
-
-
 def extra_status():
-    """How much of the baostock cache there is: instruments, last date, and which universe exports carry the
-    columns; plus the Tushare cache under ``tushare``."""
-    files = list(EXTRA_CACHE.glob("*.csv")) if EXTRA_CACHE.is_dir() else []
-    last = ""
-    for path in files[:2000]:
-        try:
-            tail = path.read_text().strip().rsplit("\n", 1)[-1]
-        except OSError:
-            continue
-        if "," in tail and not tail.startswith("date"):
-            last = max(last, tail.split(",")[0])
-    return {"instruments": len(files), "last": last or None, "columns": studio_extra_columns(), "exports": export_carries("$turnover"),
-            "tushare": tushare_status()}
+    """The quantdb store's coverage of the Studio's extra-field tables, and which exports carry the columns."""
+    from rdagent.log.server import studio_fields
 
-
-def studio_extra_columns():
-    from rdagent.log.server.studio_extra import EXTRA_COLUMNS
-
-    return list(EXTRA_COLUMNS)
+    return studio_fields.status(exports=export_carries)
 
 
 def member_codes(markets):
@@ -2230,23 +2204,22 @@ def member_codes(markets):
 
 
 def run_extra_fetch(job, markets, source="baostock"):
-    """Fetch the extra fields from ``source`` (baostock per member instrument, Tushare per trading day for the
+    """Refresh the extra fields in quantdb (baostock per member instrument, Tushare per trading day for the
     whole market), then rebuild those universes' exports so research sees the new columns (recomputation
     rebuilds its latest file by itself)."""
     calendar = studio_markets.provider_for("cn") / "calendars" / "day.txt"
     end = calendar.read_text().strip().splitlines()[-1] if calendar.is_file() else datetime.now().strftime("%Y-%m-%d")
     start = os.environ.get("STUDIO_REFRESH_START", "2022-10-10")
+    command = [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_fields.py")), "refresh", source, start, end]
     if source == "tushare":
-        TUSHARE_CACHE.mkdir(parents=True, exist_ok=True)
         studio_jobs.update(job["id"], message="从 Tushare 按交易日取全市场字段")
-        command = [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_tushare.py")), "fetch", str(TUSHARE_CACHE), str(calendar), start, end]
     else:
         codes = member_codes(markets)
-        EXTRA_CACHE.mkdir(parents=True, exist_ok=True)
-        codes_file = EXTRA_CACHE.parent / "codes.txt"
+        codes_file = TRACE_ROOT / "studio_data" / "codes.txt"
+        codes_file.parent.mkdir(parents=True, exist_ok=True)
         codes_file.write_text("\n".join(codes))
         studio_jobs.update(job["id"], message=f"从 baostock 取 {len(codes)} 只股票的字段")
-        command = [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_extra.py")), "fetch", str(EXTRA_CACHE), str(codes_file), start, end]
+        command.append(str(codes_file))
     # The fetcher reports progress on stderr one line at a time; relay it as the job message.
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     last_note = ""
@@ -2299,11 +2272,12 @@ def data_extra_start():
     source = body.get("source") or "baostock"
     if source not in EXTRA_SOURCES:
         return jsonify({"error": "source must be among " + ", ".join(EXTRA_SOURCES)}), 400
-    if source == "tushare":
-        from rdagent.log.server import studio_tushare
+    from rdagent.log.server import studio_fields
 
-        if not studio_tushare.configured():
-            return jsonify({"error": "没有配置 Tushare 服务器（TUSHARE_MIRROR_TOKEN/URL 或 DATAHUB_API_KEY/BASE）"}), 400
+    if not studio_fields.installed():
+        return jsonify({"error": "没有安装 quantdb（pip install -e <quantdb 仓库>）"}), 400
+    if source == "tushare" and not studio_fields.status()["configured"]:
+        return jsonify({"error": "quantdb 没有配置 Tushare 服务器（QUANTDB_HOME/.env 里的 TUSHARE_MIRROR_TOKEN/URL 或 DATAHUB_API_KEY/BASE）"}), 400
     running = studio_jobs.find("extra_data")
     if running is not None:
         return jsonify({"job": running["id"]}), 202

@@ -424,3 +424,11 @@
 **结果（对全池等权，前后半段以 2022 切）**：SUE 最高五分位 +1..+60 日 CAR −0.18%（t −1.5），最低五分位 −0.23%（t −0.5）；Q5 − Q1 价差 +1..+20 日 −0.20%（t −0.6）、+1..+60 日 −0.31%（t −0.6）。EAR 排序同样接近零，Q5 − Q1 +1..+20 日 −0.74%（t −1.95，方向反）。所有窗口、两种排序、两个半段，没有一个 t 过 2 的正向漂移。
 
 **结论**：在 2017 年之后的美股大中盘上，以申报日为起点的 PEAD 不存在（文献里这个效应本来就随时间衰减、且集中在小盘）。用真正的新闻稿日期和分析师预期（Alpha Vantage，按天分批取）可能把 +1..+5 日那段找回来，但那是公告日反应，不是可交易的漂移。美股事件线到此：内部人买入约 +1%/两月（t 2.7，组合口径 +2 到 3%/年），PEAD 无。加上之前的结论（OHLCV 噪声、ARK 无信息），美股在这套流程里没有可做的东西；最诚实的美股建议仍是买指数。
+
+## 26. 2026-09-22：数据层独立成 quantdb
+
+Studio 自己的 Tushare 取数器（`studio_tushare.py`）和 baostock 取数器（`studio_extra.py`）删除，A 股扩展字段改为从独立项目 quantdb（`/Users/bobmax/Documents/07-Hero/quantdb`，DuckDB + Parquet，`~/.quantdb`）读取。Studio 侧只剩 `studio_fields.py`：43 + 8 个 `$` 列的换算和 point-in-time 铺法，取数按钮调 quantdb 的 recorder。
+
+接口只有两项：`pip install -e <quantdb 仓库>`（RD-Agent venv 已装）和 `QUANTDB_HOME`（默认 `~/.quantdb`，密钥在它的 `.env`，`quantdb init --secrets <旧 env>` 一次建好）。存量 CSV 缓存已全部搬入并逐值比对（沪深300 全导出 46 列 235,909 行一致），随后删除。
+
+顺手修正：财报同日多版本（update_flag 0/1、年报与一季报同日）此前按 API 行序定胜负，现在明确「更晚报告期、更新版本」胜出；quantdb 的 upsert 按整个取数 key 替换而非按行去重，因为大宗、解禁、财报重述本来就一天多行。

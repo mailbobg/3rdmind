@@ -346,8 +346,12 @@ export const saveDataSyncSettings = (values: { auto?: boolean; hour?: number }) 
   fetch("/studio/data/sync/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
     .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as SyncStatus["settings"]; });
 /** Extra A-share fields (baostock): turnover, valuation, float cap, ST — how much is cached and which exports carry them. */
-export interface TushareStatus { tables: Record<string, number>; last: string | null; configured: boolean; columns: string[]; exports: Record<string, boolean> }
-export interface ExtraStatus { instruments: number; last: string | null; columns: string[]; exports: Record<string, boolean>; tushare: TushareStatus }
+export interface ExtraTable { rows: number; symbols: number; end: string | null; keys: number; updated: string | null }
+/** The shared quantdb store's coverage of the extra-field tables (see studio_fields.py). */
+export interface ExtraStatus {
+  installed: boolean; home: string | null; configured: boolean; tables: Record<string, ExtraTable>; last: string | null; columns: string[];
+  baostock_exports: Record<string, boolean>; tushare_exports: Record<string, boolean>;
+}
 export type ExtraSource = "baostock" | "tushare";
 export const extraDataStatus = () => api<ExtraStatus>("/studio/data/extra");
 export const startExtraData = (source: ExtraSource = "baostock", markets?: string[]) => api<{ job: string }>("/studio/data/extra", { source, markets });

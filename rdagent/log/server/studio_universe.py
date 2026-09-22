@@ -37,17 +37,10 @@ def main(provider, market, start, end, out_dir, region="cn"):
         # they trade under 30% limits and thin books, and the all-A list sorts them first, so a debug sample
         # taken from the top would have carried nothing but NaN.
         frame = frame[~frame.index.get_level_values("instrument").str.startswith("BJ")]
-        # Turnover, valuation, float cap and the ST flag from the baostock cache beside the universe exports.
-        import studio_extra
-        import studio_tushare
+        # Turnover, valuation, money flow, fundamentals … from the shared quantdb store (see studio_fields).
+        import studio_fields
 
-        extra_root = Path(out_dir).parent.parent / "extra"
-        frame, attached = studio_extra.attach(frame, extra_root / "baostock")
-        if attached:
-            extra_note = studio_extra.README_NOTE
-        frame, attached = studio_tushare.attach(frame, extra_root / "tushare")
-        if attached:
-            extra_note += studio_tushare.README_NOTE
+        frame, extra_note = studio_fields.attach(frame)
     out = Path(out_dir)
     (out / "full").mkdir(parents=True, exist_ok=True)
     (out / "debug").mkdir(parents=True, exist_ok=True)
