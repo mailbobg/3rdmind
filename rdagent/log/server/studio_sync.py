@@ -11,6 +11,8 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -67,7 +69,7 @@ def local_info() -> dict:
 
 
 def settings() -> dict:
-    default = {"auto": False, "hour": 19, "last_auto_check": None, "last_fields_check": None}
+    default = {"auto": False, "hour": 19, "last_auto_check": None, "last_fields_check": None, "source": "quantdb"}
     if _settings_path and _settings_path.is_file():
         try:
             return {**default, **json.loads(_settings_path.read_text())}
@@ -106,11 +108,32 @@ def _latest_tag_by_redirect(timeout: int = 20) -> str:
     return urllib.parse.unquote(tag)
 
 
-def check_remote(max_age: float = 900) -> dict:
-    """The latest release (tag, published_at, archive url/size, manifest url), cached for 15 minutes.
+def expected_last_day() -> str:
+    """The last trading day whose Tushare bars should be published by now (after 17:30 that is today on a
+    weekday); holidays make this a day early, which only costs an export that changes nothing."""
+    now = datetime.now()
+    day = now.date()
+    if now.hour < 17 or (now.hour == 17 and now.minute < 30) or day.weekday() >= 5:
+        day = (pd_bdate_before(day))
+    return day.strftime("%Y-%m-%d")
 
-    Uses the GitHub API; when that is rate-limited (HTTP 403/429) falls back to the release page's redirect for the
-    tag and derives the download URLs (size and publish time then unknown). A stale cache beats an error."""
+
+def pd_bdate_before(day):
+    from datetime import timedelta
+
+    day = day - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def check_remote(max_age: float = 900) -> dict:
+    """What the source can provide right now. quantdb mode: the last trading day Tushare should have published
+    (compared with the local calendar's end). Snapshot mode: the latest GitHub release (tag, published_at,
+    archive url/size, manifest url), cached for 15 minutes; when the API is rate-limited (HTTP 403/429) the
+    release page's redirect gives the tag and the download URLs are derived. A stale cache beats an error."""
+    if settings().get("source", "quantdb") == "quantdb":
+        return {"release": f"quantdb {expected_last_day()}", "published_at": None, "archive_url": None, "archive_bytes": None, "manifest_url": None}
     now = time.time()
     if _remote_cache["release"] and now - _remote_cache["checked_at"] < max_age:
         return _remote_cache["release"]
@@ -178,13 +201,25 @@ def _find_data_root(extracted: Path) -> Path:
     raise RuntimeError("Archive does not contain a Qlib data directory (no calendars/day.txt)")
 
 
+PRICE_TABLES = ("cn.daily", "cn.adj_factor", "cn.stock_basic", "cn.index_members")
+EXPORT_START = os.environ.get("QLIB_EXPORT_START", "2019-01-01")
+
+
 def run_sync(force: bool = False) -> dict:
-    """Start a sync in the background; returns the reason when it cannot start."""
+    """Start a sync in the background; returns the reason when it cannot start. With ``source: quantdb`` (the
+    default) the prices are refreshed into quantdb and the Qlib directory exported from it; ``snapshot`` downloads
+    the community package instead."""
     with _lock:
         if _state["running"]:
             return {"started": False, "reason": "同步已在进行"}
     if _busy_check():
         return {"started": False, "reason": "有回测或研究正在运行，等它们结束再同步"}
+    if settings().get("source", "quantdb") == "quantdb":
+        with _lock:
+            _state.update({"running": True, "phase": "starting", "progress": None, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                           "finished_at": None, "error": None, "log": []})
+        threading.Thread(target=_quantdb_worker, name="studio-data-sync-run", daemon=True).start()
+        return {"started": True, "release": "quantdb"}
     try:
         remote = check_remote(max_age=0)
     except Exception as error:  # noqa: BLE001 - network failures are reported, not raised
@@ -196,6 +231,43 @@ def run_sync(force: bool = False) -> dict:
                        "finished_at": None, "error": None, "log": []})
     threading.Thread(target=_sync_worker, args=(remote,), name="studio-data-sync-run", daemon=True).start()
     return {"started": True, "release": remote["release"]}
+
+
+def _quantdb_worker():
+    """Refresh the price tables in quantdb (incremental, by trading day), export the Qlib directory from them
+    and swap it in; the calendar's last day is what the data sheet reports."""
+    root = provider_dir()
+    python = os.environ.get("STUDIO_PYTHON", sys.executable)
+    try:
+        _log("更新 quantdb 的价格表", phase="downloading")
+        for table in PRICE_TABLES:
+            done = subprocess.run([python, "-m", "quantdb.cli", "refresh", table], capture_output=True, text=True, timeout=3600)
+            tail = (done.stdout.strip().splitlines() or [""])[-1]
+            _log(f"{table}：{tail}" if tail else f"{table}：完成")
+            if done.returncode != 0:
+                raise RuntimeError(f"{table} 刷新失败：{(done.stderr.strip().splitlines() or [''])[-1][:200]}")
+        _log("从 quantdb 导出 Qlib 数据目录", phase="extracting")
+        if _busy_check():
+            raise RuntimeError("导出前发现有任务在运行，已中止；稍后重试即可")
+        done = subprocess.run([python, "-m", "quantdb.cli", "export-qlib", str(root), "--start", EXPORT_START], capture_output=True, text=True, timeout=3600)
+        if done.returncode != 0:
+            raise RuntimeError(f"导出失败：{(done.stderr.strip().splitlines() or [''])[-1][:200]}")
+        calendar = (root / "calendars" / "day.txt").read_text().splitlines()
+        (root / "studio-data-source.json").write_text(json.dumps({
+            "source": "quantdb", "release": f"quantdb {calendar[-1]}", "published_at": None, "downloaded_at": datetime.now(timezone.utc).isoformat(),
+            "calendar_start": calendar[0], "calendar_end": calendar[-1], "kind": "exported from quantdb (Tushare daily + adj_factor + index_weight)",
+        }, indent=2))
+        _log(f"完成：数据到 {calendar[-1]}（来自 quantdb）", phase="done", progress=1.0)
+    except Exception as error:  # noqa: BLE001 - shown to the user
+        _log(f"失败：{error}", phase="failed", error=str(error))
+    finally:
+        with _lock:
+            _state["running"] = False
+            _state["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        global _fields_pending
+        if _fields_pending:
+            _fields_pending = False
+            _start_fields()
 
 
 def _sync_worker(remote: dict):

@@ -7,6 +7,7 @@ import { errorText } from "../hooks/studioContext";
 import { Btn, SelectInput, TextInput } from "./minimal";
 import { locale, t } from "../i18n";
 
+const QUANTDB_PHASES: Record<string, string> = { starting: t("准备"), downloading: t("更新价格表"), extracting: t("导出 Qlib 目录"), done: t("完成"), failed: t("失败") };
 const PHASES: Record<string, string> = { starting: t("准备"), downloading: t("下载"), extracting: t("校验解包"), swapping: t("替换目录"), done: t("完成"), failed: t("失败") };
 const fmtTime = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(locale(), { hour12: false }) : "—");
 const carriedBy = (exports: Record<string, boolean>) => Object.entries(exports).filter(([, ok]) => ok).map(([m]) => universeLabel(m)).join("、");
@@ -92,9 +93,15 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
   const local = status?.local;
   const remote = status?.remote;
   const sync = status?.sync;
+  const fromQuantdb = (status?.settings.source ?? "quantdb") === "quantdb";
+  const label = (release: string) => (release.startsWith("quantdb ") ? release.slice(8) : release.slice(5));  // "quantdb 2026-09-22" → the day; "v2026-09-21" → the date
   const newer = !!(remote && local && remote.release !== local.release);
-  const phase = sync?.phase ? PHASES[sync.phase] || sync.phase : "";
-  const headline = running ? `${phase}${sync?.progress != null && sync.phase === "downloading" ? ` ${Math.round(sync.progress * 100)}%` : ""}` : newer ? t("有新版 {0}", [remote!.release.slice(5)]) : local?.release ? t("版本 {0}", [local.release.slice(5)]) : "";
+  const phase = sync?.phase ? (fromQuantdb ? QUANTDB_PHASES[sync.phase] || PHASES[sync.phase] : PHASES[sync.phase]) || sync.phase : "";
+  const headline = running ? `${phase}${sync?.progress != null && sync.phase === "downloading" ? ` ${Math.round(sync.progress * 100)}%` : ""}` : newer ? (fromQuantdb ? t("可更新到 {0}", [label(remote!.release)]) : t("有新版 {0}", [label(remote!.release)])) : local?.release ? (fromQuantdb ? t("数据到 {0}", [label(local.release)]) : t("版本 {0}", [label(local.release)])) : "";
+  const setSource = async (source: "quantdb" | "snapshot") => {
+    if (!status) return;
+    try { const s = await studio.saveDataSyncSettings({ source }); setStatus({ ...status, settings: s }); load(true, true); } catch (e) { setMessage(errorText(e)); }
+  };
 
   return (
     <div className="text-xs">
@@ -120,6 +127,8 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
             </div>
             <div className="sheet__body">
               <dl className="m-0 flex flex-col gap-1.5">
+                <div className="sheet__row"><dt>{t("价格来源")}</dt><dd><SelectInput className="!h-[26px] w-[200px]" value={status?.settings.source ?? "quantdb"} onChange={(v) => setSource(v as "quantdb" | "snapshot")} ariaLabel={t("价格来源")} searchable={false}
+                  options={[{ value: "quantdb", label: t("quantdb（Tushare 日线，按交易日增量）") }, { value: "snapshot", label: t("社区快照（GitHub 整包下载）") }]} /></dd></div>
                 <div className="sheet__row"><dt>{t("本地版本")}</dt><dd>{local?.release || t("未知")}{local?.downloaded_at ? <span className="text-muted"> {t("· 下载于 {0}", [fmtTime(local.downloaded_at)])}</span> : null}</dd></div>
                 <div className="sheet__row"><dt>{t("数据区间")}</dt><dd>{local?.calendar_start || "—"} → {local?.calendar_end || "—"}</dd></div>
                 <div className="sheet__row"><dt>{t("最新发布")}</dt><dd>{status?.remote_error ? <span className="text-danger">{t("无法检查：{0}", [status.remote_error])}</span> : remote ? <>{remote.release}{remote.published_at ? <span className="text-muted"> · {fmtTime(remote.published_at)}</span> : null}{remote.archive_bytes ? <span className="text-muted"> · {(remote.archive_bytes / 1e6).toFixed(0)} MB</span> : null}</> : t("检查中…")}</dd></div>
@@ -134,7 +143,7 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
               {message && <div className="text-danger">{message}</div>}
               <div className="flex flex-wrap items-center gap-2">
                 <Btn kind="primary" disabled={busy || running} onClick={() => start(false)}>{running ? t("同步中…") : newer ? t("同步到最新") : t("检查并同步")}</Btn>
-                {!newer && !running && <Btn disabled={busy} onClick={() => start(true)}>{t("强制重下")}</Btn>}
+                {!newer && !running && <Btn disabled={busy} onClick={() => start(true)}>{fromQuantdb ? t("重新导出") : t("强制重下")}</Btn>}
                 <Btn kind="text" disabled={busy} onClick={() => load(true, true)}>{t("重新检查")}</Btn>
               </div>
               <div className="flex flex-col gap-2 border-t border-border pt-3">
@@ -186,7 +195,9 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
                 </label>
                 {status?.settings.last_auto_check && <div className="text-[11px] text-muted">{t("上次自动检查：{0}", [status.settings.last_auto_check])}{status.settings.last_fields_check ? t("；扩展字段上次自动更新：{0}", [status.settings.last_fields_check]) : ""}</div>}
                 <p className="m-0 text-[11px] leading-relaxed text-muted">{t("自动同步之后接着更新 quantdb 里的扩展字段（Tushare、董监高、baostock 增量）并重建有字段的股票池数据，规则策略的信号跟到同一天。有任务在跑就等下一个整点再试。")}</p>
-                <p className="m-0 text-[11px] leading-relaxed text-muted">{t("同步会下载社区快照（约 565 MB），校验 sha256，解包后整体替换数据目录，失败自动回退。有回测或研究在跑时不会开始。同步后“重算到最新”和股票池数据会自动跟到新末日；已有因子的 result.h5 不会自己变。")}</p>
+                <p className="m-0 text-[11px] leading-relaxed text-muted">{fromQuantdb
+                  ? t("同步先把 quantdb 里的价格表（Tushare 日线、复权因子、股票主表、指数成分）补到最新交易日，再从 quantdb 整体导出 Qlib 数据目录并替换，Qlib 和回测引擎读的格式不变。收盘后 17:30 起当天数据可用。有回测或研究在跑时不会开始。")
+                  : t("同步会下载社区快照（约 565 MB），校验 sha256，解包后整体替换数据目录，失败自动回退。有回测或研究在跑时不会开始。同步后“重算到最新”和股票池数据会自动跟到新末日；已有因子的 result.h5 不会自己变。")}</p>
               </div>
             </div>
           </div>

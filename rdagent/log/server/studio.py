@@ -2105,6 +2105,10 @@ def data_sync_settings():
         if not 0 <= hour <= 23:
             return jsonify({"error": "hour must be 0–23"}), 400
         values["hour"] = hour
+    if "source" in body:
+        if body["source"] not in ("quantdb", "snapshot"):
+            return jsonify({"error": "source must be quantdb or snapshot"}), 400
+        values["source"] = body["source"]
     return jsonify(studio_sync.save_settings(values))
 
 

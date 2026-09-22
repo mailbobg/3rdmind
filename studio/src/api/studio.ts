@@ -333,7 +333,7 @@ export const updateStrategy = async (id: string, body: { start?: string; end?: s
 };
 export interface SyncStatus {
   local: { release: string | null; downloaded_at: string | null; calendar_start: string | null; calendar_end: string | null; path: string };
-  settings: { auto: boolean; hour: number; last_auto_check: string | null; last_fields_check?: string | null };
+  settings: { auto: boolean; hour: number; last_auto_check: string | null; last_fields_check?: string | null; source?: "quantdb" | "snapshot" };
   sync: { running: boolean; phase: string | null; progress: number | null; started_at: string | null; finished_at: string | null; error: string | null; log: string[] };
   remote: { release: string; published_at: string | null; archive_bytes: number | null } | null;
   remote_error?: string | null;
@@ -342,7 +342,7 @@ export const dataSyncStatus = (check = false, fresh = false) => api<SyncStatus>(
 export const startDataSync = (force = false) =>
   fetch("/studio/data/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force }) })
     .then(async (r) => ({ ok: r.ok, ...(await r.json()) as { started?: boolean; reason?: string; release?: string } }));
-export const saveDataSyncSettings = (values: { auto?: boolean; hour?: number }) =>
+export const saveDataSyncSettings = (values: { auto?: boolean; hour?: number; source?: "quantdb" | "snapshot" }) =>
   fetch("/studio/data/sync/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) })
     .then(async (r) => { const v = await r.json(); if (!r.ok) throw new ApiError(v?.error || `HTTP ${r.status}`, r.status); return v as SyncStatus["settings"]; });
 /** Extra A-share fields from the shared quantdb store: where it is, per-table coverage, which exports carry the columns. */

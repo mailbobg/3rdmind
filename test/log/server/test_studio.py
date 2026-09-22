@@ -1104,6 +1104,7 @@ def test_data_sync_status_settings_and_guards(studio_client, tmp_path: Path, mon
     (provider / "studio-data-source.json").write_text(json.dumps({"release": "2026-09-12", "downloaded_at": "x"}))
     monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
     monkeypatch.setattr(studio_sync, "_settings_path", tmp_path / "sync.json")
+    studio_sync.save_settings({"source": "snapshot"})  # this test covers the community-package path
     status = studio_client.get("/studio/data/sync").get_json()
     assert status["local"]["release"] == "2026-09-12" and status["local"]["calendar_end"] == "2026-09-11"
     assert status["settings"]["auto"] is False and status["sync"]["running"] is False
@@ -2140,11 +2141,46 @@ def test_llm_model_listing_filters_chat_models(studio_client, tmp_path: Path, mo
 
 
 @pytest.mark.offline
+def test_sync_from_quantdb_refreshes_then_exports(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """quantdb mode: the remote check is the last published trading day; a sync refreshes the four price tables
+    through quantdb's CLI, exports the Qlib directory and records the source."""
+    from rdagent.log.server import studio_sync
+
+    provider = tmp_path / "qlib"
+    (provider / "calendars").mkdir(parents=True)
+    (provider / "calendars" / "day.txt").write_text("2026-09-18\n2026-09-21\n")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setattr(studio_sync, "_settings_path", tmp_path / "sync.json")
+    studio_sync.save_settings({"source": "quantdb"})
+    monkeypatch.setattr(studio_sync, "expected_last_day", lambda: "2026-09-22")
+    assert studio_client.get("/studio/data/sync?check=1").get_json()["remote"]["release"] == "quantdb 2026-09-22"
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if "export-qlib" in cmd:
+            (provider / "calendars" / "day.txt").write_text("2026-09-18\n2026-09-21\n2026-09-22\n")
+        return type("R", (), {"returncode": 0, "stdout": "cn.x: 1 keys, 10 rows, 0 failed", "stderr": ""})()
+
+    monkeypatch.setattr(studio_sync.subprocess, "run", run)
+    monkeypatch.setattr(studio_sync, "_busy_check", lambda: False)
+    assert studio_client.post("/studio/data/sync", json={}).status_code == 202
+    deadline = __import__("time").time() + 5
+    while studio_sync.status()["sync"]["running"] and __import__("time").time() < deadline:
+        __import__("time").sleep(0.02)
+    state = studio_sync.status()
+    assert state["sync"]["phase"] == "done" and state["local"]["calendar_end"] == "2026-09-22" and state["local"]["release"] == "quantdb 2026-09-22"
+    assert [c[4] for c in calls[:4]] == list(studio_sync.PRICE_TABLES) and calls[4][3:5] == ["export-qlib", str(provider)]
+    assert studio_client.put("/studio/data/sync/settings", json={"source": "nowhere"}).status_code == 400
+
+
+@pytest.mark.offline
 def test_sync_remote_check_falls_back_when_the_api_is_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
     import urllib.error
     from rdagent.log.server import studio_sync
 
     monkeypatch.setattr(studio_sync, "_remote_cache", {"checked_at": 0.0, "release": None})
+    monkeypatch.setattr(studio_sync, "settings", lambda: {"source": "snapshot"})
 
     def limited(url, timeout=20):
         raise urllib.error.HTTPError(url, 403, "rate limit exceeded", {}, None)
