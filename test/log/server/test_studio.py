@@ -2910,6 +2910,20 @@ def test_daily_fields_refresh_follows_the_price_sync(studio_client, tmp_path: Pa
 
 
 @pytest.mark.offline
+def test_report_run_without_factors_carries_a_note(studio_client) -> None:
+    from rdagent.log.ui.storage import WebStorage
+
+    ws = WebStorage(port=1, path=Path("/nonexistent"))
+    data = ws._obj_to_json(obj={}, tag="Loop_0.direct_exp_gen.file_to_factor_result", id="x", timestamp="2026-09-22T08:25:16")
+    assert data["msg"]["tag"] == "research.report_factors" and data["msg"]["content"] == {"files": 0, "factors": 0}
+    task = type("T", (), {"messages": [data["msg"]], "process": None, "is_alive": lambda self: False, "confirm": None})()
+    summary = studio_module.summarize_task("Finance Data Building (Reports)/x", task)
+    assert summary["rounds"] == 1 and "没有被识别为量化因子研报" in summary["note"]
+    full = ws._obj_to_json(obj={"a.pdf": {"f1": {}, "f2": {}}}, tag="Loop_0.direct_exp_gen.file_to_factor_result", id="x", timestamp="t")
+    assert full["msg"]["content"] == {"files": 1, "factors": 2}
+
+
+@pytest.mark.offline
 def test_quantdb_home_setting(studio_client, quantdb_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from rdagent.log.server import studio_fields
 

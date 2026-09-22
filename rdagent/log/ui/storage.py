@@ -95,6 +95,18 @@ class WebStorage(Storage):
                     },
                 },
             }
+        elif tag.endswith("file_to_factor_result") and isinstance(obj, dict):
+            # The report loader's outcome: which files yielded factor definitions. An empty dict means the
+            # file was judged not to be a quant factor report, so the run has nothing to code.
+            data = {
+                "id": id,
+                "msg": {
+                    "tag": "research.report_factors",
+                    "timestamp": timestamp,
+                    "loop_id": li,
+                    "content": {"files": len(obj), "factors": sum(len(v) for v in obj.values() if isinstance(v, dict))},
+                },
+            }
         elif "pdf_image" in tag or "load_pdf_screenshot" in tag:
             # obj.save(f"{app.static_folder}/{timestamp}.jpg")
             data = {

@@ -907,7 +907,7 @@ def summarize_task(trace_id, task):
         tag, content = message.get("tag") or "", message.get("content") or {}
         if tag == "research.hypothesis" and isinstance(content, dict):
             hypothesis = content.get("hypothesis") or hypothesis
-        elif tag.endswith("file_to_factor_result") and isinstance(content, dict) and not content:
+        elif tag == "research.report_factors" and isinstance(content, dict) and not content.get("factors"):
             # The report loader found nothing to code: the file was judged not to be a quant factor report
             # (a company or macro note has no factor formulas), so the run ends after this step.
             note = "研报没有被识别为量化因子研报（公司研报、行业或宏观报告里没有因子公式），没有提取到因子，运行到此结束。这个入口需要描述因子构造的量化研报。"
