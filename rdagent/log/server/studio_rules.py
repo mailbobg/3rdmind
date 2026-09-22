@@ -35,6 +35,12 @@ RULES = {
         "book": {"topk": 6000, "n_drop": 6000, "horizon": 20, "rebalance": 5, "neutral": "none", "book": "equal"},
         "markets": ["all", "csi1000", "csi500"],
     },
+    "insider_buy_20d_clean": {
+        "label": "高管本人增持后 20 日 · 去关注度名单",
+        "description": "高管本人二级市场增持后 20 日的股票，再剔除关注度名单（近 20 日龙虎榜或涨停、户数分散、未来 30 天大解禁），等权。两条规则的叠加。",
+        "book": {"topk": 6000, "n_drop": 6000, "horizon": 20, "rebalance": 5, "neutral": "none", "book": "equal"},
+        "markets": ["all", "csi1000", "csi500"],
+    },
 }
 
 
