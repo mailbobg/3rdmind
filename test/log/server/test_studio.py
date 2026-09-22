@@ -16,6 +16,12 @@ from rdagent.log.server.studio_worker import (
 from rdagent.log.ui.storage import WebStorage
 
 
+@pytest.fixture(autouse=True)
+def _no_shared_quantdb(monkeypatch: pytest.MonkeyPatch):
+    """Tests never read the machine's ~/.quantdb; the quantdb-backed path is exercised with a store under tmp."""
+    monkeypatch.setenv("STUDIO_NO_QUANTDB", "1")
+
+
 class _FactorTask(Task):
     def __init__(self, name: str) -> None:
         super().__init__(name=name, description="")
@@ -2760,7 +2766,8 @@ def test_extra_fields_load_attach_and_job(studio_client, tmp_path: Path, monkeyp
 
 
 @pytest.mark.offline
-def test_tushare_fields_point_in_time_and_job(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("backend", ["csv", "quantdb"])
+def test_tushare_fields_point_in_time_and_job(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     from rdagent.log.server import studio_tushare
 
     cache = tmp_path / "traces" / "studio_data" / "extra" / "tushare"
@@ -2779,6 +2786,16 @@ def test_tushare_fields_point_in_time_and_job(studio_client, tmp_path: Path, mon
     (cache / "holders" / "20241230.csv").write_text("ts_code,ann_date,end_date,holder_num\n600000.SH,20241230,20241231,110\n600000.SH,20241001,20240930,100\n")
     (cache / "unlock" / "20250106.csv").write_text("ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type\n"
                                                    "600000.SH,20241220,20250110,1000,0.5,a,b\n600000.SH,20250105,20250108,500,0.25,a,b\n")
+    if backend == "quantdb":  # the same rows through the shared store: import the CSVs there, then hide them
+        quantdb = pytest.importorskip("quantdb")
+        from quantdb.legacy import import_studio_tushare
+
+        monkeypatch.setenv("QUANTDB_HOME", str(tmp_path / "qdb"))
+        monkeypatch.delenv("STUDIO_NO_QUANTDB")
+        import_studio_tushare(quantdb.open(), cache, report=lambda *_: None)
+        assert studio_tushare.quantdb_store() is not None
+        for csv in cache.rglob("*.csv"):
+            csv.unlink()
     days = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])
     grid = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
     ohlcv = pd.DataFrame({"$close": 1.0}, index=grid)
@@ -2798,22 +2815,23 @@ def test_tushare_fields_point_in_time_and_job(studio_client, tmp_path: Path, mon
     assert joined.loc[(days[0], "SH600004"), "$unlock_30d"] == 0
     assert joined.loc[(days[0], "SH600000"), "$unlock_past_30d"] == 0 and joined.loc[(days[0], "SH600000"), "$holder_ann_days"] == 0
     assert joined.loc[(days[2], "SH600000"), "$holder_ann_days"] == (days[2] - days[0]).days
-    assert studio_tushare.attach(ohlcv, tmp_path / "nowhere")[1] is False
-    # Plan: day keys missing are fetched, finished ones are not; open periods and the current week are refreshed.
-    (cache / "fina" / "20240630.csv").write_text("ts_code,ann_date,end_date\n")  # a closed period: never re-fetched
-    tasks = studio_tushare.plan(cache, ["2025-01-02", "2025-01-03", "2025-01-06"], "2025-01-02", "2025-01-06")
-    names = {(t[0], t[1]) for t in tasks}
-    assert ("moneyflow", "20250102") not in names and ("moneyflow", "20250103") in names
-    assert ("fina", "20241231") in names and ("fina", "20240630") not in names and ("fina", "20240331") in names
-    (cache / "holders" / "20241216.csv").write_text("ts_code,ann_date,end_date,holder_num\n")  # an old week: finished
-    tasks = studio_tushare.plan(cache, ["2025-01-02", "2025-01-03", "2025-01-06"], "2025-01-02", "2025-01-06")
-    names = {(t[0], t[1]) for t in tasks}
-    assert ("holders", "20241216") not in names and ("holders", "20250106") in names and ("unlock", "20250106") in names
-    assert all("_retried" not in t[2] for t in tasks)
+    assert studio_tushare.attach(ohlcv, tmp_path / "nowhere")[1] is (backend == "quantdb")  # the store does not need the cache folder
+    if backend == "csv":  # the CSV planner: missing day keys are fetched, finished ones not; open periods and the current week are refreshed
+        (cache / "fina" / "20240630.csv").write_text("ts_code,ann_date,end_date\n")  # a closed period: never re-fetched
+        tasks = studio_tushare.plan(cache, ["2025-01-02", "2025-01-03", "2025-01-06"], "2025-01-02", "2025-01-06")
+        names = {(t[0], t[1]) for t in tasks}
+        assert ("moneyflow", "20250102") not in names and ("moneyflow", "20250103") in names
+        assert ("fina", "20241231") in names and ("fina", "20240630") not in names and ("fina", "20240331") in names
+        (cache / "holders" / "20241216.csv").write_text("ts_code,ann_date,end_date,holder_num\n")  # an old week: finished
+        tasks = studio_tushare.plan(cache, ["2025-01-02", "2025-01-03", "2025-01-06"], "2025-01-02", "2025-01-06")
+        names = {(t[0], t[1]) for t in tasks}
+        assert ("holders", "20241216") not in names and ("holders", "20250106") in names and ("unlock", "20250106") in names
+        assert all("_retried" not in t[2] for t in tasks)
     # Status and the route: unconfigured servers are refused before a job starts.
     monkeypatch.setattr(studio_module, "TUSHARE_CACHE", cache)
     status = studio_client.get("/studio/data/extra").get_json()["tushare"]
     assert status["tables"]["moneyflow"] == 1 and status["last"] == "2025-01-03" and status["columns"] == studio_tushare.EXTRA_COLUMNS
+    assert status["backend"] == backend
     for key in ("TUSHARE_MIRROR_TOKEN", "TUSHARE_MIRROR_URL", "DATAHUB_API_KEY", "DATAHUB_BASE"):
         monkeypatch.delenv(key, raising=False)
     assert studio_client.post("/studio/data/extra", json={"source": "tushare"}).status_code == 400

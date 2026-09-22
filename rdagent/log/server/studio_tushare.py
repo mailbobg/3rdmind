@@ -359,10 +359,60 @@ def qlib_code(ts_code):
     return f"{exchange}{number}" if exchange in ("SH", "SZ") else None
 
 
-def read_table(cache: Path, name, keys=None):
-    """All cached rows of a table (optionally only ``keys``), with Qlib instrument codes; None when empty."""
+DATE_COLUMNS = ("trade_date", "ann_date", "end_date", "float_date", "first_ann_date")
+
+
+def quantdb_store():
+    """The shared quantdb store when the package is installed (``pip install -e <quantdb repo>``), else None.
+    quantdb holds the same Tushare tables as ``cn.<name>``, refreshed incrementally and shared with every other
+    program; the CSV cache stays as the fallback for machines without it."""
+    if os.environ.get("STUDIO_NO_QUANTDB"):
+        return None
+    try:
+        import quantdb
+    except ImportError:
+        return None
+    return quantdb.open()
+
+
+def _from_quantdb(store, name, keys):
+    """Rows of ``cn.<name>`` shaped like the CSV cache: ``instrument`` plus YYYYMMDD strings in the date columns."""
     import pandas as pd
 
+    table = f"cn.{name}"
+    if not store.table_path(table).is_file():
+        return None
+    where = None
+    if keys is not None:
+        if not keys:
+            return None
+        days = [f"{k[:4]}-{k[4:6]}-{k[6:]}" for k in keys]
+        where = "date >= '" + min(days) + "' AND date <= '" + max(days) + "'"
+    raw = store.read(table, where=where)
+    if keys is not None:
+        raw = raw[raw["date"].dt.strftime("%Y%m%d").isin(set(keys))]
+    if raw.empty:
+        return None
+    raw = raw.rename(columns={"symbol": "instrument"}).drop(columns=["date"])
+    for column in DATE_COLUMNS:
+        if column in raw.columns:
+            values = raw[column]
+            if pd.api.types.is_numeric_dtype(values):
+                values = values.round().astype("Int64").astype(str).replace("<NA>", None)
+            raw[column] = values.astype("string").str.replace("-", "", regex=False).str[:8]
+    return raw[raw["instrument"].str[:2].isin(["SH", "SZ"])].reset_index(drop=True)
+
+
+def read_table(cache: Path, name, keys=None):
+    """All rows of a table (optionally only ``keys``), with Qlib instrument codes; None when empty. Read from
+    quantdb when it is installed, else from the CSV cache."""
+    import pandas as pd
+
+    store = quantdb_store()
+    if store is not None:
+        frame = _from_quantdb(store, name, keys)
+        if frame is not None:
+            return frame
     folder = cache / name
     if not folder.is_dir():
         return None
@@ -442,7 +492,7 @@ def as_of(events, grid, columns):
     ``available`` date is ≤ datetime. ``events`` has columns available, instrument, plus ``columns``."""
     import pandas as pd
 
-    events = events.dropna(subset=["available"]).sort_values("available")
+    events = events.dropna(subset=["available"]).sort_values("available", kind="stable")  # ties keep the caller's order: last wins
     events["available"] = events["available"].astype("datetime64[ns]")
     frame = grid.to_frame(index=False)
     frame["datetime"] = frame["datetime"].astype("datetime64[ns]")
@@ -466,6 +516,13 @@ def next_trading_day(values, calendar):
     return out
 
 
+def latest_last(raw):
+    """Order report rows so that, when several become available the same day (a restatement, or two periods
+    announced together), the later period and the updated version come last and win the point-in-time fill."""
+    by = [c for c in ("ann_date", "end_date", "update_flag") if c in raw.columns]
+    return raw.sort_values(by, kind="stable").reset_index(drop=True)
+
+
 def event_frames(cache, grid, calendar):
     """The period and week tables, forward-filled point-in-time onto ``grid`` (a (datetime, instrument) index)."""
     import pandas as pd
@@ -479,6 +536,7 @@ def event_frames(cache, grid, calendar):
 
     raw = read_table(cache, "fina")
     if raw is not None:
+        raw = latest_last(raw)
         raw = raw.copy()
         raw["available"] = next_trading_day(raw["ann_date"], calendar).values
         raw["report"] = pd.to_datetime(raw["ann_date"], format="%Y%m%d", errors="coerce")
@@ -492,6 +550,7 @@ def event_frames(cache, grid, calendar):
         out["fina"] = filled[COLUMNS["fina"]]
     raw = read_table(cache, "forecast")
     if raw is not None:
+        raw = latest_last(raw)
         raw = raw.copy()
         raw["available"] = next_trading_day(raw["ann_date"], calendar).values
         raw["report"] = pd.to_datetime(raw["ann_date"], format="%Y%m%d", errors="coerce")
@@ -502,6 +561,7 @@ def event_frames(cache, grid, calendar):
         out["forecast"] = filled[COLUMNS["forecast"]]
     raw = read_table(cache, "express")
     if raw is not None:
+        raw = latest_last(raw)
         raw = raw.copy()
         raw["available"] = next_trading_day(raw["ann_date"], calendar).values
         raw["report"] = pd.to_datetime(raw["ann_date"], format="%Y%m%d", errors="coerce")
@@ -581,7 +641,9 @@ def attach(frame, cache: Path):
     """Left-join the Tushare fields onto an OHLCV frame indexed (datetime, instrument). Returns (frame, attached)."""
     import pandas as pd
 
-    if not cache.is_dir() or not any(cache.iterdir()):
+    store = quantdb_store()
+    cached = store is not None and any(store.table_path(f"cn.{name}").is_file() for name in TABLES)
+    if not cached and (not cache.is_dir() or not any(cache.iterdir())):
         return frame, False
     calendar = pd.DatetimeIndex(sorted(frame.index.get_level_values("datetime").unique()))
     extra = load(cache, frame.index, calendar)
@@ -591,24 +653,56 @@ def attach(frame, cache: Path):
 
 
 def status(cache: Path):
-    """Per-table key counts and the last day table date, for the data sheet."""
+    """Per-table key counts and the last day table date, for the data sheet; from quantdb when installed."""
+    store = quantdb_store()
     tables = {}
     last = ""
     for name, table in TABLES.items():
+        if store is not None and store.table_path(f"cn.{name}").is_file():
+            meta = store.meta(f"cn.{name}")
+            tables[name] = len(meta.get("done", []))
+            if table.key == "day" and meta.get("end"):
+                last = max(last, meta["end"].replace("-", ""))
+            continue
         folder = cache / name
         keys = sorted(p.stem for p in folder.glob("*.csv")) if folder.is_dir() else []
         tables[name] = len(keys)
         if table.key == "day" and keys:
             last = max(last, keys[-1])
-    return {"tables": tables, "last": f"{last[:4]}-{last[4:6]}-{last[6:]}" if last else None, "configured": configured()}
+    return {"tables": tables, "last": f"{last[:4]}-{last[4:6]}-{last[6:]}" if last else None, "configured": configured(),
+            "backend": "quantdb" if store is not None else "csv"}
+
+
+def fetch_quantdb(start, end, log):
+    """Refresh the same tables through quantdb's recorder (incremental, shared store); same result shape as
+    ``fetch``."""
+    import quantdb
+    from quantdb.recorders import Recorder
+
+    def report(event):
+        if event["event"] == "key" and (event["i"] % 10 == 0 or event["i"] == event["n"]):
+            log(f"{event['table']} {event['i']}/{event['n']} {event['key']}")
+        elif event["event"] == "fail":
+            log(f"{event['table']} {event['key']} 失败: {event['error'][:80]}")
+
+    recorder = Recorder(quantdb.open(), report=report)
+    planned, done, failed = 0, 0, []
+    for name in TABLES:
+        summary = recorder.refresh(f"cn.{name}", start=start, end=end)
+        planned += summary["keys"]; done += summary["done"]
+        failed.extend(f"{name}/{key}: {error[:80]}" for key, error in summary["failed"])
+    return {"planned": planned, "done": done, "failed": failed[:20], "failed_count": len(failed), "backend": "quantdb"}
 
 
 def main(argv):
     if len(argv) != 5 or argv[0] != "fetch":
         raise ValueError("usage: studio_tushare.py fetch <cache dir> <calendar file> <start> <end>")
     cache, calendar_file, start, end = Path(argv[1]), Path(argv[2]), argv[3], argv[4]
+    log = lambda msg: print(msg, file=sys.stderr, flush=True)  # noqa: E731
+    if quantdb_store() is not None:
+        return fetch_quantdb(start, end, log)
     calendar = [line.strip() for line in calendar_file.read_text().splitlines() if line.strip()]
-    return fetch(cache, calendar, start, end, log=lambda msg: print(msg, file=sys.stderr, flush=True))
+    return fetch(cache, calendar, start, end, log=log)
 
 
 if __name__ == "__main__":
