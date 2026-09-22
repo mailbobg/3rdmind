@@ -1863,7 +1863,17 @@ def strategy_item(strategy_id):
         fields = validate_strategy_body(body, existing=strategy)
     except (ValueError, TypeError, KeyError) as error:
         return jsonify({"error": str(error)}), 400
-    return jsonify(strategy_view(save_strategy({**strategy, **fields})))
+    updated = {**strategy, **fields}
+    evidence = body.get("evidence")
+    if isinstance(evidence, dict) and evidence.get("backtest_id"):
+        # New evidence (e.g. the same rule re-run with another execution): replace it and log the run.
+        try:
+            job_folder(str(evidence["backtest_id"]))
+        except ValueError:
+            return jsonify({"error": "Invalid evidence backtest id"}), 400
+        updated["evidence"] = {k: evidence.get(k) for k in ("backtest_id", "search_id", "start", "end") if evidence.get(k)}
+        updated.setdefault("runs", []).append({"backtest_id": str(evidence["backtest_id"]), "kind": "evidence"})
+    return jsonify(strategy_view(save_strategy(updated)))
 
 
 @studio.post("/strategies/<strategy_id>/update")
