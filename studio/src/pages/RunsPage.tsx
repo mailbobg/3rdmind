@@ -18,7 +18,7 @@ import { Hint } from "../components/widgets";
 import { t } from "../i18n";
 
 interface Row {
-  key: string; kind: string; id: string; name: string; detail: string; result: ReactNode; status: string; time: string | null;
+  key: string; kind: string; id: string; name: string; detail: string; result: ReactNode; status: string; time: string | null; note?: string | null;
   live?: boolean; job?: Job;
 }
 
@@ -63,7 +63,8 @@ export function RunsPage() {
       const live = e.status === "running" || e.status === "starting";
       return {
         key: `r:${e.id}`, kind: "research", id: e.id, name: shortName(e.id), detail: e.hypothesis || e.scenario, live, job,
-        result: live && job ? <JobProgress job={job} /> : e.rounds == null ? <span className="mm-dim">—</span> : t("{0} 轮 · {1} 接受", [e.rounds, e.accepted]),
+        result: live && job ? <JobProgress job={job} /> : e.note && !e.rounds ? <span className="mm-dim">{t("未提取到因子")}</span> : e.rounds == null ? <span className="mm-dim">—</span> : t("{0} 轮 · {1} 接受", [e.rounds, e.accepted]),
+        note: e.note || null,
         status: e.id === trace.traceId && trace.events.length ? trace.status : EXPERIMENT_STATUS_LABELS[e.status], time: e.updated,
       };
     });
@@ -120,6 +121,7 @@ export function RunsPage() {
         selected?.kind === "research" ? (
           <div className="flex flex-col gap-3">
             {trace.status === t("未加载") && <Alert status="accent"><Alert.Indicator /><Alert.Content><Alert.Title>{t("这个实验的事件未加载到服务端。")}</Alert.Title></Alert.Content></Alert>}
+            {selected.note && !trace.rounds.length && <Alert status="warning"><Alert.Indicator /><Alert.Content><Alert.Title>{selected.note}</Alert.Title></Alert.Content></Alert>}
             {trace.rounds.map((round) => <RoundDetail key={round.id} round={round} />)}
           </div>
         ) : selected?.kind === "backtest" && backtests.result ? <BacktestResultView result={backtests.result} onDiagnose={backtests.diagnose} />

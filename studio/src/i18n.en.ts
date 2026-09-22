@@ -900,6 +900,7 @@ export const EN: Record<string, string> = {
   "A 股扩展字段从独立的 quantdb 数据库读取，其他程序共用同一份数据。位置由 QUANTDB_HOME 决定（默认 ~/.quantdb），密钥放在它的 .env 里。": "A-share extra fields are read from the standalone quantdb store, shared with every other program. Its location is QUANTDB_HOME (default ~/.quantdb); keys live in its .env.",
   "baostock 字段": "baostock fields",
   "留空用默认 ~/.quantdb": "Empty for the default ~/.quantdb",
+  "未提取到因子": "No factors extracted",
   "更新价格表": "Updating price tables",
   "导出 Qlib 目录": "Exporting the Qlib directory",
   "可更新到 {0}": "Can update to {0}",

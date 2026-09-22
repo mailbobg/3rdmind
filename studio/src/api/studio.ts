@@ -159,6 +159,8 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
 export type ExperimentStatus = "starting" | "running" | "completed" | "stopped" | "failed" | "ended";
 export interface ExperimentSummary {
   market: string;
+  /** Why a run produced nothing, when the server can tell (e.g. a report judged not to be a factor report). */
+  note?: string | null;
   /** Set while the run is blocked on a confirmation: what kind. */
   waiting?: string | null;
   /** The run's confirmation policy and how many requests it has answered on the user's behalf. */

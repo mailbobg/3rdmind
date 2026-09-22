@@ -898,7 +898,7 @@ def summarize_task(trace_id, task):
     Everything comes from the messages already held in memory, so this is cheap enough to compute
     for every loaded trace on each request.
     """
-    loops, accepted, hypothesis, end, updated, ended_at = set(), 0, None, None, "", ""
+    loops, accepted, hypothesis, end, updated, ended_at, note = set(), 0, None, None, "", "", None
     for message in task.messages:
         try:
             loops.add(normalize_loop_id(message.get("loop_id")))
@@ -907,6 +907,10 @@ def summarize_task(trace_id, task):
         tag, content = message.get("tag") or "", message.get("content") or {}
         if tag == "research.hypothesis" and isinstance(content, dict):
             hypothesis = content.get("hypothesis") or hypothesis
+        elif tag.endswith("file_to_factor_result") and isinstance(content, dict) and not content:
+            # The report loader found nothing to code: the file was judged not to be a quant factor report
+            # (a company or macro note has no factor formulas), so the run ends after this step.
+            note = "研报没有被识别为量化因子研报（公司研报、行业或宏观报告里没有因子公式），没有提取到因子，运行到此结束。这个入口需要描述因子构造的量化研报。"
         elif tag == "feedback.hypothesis_feedback" and isinstance(content, dict) and content.get("decision") is True:
             accepted += 1
         timestamp = str(message.get("timestamp") or "")
@@ -932,6 +936,7 @@ def summarize_task(trace_id, task):
         "waiting": pending["kind"] if pending else None,
         "confirm": getattr(task, "confirm", None),
         "auto_answered": sum(1 for m in task.messages if m.get("tag") == "user_interaction.auto"),
+        "note": note,
     }
 
 

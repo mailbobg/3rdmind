@@ -16,6 +16,8 @@ export interface ExperimentRow {
   accepted: number | null;
   updated: string | null;
   hypothesis: string | null;
+  /** Why the run produced nothing, when the server can tell. */
+  note?: string | null;
 }
 
 const RANK: Record<ExperimentRow["status"], number> = { running: 0, starting: 0, completed: 1, stopped: 1, failed: 1, ended: 1, unloaded: 2 };
@@ -29,7 +31,7 @@ export function mergeExperiments(ids: string[], summaries: ExperimentSummary[]):
   const rows = ids.map<ExperimentRow>((id) => {
     const s = byId.get(id);
     return s
-      ? { id, scenario: s.scenario, market: s.market, waiting: s.waiting, status: s.status, rounds: s.rounds, accepted: s.accepted, updated: s.updated, hypothesis: s.hypothesis }
+      ? { id, scenario: s.scenario, market: s.market, waiting: s.waiting, status: s.status, rounds: s.rounds, accepted: s.accepted, updated: s.updated, hypothesis: s.hypothesis, note: s.note ?? null }
       : { id, scenario: id.split("/")[0], status: "unloaded", rounds: null, accepted: null, updated: null, hypothesis: null };
   });
   return rows.sort((a, b) => RANK[a.status] - RANK[b.status] || (b.updated || "").localeCompare(a.updated || "") || a.id.localeCompare(b.id));

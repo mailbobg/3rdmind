@@ -198,7 +198,7 @@ def test_experiments_summarise_loaded_traces(studio_client) -> None:
     ]
     rows = {r["id"]: r for r in studio_client.get("/studio/experiments").get_json()}
     assert rows["Finance Data Building/second"] == {
-        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1, "market": "csi300", "waiting": None, "confirm": {"mode": "hypothesis", "timeout_min": 30, "instruction": ""}, "auto_answered": 0,
+        "id": "Finance Data Building/second", "scenario": "Finance Data Building", "rounds": 2, "accepted": 1, "market": "csi300", "waiting": None, "confirm": {"mode": "hypothesis", "timeout_min": 30, "instruction": ""}, "auto_answered": 0, "note": None,
         "status": "completed", "updated": "2026-09-02T11:00:00", "hypothesis": "second", "messages": 5,
     }
     # The demo trace has events but no END and no live process: it ended without reporting.
