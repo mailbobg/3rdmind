@@ -900,6 +900,8 @@ export const EN: Record<string, string> = {
   "A 股扩展字段从独立的 quantdb 数据库读取，其他程序共用同一份数据。位置由 QUANTDB_HOME 决定（默认 ~/.quantdb），密钥放在它的 .env 里。": "A-share extra fields are read from the standalone quantdb store, shared with every other program. Its location is QUANTDB_HOME (default ~/.quantdb); keys live in its .env.",
   "baostock 字段": "baostock fields",
   "留空用默认 ~/.quantdb": "Empty for the default ~/.quantdb",
+  "；扩展字段上次自动更新：{0}": "; extra fields last auto-refreshed: {0}",
+  "自动同步之后接着更新 quantdb 里的扩展字段（Tushare、董监高、baostock 增量）并重建有字段的股票池数据，规则策略的信号跟到同一天。有任务在跑就等下一个整点再试。": "After the automatic sync the extra fields in quantdb are refreshed too (Tushare, insider changes, baostock increments) and the universe exports carrying them are rebuilt, so the rule strategies' signals reach the same day. While something else is running it waits for the next hourly tick.",
   "保存位置": "Save location",
   "{0}/.env 里的密钥：": "Keys in {0}/.env:",
   "Tushare 字段": "Tushare fields",

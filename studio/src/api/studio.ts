@@ -333,7 +333,7 @@ export const updateStrategy = async (id: string, body: { start?: string; end?: s
 };
 export interface SyncStatus {
   local: { release: string | null; downloaded_at: string | null; calendar_start: string | null; calendar_end: string | null; path: string };
-  settings: { auto: boolean; hour: number; last_auto_check: string | null };
+  settings: { auto: boolean; hour: number; last_auto_check: string | null; last_fields_check?: string | null };
   sync: { running: boolean; phase: string | null; progress: number | null; started_at: string | null; finished_at: string | null; error: string | null; log: string[] };
   remote: { release: string; published_at: string | null; archive_bytes: number | null } | null;
   remote_error?: string | null;

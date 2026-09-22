@@ -184,7 +184,8 @@ export function DataSync({ onSynced }: { onSynced: () => void }) {
                     options={Array.from({ length: 24 }, (_, h) => ({ value: String(h), label: `${String(h).padStart(2, "0")}:00` }))} />
                   <span>{t("之后检查一次")}</span>
                 </label>
-                {status?.settings.last_auto_check && <div className="text-[11px] text-muted">{t("上次自动检查：{0}", [status.settings.last_auto_check])}</div>}
+                {status?.settings.last_auto_check && <div className="text-[11px] text-muted">{t("上次自动检查：{0}", [status.settings.last_auto_check])}{status.settings.last_fields_check ? t("；扩展字段上次自动更新：{0}", [status.settings.last_fields_check]) : ""}</div>}
+                <p className="m-0 text-[11px] leading-relaxed text-muted">{t("自动同步之后接着更新 quantdb 里的扩展字段（Tushare、董监高、baostock 增量）并重建有字段的股票池数据，规则策略的信号跟到同一天。有任务在跑就等下一个整点再试。")}</p>
                 <p className="m-0 text-[11px] leading-relaxed text-muted">{t("同步会下载社区快照（约 565 MB），校验 sha256，解包后整体替换数据目录，失败自动回退。有回测或研究在跑时不会开始。同步后“重算到最新”和股票池数据会自动跟到新末日；已有因子的 result.h5 不会自己变。")}</p>
               </div>
             </div>

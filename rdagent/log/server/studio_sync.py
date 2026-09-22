@@ -32,13 +32,17 @@ _remote_cache = {"checked_at": 0.0, "release": None}
 _busy_check = lambda: False  # noqa: E731 - replaced by configure()
 _settings_path: Path | None = None
 _scheduler_started = False
+_daily_fields = None  # callable -> bool: refresh the extra fields (quantdb) once a day after the price sync; True when it started
+_fields_pending = False
 
 
-def configure(settings_path: Path, busy_check):
-    """Called once from the blueprint: where to keep sync.json and how to tell whether workers are running."""
-    global _settings_path, _busy_check, _scheduler_started
+def configure(settings_path: Path, busy_check, daily_fields=None):
+    """Called once from the blueprint: where to keep sync.json, how to tell whether workers are running, and
+    what to run once a day after the prices are current (the extra-field refresh)."""
+    global _settings_path, _busy_check, _scheduler_started, _daily_fields
     _settings_path = settings_path
     _busy_check = busy_check
+    _daily_fields = daily_fields
     if not _scheduler_started:
         _scheduler_started = True
         threading.Thread(target=_scheduler, name="studio-data-sync", daemon=True).start()
@@ -63,7 +67,7 @@ def local_info() -> dict:
 
 
 def settings() -> dict:
-    default = {"auto": False, "hour": 19, "last_auto_check": None}
+    default = {"auto": False, "hour": 19, "last_auto_check": None, "last_fields_check": None}
     if _settings_path and _settings_path.is_file():
         try:
             return {**default, **json.loads(_settings_path.read_text())}
@@ -249,19 +253,45 @@ def _sync_worker(remote: dict):
         with _lock:
             _state["running"] = False
             _state["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        global _fields_pending
+        if _fields_pending:
+            _fields_pending = False
+            _start_fields()
+
+
+def _start_fields():
+    """Run the daily extra-field refresh; records the day only when it actually started (a busy server tries
+    again at the next tick)."""
+    if _daily_fields is None:
+        return
+    try:
+        started = _daily_fields()
+    except Exception as error:  # noqa: BLE001
+        _log(f"扩展字段自动更新出错：{error}")
+        return
+    if started:
+        save_settings({"last_fields_check": datetime.now().strftime("%Y-%m-%d")})
+    _log(f"扩展字段自动更新：{'已开始' if started else '有任务在运行，稍后再试'}")
 
 
 def _scheduler():
-    """Once a day at the configured hour, sync when a newer release exists and nothing is running."""
+    """Once a day at the configured hour: sync the prices when a newer release exists, then refresh the extra
+    fields (quantdb) so the rule strategies' signals reach the same day; nothing runs while workers are busy."""
+    global _fields_pending
     while True:
         try:
             conf = settings()
             now = datetime.now()
             today = now.strftime("%Y-%m-%d")
-            if conf.get("auto") and now.hour >= int(conf.get("hour", 19)) and conf.get("last_auto_check") != today:
+            due = conf.get("auto") and now.hour >= int(conf.get("hour", 19))
+            if due and conf.get("last_auto_check") != today:
                 save_settings({"last_auto_check": today})
                 result = run_sync()
                 _log(f"自动同步：{'已开始' if result.get('started') else result.get('reason')}")
+                if result.get("started"):
+                    _fields_pending = True  # the fields follow once the prices have landed
+            if due and conf.get("last_fields_check") != today and not _fields_pending and not _state["running"]:
+                _start_fields()
         except Exception as error:  # noqa: BLE001
             _log(f"自动同步检查出错：{error}")
         time.sleep(600)

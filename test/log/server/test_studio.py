@@ -2827,6 +2827,53 @@ def test_extra_fields_status_and_refresh_job(studio_client, quantdb_store, tmp_p
 
 
 @pytest.mark.offline
+def test_daily_fields_refresh_follows_the_price_sync(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scheduler runs the extra-field refresh once a day: right after a price sync when one started, straight
+    away when the prices were already current, and never while workers are busy."""
+    from rdagent.log.server import studio_sync
+
+    monkeypatch.setattr(studio_sync, "_settings_path", tmp_path / "sync.json")
+    started = []
+    monkeypatch.setattr(studio_sync, "_daily_fields", lambda: started.append(1) or True)
+    studio_sync.save_settings({"auto": True, "hour": 0, "last_auto_check": None, "last_fields_check": None})
+    monkeypatch.setattr(studio_sync, "run_sync", lambda force=False: {"started": False, "reason": "已是最新版"})
+    ticks = []
+    def sleep(seconds):
+        ticks.append(seconds)
+        if len(ticks) >= 2:
+            raise StopIteration
+    import types
+    monkeypatch.setattr(studio_sync, "time", types.SimpleNamespace(sleep=sleep))  # only the scheduler's own sleep
+    with pytest.raises(StopIteration):
+        studio_sync._scheduler()
+    today = pd.Timestamp.now().strftime("%Y-%m-%d")
+    assert started == [1] and studio_sync.settings()["last_fields_check"] == today  # prices current: fields refreshed at once, once
+    # a sync that started defers the fields to its completion
+    studio_sync.save_settings({"last_auto_check": None, "last_fields_check": None}); started.clear(); ticks.clear()
+    monkeypatch.setattr(studio_sync, "run_sync", lambda force=False: {"started": True, "release": "v2"})
+    with pytest.raises(StopIteration):
+        studio_sync._scheduler()
+    assert started == [] and studio_sync._fields_pending
+    studio_sync._fields_pending = False
+    # a busy server leaves the day unrecorded so the next tick tries again
+    studio_sync.save_settings({"last_fields_check": None}); started.clear(); ticks.clear()
+    monkeypatch.setattr(studio_sync, "run_sync", lambda force=False: {"started": False, "reason": "x"})
+    monkeypatch.setattr(studio_sync, "_daily_fields", lambda: False)
+    with pytest.raises(StopIteration):
+        studio_sync._scheduler()
+    assert studio_sync.settings()["last_fields_check"] is None
+    # the Studio's hook queues the two-source job and refuses while workers are busy
+    monkeypatch.setattr(studio_module, "workers_busy", lambda app: True)
+    assert studio_module.start_extra_job(studio_client.application, ["csi300"], ["tushare", "baostock"]) is None
+    monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)
+    calls = []
+    monkeypatch.setattr(studio_module.subprocess, "Popen", fake_popen(calls, {"status": "completed", "planned": 2, "done": 2, "failed": [], "failed_count": 0}))
+    job = studio_module.start_extra_job(studio_client.application, ["csi300"], ["tushare", "baostock"])
+    result = wait_job(studio_client, job["id"])
+    assert result["status"] == "completed" and result["result"]["done"] == 4 and [c[3] for c in calls] == ["tushare", "baostock"]
+
+
+@pytest.mark.offline
 def test_quantdb_home_setting(studio_client, quantdb_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from rdagent.log.server import studio_fields
 

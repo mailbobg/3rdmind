@@ -1304,9 +1304,10 @@ def prepare_backtest_config(body):
     return config
 
 
-def in_app(fn):
-    """Run a job function inside this Flask app's context (jobs run on threads; route helpers read current_app)."""
-    app = current_app._get_current_object()
+def in_app(fn, app=None):
+    """Run a job function inside this Flask app's context (jobs run on threads; route helpers read current_app).
+    Callers outside a request (the daily scheduler) pass the app themselves."""
+    app = app or current_app._get_current_object()
 
     def wrapped(job):
         with app.app_context():
@@ -2064,7 +2065,7 @@ def workers_busy(app):
 @studio.record_once
 def _configure_sync(state):
     app = state.app
-    studio_sync.configure(TRACE_ROOT / "studio_data" / "sync.json", lambda: workers_busy(app))
+    studio_sync.configure(TRACE_ROOT / "studio_data" / "sync.json", lambda: workers_busy(app), daily_fields=lambda: start_extra_job(app, list(EXTRA_MARKETS), list(EXTRA_SOURCES)) is not None)
     studio_llm.configure(TRACE_ROOT / "studio_data" / "llm.json")
     from rdagent.log.server import studio_fields
 
@@ -2206,24 +2207,34 @@ def member_codes(markets):
     return sorted(codes)
 
 
-def run_extra_fetch(job, markets, source="baostock"):
-    """Refresh the extra fields in quantdb (baostock per member instrument, Tushare per trading day for the
-    whole market), then rebuild those universes' exports so research sees the new columns (recomputation
-    rebuilds its latest file by itself)."""
+def run_extra_fetch(job, markets, sources=("baostock",)):
+    """Refresh the extra fields in quantdb (baostock per member instrument, Tushare and the event tables per
+    trading day for the whole market), then rebuild those universes' exports so research sees the new columns
+    (recomputation rebuilds its latest file by itself)."""
     calendar = studio_markets.provider_for("cn") / "calendars" / "day.txt"
     end = calendar.read_text().strip().splitlines()[-1] if calendar.is_file() else datetime.now().strftime("%Y-%m-%d")
     start = os.environ.get("STUDIO_REFRESH_START", "2022-10-10")
-    command = [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_fields.py")), "refresh", source, start, end]
-    if source == "tushare":
-        studio_jobs.update(job["id"], message="从 Tushare 按交易日取全市场字段")
-    else:
-        codes = member_codes(markets)
-        codes_file = TRACE_ROOT / "studio_data" / "codes.txt"
-        codes_file.parent.mkdir(parents=True, exist_ok=True)
-        codes_file.write_text("\n".join(codes))
-        studio_jobs.update(job["id"], message=f"从 baostock 取 {len(codes)} 只股票的字段")
-        command.append(str(codes_file))
-    # The fetcher reports progress on stderr one line at a time; relay it as the job message.
+    totals = {"planned": 0, "done": 0, "failed": [], "failed_count": 0}
+    for source in sources:
+        command = [os.environ.get("STUDIO_PYTHON", sys.executable), str(Path(__file__).with_name("studio_fields.py")), "refresh", source, start, end]
+        if source == "tushare":
+            studio_jobs.update(job["id"], message="从 Tushare 按交易日取全市场字段")
+        else:
+            codes = member_codes(markets)
+            codes_file = TRACE_ROOT / "studio_data" / "codes.txt"
+            codes_file.parent.mkdir(parents=True, exist_ok=True)
+            codes_file.write_text("\n".join(codes))
+            studio_jobs.update(job["id"], message=f"从 baostock 取 {len(codes)} 只股票的字段")
+            command.append(str(codes_file))
+        status = relay_fetch(job, command)
+        for key in ("planned", "done", "failed_count"):
+            totals[key] += int(status.get(key) or 0)
+        totals["failed"] = (totals["failed"] + list(status.get("failed") or []))[:20]
+    return {**totals, "rebuilt": rebuild_exports(job, markets, start)}
+
+
+def relay_fetch(job, command):
+    """Run a fetch subprocess, relaying its stderr lines as the job message; returns its JSON status line."""
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     last_note = ""
     for note in process.stderr:
@@ -2238,11 +2249,16 @@ def run_extra_fetch(job, markets, source="baostock"):
         raise RuntimeError(last_note or "extra field fetch produced no output")
     if status.get("status") != "completed":
         raise RuntimeError(status.get("error") or "extra field fetch failed")
+    return status
+
+
+def rebuild_exports(job, markets, start):
+    """Rebuild the universe exports that already exist (never-exported ones are built on first research)."""
     rebuilt = []
     for market in markets:
         out = TRACE_ROOT / "studio_data" / "universe" / market
         if not (out / "full" / "daily_pv.h5").is_file():
-            continue  # never exported: built, with the fields, on first research
+            continue
         studio_jobs.update(job["id"], message=f"重建 {market} 的因子数据")
         record = studio_markets.universe(market)
         meta = json.loads((out / "meta.json").read_text()) if (out / "meta.json").is_file() else {}
@@ -2257,7 +2273,16 @@ def run_extra_fetch(job, markets, source="baostock"):
                 rebuilt.append(market)
         except ValueError:
             pass
-    return {**{k: v for k, v in status.items() if k != "status"}, "rebuilt": rebuilt}
+    return rebuilt
+
+
+def start_extra_job(app, markets, sources):
+    """Queue the extra-field refresh as a job; None when one is already running or workers are busy."""
+    app = getattr(app, "_get_current_object", lambda: app)()  # a real app object, usable on the job thread
+    if studio_jobs.find("extra_data") is not None or workers_busy(app):
+        return None
+    label = "取扩展字段（Tushare + baostock）" if len(sources) > 1 else ("取 Tushare 扩展字段" if sources[0] == "tushare" else "取 baostock 扩展字段")
+    return studio_jobs.run("extra_data", label, in_app(lambda job: run_extra_fetch(job, markets, sources), app), market=markets[0], link={"page": "factors", "region": "cn"})
 
 
 @studio.get("/data/extra")
@@ -2298,8 +2323,7 @@ def data_extra_start():
         return jsonify({"job": running["id"]}), 202
     if workers_busy(current_app):
         return jsonify({"error": "有回测或研究正在运行，等它们结束再取字段"}), 409
-    job = studio_jobs.run("extra_data", "取 Tushare 扩展字段" if source == "tushare" else "取 baostock 扩展字段",
-                          in_app(lambda job: run_extra_fetch(job, markets, source)), market=markets[0], link={"page": "factors", "region": "cn"})
+    job = start_extra_job(current_app, markets, [source])
     return jsonify({"job": job["id"]}), 202
 
 
