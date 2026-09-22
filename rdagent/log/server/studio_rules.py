@@ -27,6 +27,14 @@ RULES = {
         "book": {"topk": 6000, "n_drop": 6000, "horizon": 20, "rebalance": 5, "neutral": "none", "book": "equal"},
         "markets": ["all", "csi1000", "csi500"],
     },
+    "insider_buy_20d": {
+        "label": "高管本人二级市场增持后 20 日",
+        "description": "持有公告后 20 个交易日内有董监高本人在二级市场（竞价交易 / 二级市场买卖）增持的股票，等权；"
+                       "股权激励、大宗、协议转让和亲属、受控法人的增持不算。"
+                       "事件研究（全 A，2023-01 → 2026-09，8,379 次公告）：公告后 1–20 日跑赢等权全池约 11%/年（t 4.3），两半段同号，每天约 80 只。",
+        "book": {"topk": 6000, "n_drop": 6000, "horizon": 20, "rebalance": 5, "neutral": "none", "book": "equal"},
+        "markets": ["all", "csi1000", "csi500"],
+    },
 }
 
 

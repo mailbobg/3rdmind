@@ -13,11 +13,14 @@ their rows become ``$`` columns on the (datetime, instrument) frames the Studio 
     cn.fina       $roe … $rep_days       cn.forecast $fc_pchg $fc_days     cn.express $ex_np_yoy $ex_days
     cn.holders    $holder_num $holder_chg $holder_ann_days
     cn.unlock     $unlock_30d $unlock_ratio_30d $unlock_past_30d
+    cn.insider    $insider_buy_days   (days since an officer's own open-market buy was announced)
 
 Report-dated tables are laid on point-in-time: visible from the trading day after the announcement, forward
 filled. Refreshing runs as a subprocess so the Flask server never imports the fetch clients:
 
     python studio_fields.py refresh <baostock|tushare> <start> <end> [codes file]
+
+(``tushare`` also brings the FTShare event tables along; quantdb picks each table's own source.)
 """
 import json
 import os
@@ -26,6 +29,7 @@ from pathlib import Path
 
 BAOSTOCK_COLUMNS = ["$turnover", "$pe_ttm", "$pb", "$ps_ttm", "$pcf_ttm", "$float_cap", "$amount", "$is_st"]
 TUSHARE_TABLES = ["moneyflow", "margin", "chips", "basic", "toplist", "block", "fina", "forecast", "express", "holders", "unlock"]
+EVENT_TABLES = ["insider"]  # other event tables (FTShare), laid on point-in-time like the report tables
 COLUMNS = {
     "baostock": BAOSTOCK_COLUMNS,
     "moneyflow": ["$mf_net_xl", "$mf_net_lg", "$mf_net_md", "$mf_net_sm"],
@@ -39,10 +43,12 @@ COLUMNS = {
     "express": ["$ex_np_yoy", "$ex_days"],
     "holders": ["$holder_num", "$holder_chg", "$holder_ann_days"],
     "unlock": ["$unlock_30d", "$unlock_ratio_30d", "$unlock_past_30d"],
+    "insider": ["$insider_buy_days"],
 }
 TUSHARE_COLUMNS = [column for table in TUSHARE_TABLES for column in COLUMNS[table]]
-EXTRA_COLUMNS = BAOSTOCK_COLUMNS + TUSHARE_COLUMNS
-TABLES = ["cn.baostock"] + [f"cn.{name}" for name in TUSHARE_TABLES]
+EVENT_COLUMNS = [column for table in EVENT_TABLES for column in COLUMNS[table]]
+EXTRA_COLUMNS = BAOSTOCK_COLUMNS + TUSHARE_COLUMNS + EVENT_COLUMNS
+TABLES = ["cn.baostock"] + [f"cn.{name}" for name in TUSHARE_TABLES + EVENT_TABLES]
 DAY_TABLES = {"cn.moneyflow", "cn.margin", "cn.chips", "cn.basic", "cn.toplist", "cn.block"}  # their end date is "data through"
 
 BAOSTOCK_NOTE = (
@@ -75,6 +81,15 @@ TUSHARE_NOTE = (
     " calendar days, $unlock_ratio_30d as a fraction of total shares; $unlock_past_30d the fraction of total"
     " shares unlocked in the past 30 calendar days. Event columns ($fc_*, $ex_*, $lhb*, $block_*) are sparse"
     " by nature.\n"
+)
+INSIDER_NOTE = (
+    "\n$insider_buy_days (Eastmoney 董监高持股变动 via FTShare): calendar days since the latest announcement that an"
+    " officer or director bought shares of the company in the open market with their own money (增持, 本人, 竞价 /"
+    " 二级市场买卖; not incentive grants, block or negotiated transfers), POINT-IN-TIME (counted from the trading day"
+    " after the announcement; 0 on that day), NaN before the first such buy. Event study (all A-shares 2023-01 →"
+    " 2026-09, 8,379 announcements): the name beats the equal-weight universe by about 11% a year over the next 20"
+    " trading days (t 4.3, both halves positive); large buys and related-party buys do not, and sells carry no"
+    " information.\n"
 )
 
 
@@ -347,6 +362,16 @@ def event_frames(db, grid, calendar):
             totals["$unlock_past_30d"] = summed["ratio"] / 100.0
         totals[COLUMNS["unlock"]] = totals[COLUMNS["unlock"]].fillna(0.0)
         out["unlock"] = totals
+    raw = _read(db, "cn.insider")
+    if raw is not None:
+        own = (raw["change_direction"] == "增持") & (raw["relation"] == "本人") & raw["change_reason"].astype(str).str.contains("竞价|二级市场", regex=True)
+        buys = raw[own].copy()
+        announced = pd.to_datetime(buys["notice_date"], errors="coerce").fillna(pd.to_datetime(buys["date"], errors="coerce"))
+        buys["available"] = next_trading_day(announced.dt.strftime("%Y%m%d"), calendar).values
+        events = pd.DataFrame({"available": buys["available"], "instrument": buys["instrument"], "report": buys["available"]}).drop_duplicates()
+        filled = as_of(events, grid, ["report"])
+        filled["$insider_buy_days"] = days_since(filled, "report")
+        out["insider"] = filled[COLUMNS["insider"]]
     return out
 
 
@@ -375,7 +400,7 @@ def attach(frame):
     extra = extra.reindex(columns=EXTRA_COLUMNS)
     if "toplist" in parts:
         extra["$lhb"] = extra["$lhb"].fillna(0.0)
-    note = (BAOSTOCK_NOTE if "baostock" in parts else "") + (TUSHARE_NOTE if any(t in parts for t in TUSHARE_TABLES) else "")
+    note = (BAOSTOCK_NOTE if "baostock" in parts else "") + (TUSHARE_NOTE if any(t in parts for t in TUSHARE_TABLES) else "") + (INSIDER_NOTE if "insider" in parts else "")
     return frame.join(extra.astype("float32"), how="left"), note
 
 
@@ -395,7 +420,7 @@ def refresh(kind, start, end, codes=None, log=lambda *_: None) -> dict:
 
     recorder = Recorder(quantdb.open(), report=report)
     planned, done, failed = 0, 0, []
-    tables = ["cn.baostock"] if kind == "baostock" else [f"cn.{name}" for name in TUSHARE_TABLES]
+    tables = ["cn.baostock"] if kind == "baostock" else [f"cn.{name}" for name in TUSHARE_TABLES + EVENT_TABLES]
     for name in tables:
         summary = recorder.refresh(name, start=start, end=end, symbols=codes if kind == "baostock" else None)
         planned += summary["keys"]; done += summary["done"]

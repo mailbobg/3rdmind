@@ -1868,6 +1868,25 @@ def test_attention_rule_flags_the_right_names() -> None:
 
 
 @pytest.mark.offline
+def test_insider_rule_holds_the_window_after_a_buy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess, sys
+    from rdagent.log.server import studio_rules
+
+    days = pd.bdate_range("2025-01-01", periods=45)
+    index = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
+    df = pd.DataFrame({"$close": 10.0, "$insider_buy_days": float("nan")}, index=index)
+    since = (days - days[5]).days.astype(float)  # a buy tradable from day 5
+    df.loc[(slice(None), "SH600000"), "$insider_buy_days"] = [d if d >= 0 else float("nan") for d in since]
+    df.to_hdf(tmp_path / "daily_pv.h5", key="data")
+    assert subprocess.run([sys.executable, str(studio_rules.rule_file("insider_buy_20d"))], cwd=tmp_path, capture_output=True, text=True).returncode == 0
+    score = pd.read_hdf(tmp_path / "result.h5")["insider_buy_20d"]
+    held = score.xs("SH600000", level="instrument")
+    assert pd.isna(held.iloc[4]) and held.iloc[5] == 1.0 and held.loc[days[5] + pd.Timedelta(days=27)] == 1.0
+    assert pd.isna(held.loc[days[5] + pd.Timedelta(days=28):].iloc[0]) and score.xs("SH600004", level="instrument").isna().all()
+    assert "insider_buy_20d" in studio_rules.RULES and "all" in studio_rules.RULES["insider_buy_20d"]["markets"]
+
+
+@pytest.mark.offline
 def test_hold_scores_repeats_each_blocks_first_day() -> None:
     from rdagent.log.server.studio_worker import hold_scores
 
@@ -2737,6 +2756,11 @@ def quantdb_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db.upsert("cn.holders", pd.concat([row("2024-12-30", "SH600000", ann_date=20241230, end_date=20241231, holder_num=110), row("2024-10-01", "SH600000", ann_date=20241001, end_date=20240930, holder_num=100)]), done=["20241230"], source="tushare")
     db.upsert("cn.unlock", pd.concat([row("2025-01-10", "SH600000", ann_date=20241220, float_date=20250110, float_share=1000, float_ratio=0.5, holder_name="a"),
                                       row("2025-01-08", "SH600000", ann_date=20250105, float_date=20250108, float_share=500, float_ratio=0.25, holder_name="a")]), done=["20250106"], source="tushare")
+    # an officer's own open-market buy announced 01-02 (visible from 01-03); a relative's buy and a sell do not count
+    db.upsert("cn.insider", pd.concat([row("2025-01-02", "SH600000", notice_date="2025-01-02", change_direction="增持", relation="本人", change_reason="竞价交易", changer="a", change_shares=100),
+                                       row("2024-12-30", "SH600004", notice_date="2024-12-30", change_direction="增持", relation="配偶", change_reason="竞价交易", changer="b", change_shares=100),
+                                       row("2024-12-30", "SH600004", notice_date="2024-12-30", change_direction="减持", relation="本人", change_reason="竞价交易", changer="c", change_shares=100)]),
+              done=["20241230"], source="ftshare")
     return db
 
 
@@ -2763,6 +2787,8 @@ def test_extra_fields_attach_point_in_time(quantdb_store) -> None:
     assert first["$holder_num"] == 110 and first["$holder_chg"] == pytest.approx(0.1) and first["$holder_ann_days"] == 0
     # unlocks: on 01-02 only the one announced in December is known (1000 shares); by 01-06 both are
     assert first["$unlock_30d"] == 1000 and joined.loc[(days[2], "SH600000"), "$unlock_30d"] == 1500 and joined.loc[(days[0], "SH600004"), "$unlock_30d"] == 0
+    assert pd.isna(first["$insider_buy_days"]) and second["$insider_buy_days"] == 0 and joined.loc[(days[2], "SH600000"), "$insider_buy_days"] == 3
+    assert joined.loc[:, "$insider_buy_days"].xs("SH600004", level="instrument").isna().all() and "$insider_buy_days" in note
     # a foreign universe gets the columns but nothing in them; a missing store attaches nothing
     us = pd.DataFrame({"$close": 1.0}, index=pd.MultiIndex.from_product([days, ["AAPL"]], names=["datetime", "instrument"]))
     assert studio_fields.attach(us)[0]["$turnover"].isna().all()
