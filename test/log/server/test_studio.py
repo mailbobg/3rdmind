@@ -1887,6 +1887,115 @@ def test_insider_rule_holds_the_window_after_a_buy(tmp_path: Path, monkeypatch: 
     assert "insider_buy_20d" in studio_rules.RULES and "all" in studio_rules.RULES["insider_buy_20d"]["markets"]
 
 
+def _fake_market(monkeypatch, closes, opens=None, factors=None, volume=None, bench=None):
+    """Stand in for Qlib inside studio_worker: prices as (datetime × instrument) frames, the calendar their index."""
+    import sys, types
+    from rdagent.log.server import studio_worker
+
+    frames = {"$close": closes, "$open": opens if opens is not None else closes,
+              "$factor": factors if factors is not None else closes * 0 + 1.0}
+    vol = volume if volume is not None else closes * 0 + 1000.0
+    monkeypatch.setattr(studio_worker, "daily_closes", lambda names, start, end, field="$close": frames[field].reindex(columns=sorted(set(names))).ffill())
+
+    def features(instruments, fields, start_time=None, end_time=None, freq="day"):
+        field = fields[0]
+        if field == "$volume":
+            frame = vol.reindex(columns=instruments).stack(future_stack=True).rename(field).to_frame()
+            return frame.swaplevel().sort_index().rename_axis(["instrument", "datetime"])
+        series = (bench if bench is not None else pd.Series(1.0, index=closes.index))
+        idx = pd.MultiIndex.from_product([instruments, series.index], names=["instrument", "datetime"])
+        return pd.DataFrame({field: series.values}, index=idx)
+
+    fake = types.SimpleNamespace(calendar=lambda freq="day": list(closes.index), features=features)
+    monkeypatch.setitem(sys.modules, "qlib.data", types.SimpleNamespace(D=fake))
+
+
+@pytest.mark.offline
+def test_lot_shares_and_price_limits() -> None:
+    from rdagent.log.server.studio_worker import lot_shares, price_limit
+
+    assert lot_shares("SZ000001", 5000, 10.0) == 500 and lot_shares("SZ000001", 5000, 12.0) == 400
+    assert lot_shares("SZ000001", 900, 10.0) == 0                       # not even one lot
+    assert lot_shares("SH688001", 5000, 20.0) == 250 and lot_shares("SH688001", 3000, 20.0) == 0  # STAR: 200 minimum, then any share
+    assert price_limit("SZ300750", {}) == 0.195 and price_limit("SH688001", {}) == 0.195 and price_limit("SH600000", {"limit_threshold": 0.095}) == 0.095
+
+
+@pytest.mark.offline
+def test_real_book_fills_like_an_a_share_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server.studio_worker import equal_book
+
+    days = pd.bdate_range("2025-01-01", periods=6)
+    names = ["SH600000", "SH600004", "SH600005"]
+    closes = pd.DataFrame({"SH600000": [10.0] * 6, "SH600004": [80.0] * 6, "SH600005": [5.0, 5.5, 5.5, 5.5, 5.5, 5.5]}, index=days)
+    opens = closes.copy()
+    opens.loc[days[1], "SH600005"] = 5.5  # opens +10% on the first trading day: at the up-limit, cannot be bought
+    volume = closes * 0 + 1000.0
+    _fake_market(monkeypatch, closes, opens=opens, volume=volume)
+    score = pd.Series(1.0, index=pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"]))
+    config = {"start": str(days[1].date()), "end": str(days[-1].date()), "topk": 3, "rebalance": 20, "account": 15000.0,
+              "open_cost": 0.0005, "close_cost": 0.0015, "min_cost": 5, "execution": "open", "fills": "real", "limit_threshold": 0.095}
+    report, trades, holdings, instruments, blocks = equal_book(score, config)
+    buys = [t for t in trades if t["direction"] == "buy"]
+    # 15,000 / 3 = 5,000 each: 500 shares of the 10-yuan name; the 80-yuan name needs 8,000 for one lot: unaffordable
+    first = [t for t in buys if t["date"] == str(days[1].date())]
+    assert [(t["instrument"], round(t["amount"])) for t in first] == [("SH600000", 500)] and first[0]["cost"] == 5.0  # fee floor
+    assert holdings["fills"]["unaffordable"] == 1 and holdings["fills"]["blocked_limit"] == 1
+    # the limit-up name is retried the next day and filled: 5,000 / 5.5 = 909 → 900 shares
+    later = [t for t in buys if t["instrument"] == "SH600005"]
+    assert len(later) == 1 and later[0]["date"] == str(days[2].date()) and round(later[0]["amount"]) == 900
+    assert holdings["cash"] == pytest.approx(15000 - 5000 - 5 - 900 * 5.5 - 5, abs=1e-6)
+    assert {p["instrument"] for p in holdings["positions"]} == {"SH600000", "SH600005"}
+    # the report stays in Qlib's shape: gross return and cost separate; the day's cost is the two fee floors over the start value
+    assert report.loc[days[1], "cost"] == pytest.approx(5 / 15000) and len(report) == 5
+
+
+@pytest.mark.offline
+def test_real_book_cannot_sell_at_the_down_limit_or_trade_a_suspended_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server.studio_worker import equal_book
+
+    days = pd.bdate_range("2025-01-06", periods=8)
+    names = ["SH600000", "SH600004"]
+    closes = pd.DataFrame({"SH600000": [10.0, 10.0, 10.0, 9.0, 9.0, 9.0, 9.0, 9.0], "SH600004": [10.0] * 8}, index=days)
+    volume = closes * 0 + 1000.0
+    volume.loc[days[1], "SH600004"] = 0.0  # suspended on the first trading day
+    _fake_market(monkeypatch, closes, volume=volume)
+    # hold SH600000 first; on days[3] the signal drops it for SH600004
+    score = pd.concat([pd.Series({(d, "SH600000"): 2.0, (d, "SH600004"): 1.0}) for d in days[:3]] +
+                      [pd.Series({(d, "SH600000"): 1.0, (d, "SH600004"): 2.0}) for d in days[3:]])
+    score.index = score.index.set_names(["datetime", "instrument"])
+    config = {"start": str(days[1].date()), "end": str(days[-1].date()), "topk": 1, "rebalance": 1, "account": 20000.0,
+              "open_cost": 0.0005, "close_cost": 0.0015, "min_cost": 5, "execution": "close", "fills": "real", "limit_threshold": 0.095}
+    report, trades, holdings, instruments, blocks = equal_book(score, config)
+    sells = [t for t in trades if t["direction"] == "sell"]
+    # the switch is signalled on days[3] and traded on days[4]: SH600000 closed at 9.0 on days[3] (−10%), but it is
+    # sold on days[4] when the move from the previous close is 0, so the sale goes through then
+    assert sells and sells[0]["instrument"] == "SH600000" and sells[0]["date"] == str(days[4].date())
+    # a down-limit day blocks a sale; it goes through the next day
+    closes2 = closes.copy(); closes2.loc[days[4]:, "SH600000"] = 8.1  # days[4] closes −10% from 9.0
+    _fake_market(monkeypatch, closes2, volume=volume)
+    _, trades2, holdings2, _, _ = equal_book(score, config)
+    sells2 = [t for t in trades2 if t["direction"] == "sell"]
+    assert holdings2["fills"]["blocked_limit"] >= 1 and sells2[0]["date"] == str(days[5].date())
+    # a suspended name cannot be bought: with both names wanted, the one suspended on days[1] fills on days[2]
+    both = pd.Series(1.0, index=pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"]))
+    _fake_market(monkeypatch, closes, volume=volume)
+    _, trades3, holdings3, _, _ = equal_book(both, {**config, "topk": 2, "rebalance": 20})
+    first_buy = {t["instrument"]: t["date"] for t in trades3 if t["direction"] == "buy"}
+    assert holdings3["fills"]["blocked_suspended"] == 1 and first_buy == {"SH600000": str(days[1].date()), "SH600004": str(days[2].date())}
+
+
+@pytest.mark.offline
+def test_real_fills_validation_and_the_baseline_stays_ideal() -> None:
+    from rdagent.log.server.studio_worker import validate_config
+
+    assert validate_config(_config())["fills"] == "ideal"
+    assert validate_config(_config(fills="real"))["fills"] == "real"
+    with pytest.raises(ValueError):
+        validate_config(_config(fills="broker"))
+    with pytest.raises(ValueError):
+        validate_config(_config(fills="real", book="topk"))
+
+
 @pytest.mark.offline
 def test_hold_scores_repeats_each_blocks_first_day() -> None:
     from rdagent.log.server.studio_worker import hold_scores

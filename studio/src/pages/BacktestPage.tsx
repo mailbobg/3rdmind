@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import * as studio from "../api/studio";
-import type { Book, Execution, Neutral, BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor, RuleInfo, Strategy, Universe } from "../api/studio";
+import type { Book, Execution, Fills, Neutral, BacktestSummary, CorrelationMatrix as Corr, Coverage, FactorRef, FactorWeight, LibraryFactor, RuleInfo, Strategy, Universe } from "../api/studio";
 import { universeLabel } from "../api/studio";
 import { DateInput } from "../components/DateInput";
 import { basketKey as key } from "../hooks/useFactorBasket";
@@ -19,7 +19,7 @@ import { Hint } from "../components/widgets";
 import { t } from "../i18n";
 
 type Market = string;
-interface Params { start: string; end: string; market: Market; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon: number; rebalance: number; neutral: Neutral; book: Book; execution: Execution }
+interface Params { start: string; end: string; market: Market; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon: number; rebalance: number; neutral: Neutral; book: Book; execution: Execution; fills: Fills }
 interface Lgbm { train: [string, string]; valid: [string, string]; params: Record<string, number> }
 
 const shiftYears = (date: string, years: number) => { const d = new Date(date); d.setFullYear(d.getFullYear() + years); return d.toISOString().slice(0, 10); };
@@ -30,7 +30,7 @@ export function BacktestPage() {
   const { env, backtests, basket, layout, workspace } = useStudio();
   const saved = useMemo(() => restoreStudioState(), []);
   const [params, setParams] = useState<Params>({
-    start: "", end: "", market: "csi300", benchmark: "SH000300", topk: 10, n_drop: 2, account: 1000000, open_cost: 0.0005, close_cost: 0.0015, horizon: 1, rebalance: 1, neutral: "none" as Neutral, book: "equal" as Book, execution: "close" as Execution, ...(saved.params || {}),
+    start: "", end: "", market: "csi300", benchmark: "SH000300", topk: 10, n_drop: 2, account: 1000000, open_cost: 0.0005, close_cost: 0.0015, horizon: 1, rebalance: 1, neutral: "none" as Neutral, book: "equal" as Book, execution: "close" as Execution, fills: "real" as Fills, ...(saved.params || {}),
   });
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((p) => ({ ...p, [k]: v }));
   const [method, setMethod] = useState<"rank" | "lgbm">(saved.model?.method === "lgbm" ? "lgbm" : "rank");
@@ -141,13 +141,13 @@ export function BacktestPage() {
       if (savingFrom === "backtest" && result?.metrics) {
         const c = result.config;
         await studio.saveStrategy({ name, factors: c.factors, model: c.model || { method: "rank" },
-          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost, horizon: c.horizon, rebalance: c.rebalance, neutral: c.neutral, book: c.book, execution: c.execution },
+          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost, horizon: c.horizon, rebalance: c.rebalance, neutral: c.neutral, book: c.book, execution: c.execution, fills: c.fills },
           evidence: { backtest_id: result.id, start: c.start, end: c.end }, ...replace });
       } else if (savingFrom === "search" && searches.result?.recommended_portfolio) {
         const rec = searches.result.recommended_portfolio; const c = searches.result.config;
         const members = c.factors.filter((f) => rec.members.includes(f.name)).map((f) => ({ ...f, weight: rec.weights?.[f.name] ?? f.weight }));
         await studio.saveStrategy({ name, factors: members, model: { method: "rank" },
-          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost, horizon: c.horizon, rebalance: c.rebalance, neutral: c.neutral, book: c.book, execution: c.execution },
+          params: { market: c.market, benchmark: c.benchmark, topk: c.topk, n_drop: c.n_drop, account: c.account, open_cost: c.open_cost, close_cost: c.close_cost, horizon: c.horizon, rebalance: c.rebalance, neutral: c.neutral, book: c.book, execution: c.execution, fills: c.fills },
           evidence: { search_id: searches.result.id, start: c.start, end: c.end }, ...replace });
       } else return;
       setSavedNote(target ? t("已覆盖策略「{0}」，跟踪从这次回测重新开始。", [name]) : t("已保存为策略「{0}」，在左栏「策略」里跟踪。", [name]));
@@ -441,6 +441,9 @@ export function BacktestPage() {
               </Field>
               <Field label={t("执行时点")} hint={t("等权账簿何时成交。收盘：信号次日收盘买卖；开盘：次日开盘买入、收盘卖出。A 股隔夜收益为负、日内为正（评审文档第 21 节），开盘买入避开买入前那一夜。TopkDropout 账簿只支持收盘")}>
                 <SelectInput value={params.execution} onChange={(v) => set("execution", v as Execution)} searchable={false} options={[{ value: "close", label: t("收盘") }, { value: "open", label: t("开盘买入") }]} />
+              </Field>
+              <Field label={t("成交规则")} hint={t("真实：按 A 股规则撮合，100 股一手（科创板 200 股起），每笔最低佣金，涨停买不进、跌停卖不出、停牌不能交易，受现金约束，没成交的单子每天重试。理想：可以买零碎股、按比例收费、不管涨跌停，2026-09-23 之前的回测都是这个口径。只对等权账簿生效")}>
+                <SelectInput value={params.fills} onChange={(v) => set("fills", v as Fills)} searchable={false} options={[{ value: "real", label: t("真实") }, { value: "ideal", label: t("理想") }]} />
               </Field>
               <Field label={t("初始资金")}><NumberInput value={params.account} onChange={(v) => set("account", v)} min={1000} step={100000} /></Field>
               <Field label={t("买入费率")} hint={t("0.0005 = 万分之五")}><NumberInput value={params.open_cost} onChange={(v) => set("open_cost", v)} min={0} max={0.1} step={0.0001} /></Field>

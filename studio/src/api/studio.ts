@@ -76,6 +76,7 @@ export interface BacktestRequest {
   neutral?: Neutral;
   book?: Book;
   execution?: Execution;
+  fills?: Fills;
   /** Legacy request-level defaults; new requests carry trace/loop_id on each factor. */
   trace?: string; loop_id?: number;
 }
@@ -284,7 +285,9 @@ export type Neutral = "none" | "size" | "size_industry";
 export type Book = "equal" | "topk";
 /** When the equal-weight book buys: at the close of the day after the signal, or at that day's open (sells stay at the close). */
 export type Execution = "close" | "open";
-export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number; neutral?: Neutral; book?: Book; execution?: Execution }
+/** How the equal-weight book's orders fill: any fraction at a proportional fee (ideal), or A-share rules (real). */
+export type Fills = "ideal" | "real";
+export interface StrategyParams { market: string; benchmark: string; topk: number; n_drop: number; account: number; open_cost: number; close_cost: number; horizon?: number; rebalance?: number; neutral?: Neutral; book?: Book; execution?: Execution; fills?: Fills }
 export interface StrategyRun { id: string; kind: "evidence" | "update"; status?: string; start?: string; end?: string; total_return?: number | null; sharpe?: number | null; max_drawdown?: number | null; benchmark_return?: number | null; error?: string; created?: string }
 export interface Strategy {
   id: string; name: string; note: string; created: string; updated: string;

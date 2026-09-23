@@ -63,6 +63,12 @@ def validate_config(config):
     if execution == "open" and book != "equal":
         raise ValueError("open execution is only available with the equal-weight book")
     result["execution"] = execution
+    fills = str(result.get("fills") or "ideal")
+    if fills not in FILLS:
+        raise ValueError("fills must be ideal or real")
+    if fills == "real" and book != "equal":
+        raise ValueError("real fills are only available with the equal-weight book (TopkDropout has its own exchange rules)")
+    result["fills"] = fills
     for key in ("horizon", "rebalance"):
         value = float(1 if result.get(key) is None else result[key])
         if not math.isfinite(value) or not value.is_integer() or not 1 <= value <= 20:
@@ -694,6 +700,15 @@ def staggered_scores(score, every, tranches):
 
 
 BOOKS = ("equal", "topk")
+# fills: how the equal-weight book's orders are filled. "ideal" trades any fraction of a share at a proportional
+# fee with no price limits (the book the early evidence was built on); "real" follows A-share rules: 100-share
+# lots (科创板 200 minimum, then any whole share), a minimum fee per order, no buying a name at its up-limit or
+# selling one at its down-limit, no trading a suspended name, and real cash (an order larger than the cash left
+# is cut). Blocked orders are retried every day until the next refresh.
+FILLS = ("ideal", "real")
+LOT = 100
+STAR_MIN = 200
+REBALANCE_BAND = 0.25  # real fills: a kept name is traded back to equal weight only when this far off target
 TRADE_LOG_LIMIT = 5000  # trades kept in result.json; a whole-universe book turns over ~100k lines a year
 LOTTERY_TOP10_SHARE = 0.5   # more than half the P&L from ten names: the result is a few stocks, not a selection edge
 LOTTERY_WITHOUT_TOP3 = 0.5  # or losing the best three names removes more than half of the return
@@ -738,8 +753,12 @@ def equal_book(score, config, universe=None):
     per-block membership, and the per-instrument P&L.
 
     ``universe=True`` holds every name that has a score that day instead of the top names (used with
-    universe_score() for the equal-weight universe baseline). Limit-up/down and lot sizes are ignored.
+    universe_score() for the equal-weight universe baseline, which stays an ideal-fill benchmark). With
+    ``fills: "real"`` the orders follow A-share trading rules (see real_book); otherwise limit-up/down and lot
+    sizes are ignored.
     """
+    if config.get("fills", "ideal") == "real" and not universe:
+        return real_book(score, config)
     import numpy as np
     import pandas as pd
     from qlib.data import D
@@ -825,6 +844,221 @@ def equal_book(score, config, universe=None):
     holdings = {"positions": positions, "cash": 0.0, "total": float(value), "as_of": str(previous_day.date()) if previous_day is not None else None}
     instruments = sorted(({"instrument": inst, "pnl": float(p), "held": inst in weights.index, "trades": sum(1 for t in trades if t["instrument"] == inst),
                            "holding_value": float(weights.get(inst, 0.0))} for inst, p in pnl.items()), key=lambda r: -r["pnl"])
+    return report, trades, holdings, instruments, blocks
+
+
+def lot_shares(instrument, value, raw_price):
+    """Whole shares an order of ``value`` yuan buys at ``raw_price`` under A-share lot rules; 0 below one lot."""
+    import math
+
+    if not raw_price or not math.isfinite(raw_price) or raw_price <= 0 or value <= 0:
+        return 0
+    shares = value / raw_price
+    if instrument.startswith("SH68"):
+        return int(shares) if shares >= STAR_MIN else 0
+    return int(shares // LOT) * LOT
+
+
+def price_limit(instrument, config):
+    """The daily price limit as a fraction: 20% on ChiNext and STAR, the market's configured limit elsewhere."""
+    return 0.195 if instrument.startswith(("SZ30", "SH68")) else float(config.get("limit_threshold", 0.095))
+
+
+def real_book(score, config):
+    """The equal-weight book filled the way an A-share account is. Holds cash and positions in adjusted units
+    (value = units × adjusted price; raw shares = units × factor). On the trading day after each signal refresh it
+    sells what left the book and trims or tops up kept names that drifted more than REBALANCE_BAND from equal
+    weight, then buys the new names, all at one price point (the open with ``execution: "open"``, else the close):
+
+    - orders are rounded down to whole lots on the raw price; a name whose single lot costs more than its share
+      of the book is not bought (counted as unaffordable)
+    - every order pays max(value × rate, min_cost)
+    - a name trading at or beyond its up-limit cannot be bought, at or beyond its down-limit cannot be sold, and a
+      suspended name cannot be traded; those orders wait and are retried each day until the next refresh
+    - buys are cut to the cash left
+
+    Same return shape as equal_book; ``holdings`` also carries the cash and a ``fills`` tally.
+    """
+    import numpy as np
+    import pandas as pd
+    from qlib.data import D
+
+    rebalance = int(config.get("rebalance", 1))
+    held = hold_scores(score, rebalance)
+    days = held.index.get_level_values("datetime").unique().sort_values()
+    refresh_days = set(days[::rebalance])
+    start, end = pd.Timestamp(config["start"]), pd.Timestamp(config["end"])
+    calendar = pd.DatetimeIndex(D.calendar(freq="day"))
+    trade_days = calendar[(calendar >= start) & (calendar <= end)]
+    names = held.index.get_level_values("instrument").unique()
+    first = calendar[max(0, calendar.searchsorted(start) - 1)]
+    closes = daily_closes(names, first, end)
+    at_open = config.get("execution", "close") == "open"
+    opens = daily_closes(names, first, end, "$open") if at_open else closes
+    factors = daily_closes(names, first, end, "$factor")
+    volume = D.features(sorted(set(names)), ["$volume"], start_time=first, end_time=end, freq="day")["$volume"]
+    if volume.index.names[0] == "instrument":
+        volume = volume.swaplevel(0, 1)
+    traded = volume.unstack("instrument").reindex(index=closes.index, columns=closes.columns).fillna(0.0) > 0
+    bench = D.features([config.get("benchmark", "SH000300")], ["$close"], start_time=trade_days[0], end_time=end, freq="day")["$close"].droplevel(0).reindex(trade_days).ffill()
+    bench_ret = bench.pct_change().fillna(0.0)
+    topk = int(config["topk"])
+    open_cost, close_cost = float(config["open_cost"]), float(config["close_cost"])
+    min_cost = float(config.get("min_cost", 5))
+
+    cash = float(config["account"])
+    units = pd.Series(dtype=float)
+    pending = {}  # instrument -> target value still to buy (> 0) or units still to sell (as a negative number)
+    invested, returned = {}, {}
+    rows, trades, blocks = [], [], []
+    tally = {"orders": 0, "filled": 0, "blocked_limit": 0, "blocked_suspended": 0, "unaffordable": 0, "cash_short": 0}
+    previous_day, current_set, value_prev = None, None, cash
+
+    def fee(amount, rate):
+        return max(amount * rate, min_cost) if amount > 0 else 0.0
+
+    def blocked(inst, day, price, buying):
+        if not bool(traded.at[day, inst]):
+            return "blocked_suspended"
+        prev = closes.at[calendar[calendar.searchsorted(day) - 1], inst] if calendar.searchsorted(day) > 0 else np.nan
+        if pd.notna(prev) and prev > 0:
+            move = price / prev - 1.0
+            limit = price_limit(inst, config)
+            if (buying and move >= limit) or (not buying and move <= -limit):
+                return "blocked_limit"
+        return None
+
+    for day in trade_days:
+        cost_today, turnover_value = 0.0, 0.0
+        price_row, factor_row = opens.loc[day], factors.loc[day]
+
+        def sell(inst, sell_units, day=day, price_row=price_row, factor_row=factor_row):
+            nonlocal cash, units, cost_today, turnover_value
+            price = float(price_row.get(inst, np.nan))
+            reason = blocked(inst, day, price, buying=False) if pd.notna(price) else "blocked_suspended"
+            if reason:
+                tally[reason] += 1
+                return False
+            have = float(units.get(inst, 0.0))
+            sell_units = min(sell_units, have)
+            if sell_units < have - 1e-9:  # a partial sell goes in whole lots of raw shares
+                factor = float(factor_row.get(inst, 1.0)) or 1.0
+                raw = sell_units * factor
+                raw = int(raw) if inst.startswith("SH68") else int(raw // LOT) * LOT
+                sell_units = raw / factor
+                if sell_units <= 0:
+                    return True
+            proceeds = sell_units * price
+            charge = fee(proceeds, close_cost)
+            cash += proceeds - charge
+            cost_today += charge
+            turnover_value += proceeds
+            returned[inst] = returned.get(inst, 0.0) + proceeds - charge
+            units[inst] = have - sell_units
+            if units[inst] <= 1e-9:
+                units = units.drop(inst)
+            trades.append({"date": str(day.date()), "instrument": str(inst), "direction": "sell", "amount": float(sell_units),
+                           "price": price, "value": float(proceeds), "cost": float(charge)})
+            tally["filled"] += 1
+            return True
+
+        def buy(inst, value, day=day, price_row=price_row, factor_row=factor_row):
+            """Buy up to ``value`` yuan of ``inst``; returns the value still wanted (0 when done or not possible)."""
+            nonlocal cash, units, cost_today, turnover_value
+            price = float(price_row.get(inst, np.nan))
+            reason = blocked(inst, day, price, buying=True) if pd.notna(price) else "blocked_suspended"
+            if reason:
+                tally[reason] += 1
+                return value
+            factor = float(factor_row.get(inst, 1.0)) or 1.0
+            raw_price = price / factor
+            spend = min(value, cash)
+            shares = lot_shares(inst, spend, raw_price)
+            while shares > 0 and shares * raw_price + fee(shares * raw_price, open_cost) > cash:
+                shares -= 1 if inst.startswith("SH68") else LOT
+                if inst.startswith("SH68") and shares < STAR_MIN:
+                    shares = 0
+            if shares <= 0:
+                tally["unaffordable" if value <= cash else "cash_short"] += 1
+                return 0.0
+            amount = shares * raw_price
+            charge = fee(amount, open_cost)
+            cash -= amount + charge
+            cost_today += charge
+            turnover_value += amount
+            invested[inst] = invested.get(inst, 0.0) + amount + charge
+            bought_units = shares / factor
+            units[inst] = float(units.get(inst, 0.0)) + bought_units
+            trades.append({"date": str(day.date()), "instrument": str(inst), "direction": "buy", "amount": float(bought_units),
+                           "price": price, "value": float(amount), "cost": float(charge)})
+            tally["filled"] += 1
+            return 0.0
+
+        signal_day = calendar[calendar.searchsorted(day) - 1]
+        refreshed = signal_day in refresh_days or (current_set is None and signal_day in days)
+        if refreshed:
+            cross = held.xs(signal_day, level="datetime").dropna()
+            priced = cross.index.intersection(closes.columns[closes.loc[day].notna()])
+            cross = cross.reindex(priced)
+            chosen = set(cross.nlargest(topk).index)
+            if chosen:
+                pending = {}
+                marks = price_row.reindex(units.index).fillna(closes.loc[day].reindex(units.index))
+                book_value = cash + float((units * marks).sum())
+                target = book_value / len(chosen)
+                for inst in sorted(set(units.index) - chosen):  # leavers: sell everything
+                    tally["orders"] += 1
+                    if not sell(inst, float(units[inst])):
+                        pending[inst] = -float(units.get(inst, 0.0))
+                for inst in sorted(chosen & set(units.index)):  # kept names: trim when far above target
+                    now = float(units[inst] * marks[inst])
+                    if now > target * (1 + REBALANCE_BAND):
+                        tally["orders"] += 1
+                        excess_units = (now - target) / float(marks[inst])
+                        if not sell(inst, excess_units):
+                            pending[inst] = -excess_units
+                wants = {}
+                for inst in sorted(chosen):
+                    now = float(units.get(inst, 0.0)) * float(marks.get(inst, np.nan)) if inst in units.index else 0.0
+                    if inst not in units.index or now < target * (1 - REBALANCE_BAND):
+                        wants[inst] = target - now
+                for inst, want in wants.items():
+                    tally["orders"] += 1
+                    left = buy(inst, want)
+                    if left > 0:
+                        pending[inst] = left
+                current_set = chosen
+                blocks.append({"date": str(day.date()), "names": len(chosen)})
+        elif pending:
+            for inst, amount in list(pending.items()):
+                if amount < 0:
+                    if sell(inst, -amount):
+                        pending.pop(inst)
+                else:
+                    left = buy(inst, amount)
+                    if left > 0:
+                        pending[inst] = left
+                    else:
+                        pending.pop(inst)
+
+        marks_close = closes.loc[day].reindex(units.index)
+        value = cash + float((units * marks_close.fillna(0.0)).sum())
+        gross = value + cost_today - value_prev
+        rows.append({"date": day, "return": gross / value_prev if value_prev else 0.0, "cost": cost_today / value_prev if value_prev else 0.0,
+                     "bench": float(bench_ret.loc[day]), "turnover": turnover_value / 2 / value_prev if value_prev else 0.0, "account": value})
+        value_prev, previous_day = value, day
+
+    report = pd.DataFrame(rows).set_index("date")
+    last = closes.loc[previous_day] if previous_day is not None else pd.Series(dtype=float)
+    positions = [{"instrument": str(inst), "amount": float(u), "price": float(last[inst]), "value": float(u * last[inst]), "weight": float(u * last[inst] / value_prev)}
+                 for inst, u in units.items() if pd.notna(last.get(inst))]
+    positions.sort(key=lambda r: -r["value"])
+    holdings = {"positions": positions, "cash": float(cash), "total": float(value_prev), "as_of": str(previous_day.date()) if previous_day is not None else None, "fills": tally}
+    names_seen = set(invested) | set(returned)
+    instruments = sorted(({"instrument": inst, "pnl": float(returned.get(inst, 0.0) - invested.get(inst, 0.0) + (float(units[inst] * last[inst]) if inst in units.index and pd.notna(last.get(inst)) else 0.0)),
+                           "held": inst in units.index, "trades": sum(1 for t in trades if t["instrument"] == inst),
+                           "holding_value": float(units[inst] * last[inst]) if inst in units.index and pd.notna(last.get(inst)) else 0.0}
+                          for inst in names_seen), key=lambda r: -r["pnl"])
     return report, trades, holdings, instruments, blocks
 
 
@@ -1169,7 +1403,8 @@ def run(config):
                   "notes": prepared["notes"],
                   "method": ("Equal-weight book: top names at equal weight on the day after each signal refresh, drifting in between; "
                              + ("buys at the open, sells at the close; " if config.get("execution") == "open" else "")
-                             + "no lot sizes or price limits. " if config.get("book", "equal") == "equal" else "Qlib TopkDropout book. ")
+                             + ("A-share fills: 100-share lots, minimum fee per order, no buying at the up-limit or selling at the down-limit, suspended names untradable, real cash. "
+                                if config.get("fills") == "real" else "no lot sizes or price limits. ") if config.get("book", "equal") == "equal" else "Qlib TopkDropout book. ")
                             + "Net-of-cost compounded returns; 252 trading days; Sharpe risk-free rate = 0. Previous-day signals, close execution."})
 
 
