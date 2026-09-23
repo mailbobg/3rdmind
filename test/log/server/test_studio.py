@@ -2911,6 +2911,11 @@ def quantdb_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                                        row("2024-12-30", "SH600004", notice_date="2024-12-30", change_direction="增持", relation="配偶", change_reason="竞价交易", changer="b", change_shares=100),
                                        row("2024-12-30", "SH600004", notice_date="2024-12-30", change_direction="减持", relation="本人", change_reason="竞价交易", changer="c", change_shares=100)]),
               done=["20241230"], source="ftshare")
+    # a buyback plan announced 01-02 (visible from 01-03) and a repeat on 01-06 that must not restart the count
+    db.upsert("cn.repurchase", pd.concat([row("2025-01-02", "SH600000", ann_date=20250102, proc="预案", amount=1e7),
+                                          row("2025-01-06", "SH600000", ann_date=20250106, proc="预案", amount=1e7),
+                                          row("2025-01-02", "SH600004", ann_date=20250102, proc="完成", amount=1e7)]),
+              done=["20241230"], source="tushare")
     return db
 
 
@@ -2939,6 +2944,8 @@ def test_extra_fields_attach_point_in_time(quantdb_store) -> None:
     assert first["$unlock_30d"] == 1000 and joined.loc[(days[2], "SH600000"), "$unlock_30d"] == 1500 and joined.loc[(days[0], "SH600004"), "$unlock_30d"] == 0
     assert pd.isna(first["$insider_buy_days"]) and second["$insider_buy_days"] == 0 and joined.loc[(days[2], "SH600000"), "$insider_buy_days"] == 3
     assert joined.loc[:, "$insider_buy_days"].xs("SH600004", level="instrument").isna().all() and "$insider_buy_days" in note
+    assert pd.isna(first["$buyback_plan_days"]) and second["$buyback_plan_days"] == 0 and joined.loc[(days[2], "SH600000"), "$buyback_plan_days"] == 3
+    assert joined.loc[:, "$buyback_plan_days"].xs("SH600004", level="instrument").isna().all() and "$buyback_plan_days" in note  # 完成 is not a plan
     # a foreign universe gets the columns but nothing in them; a missing store attaches nothing
     us = pd.DataFrame({"$close": 1.0}, index=pd.MultiIndex.from_product([days, ["AAPL"]], names=["datetime", "instrument"]))
     assert studio_fields.attach(us)[0]["$turnover"].isna().all()

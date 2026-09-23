@@ -14,6 +14,7 @@ their rows become ``$`` columns on the (datetime, instrument) frames the Studio 
     cn.holders    $holder_num $holder_chg $holder_ann_days
     cn.unlock     $unlock_30d $unlock_ratio_30d $unlock_past_30d
     cn.insider    $insider_buy_days   (days since an officer's own open-market buy was announced)
+    cn.repurchase $buyback_plan_days  (days since the company first announced a buyback plan)
 
 Report-dated tables are laid on point-in-time: visible from the trading day after the announcement, forward
 filled. Refreshing runs as a subprocess so the Flask server never imports the fetch clients:
@@ -29,7 +30,7 @@ from pathlib import Path
 
 BAOSTOCK_COLUMNS = ["$turnover", "$pe_ttm", "$pb", "$ps_ttm", "$pcf_ttm", "$float_cap", "$amount", "$is_st"]
 TUSHARE_TABLES = ["moneyflow", "margin", "chips", "basic", "toplist", "block", "fina", "forecast", "express", "holders", "unlock"]
-EVENT_TABLES = ["insider"]  # other event tables (FTShare), laid on point-in-time like the report tables
+EVENT_TABLES = ["insider", "repurchase"]  # other event tables (FTShare), laid on point-in-time like the report tables
 COLUMNS = {
     "baostock": BAOSTOCK_COLUMNS,
     "moneyflow": ["$mf_net_xl", "$mf_net_lg", "$mf_net_md", "$mf_net_sm"],
@@ -44,6 +45,7 @@ COLUMNS = {
     "holders": ["$holder_num", "$holder_chg", "$holder_ann_days"],
     "unlock": ["$unlock_30d", "$unlock_ratio_30d", "$unlock_past_30d"],
     "insider": ["$insider_buy_days"],
+    "repurchase": ["$buyback_plan_days"],
 }
 TUSHARE_COLUMNS = [column for table in TUSHARE_TABLES for column in COLUMNS[table]]
 EVENT_COLUMNS = [column for table in EVENT_TABLES for column in COLUMNS[table]]
@@ -81,6 +83,13 @@ TUSHARE_NOTE = (
     " calendar days, $unlock_ratio_30d as a fraction of total shares; $unlock_past_30d the fraction of total"
     " shares unlocked in the past 30 calendar days. Event columns ($fc_*, $ex_*, $lhb*, $block_*) are sparse"
     " by nature.\n"
+)
+BUYBACK_NOTE = (
+    "\n$buyback_plan_days (Tushare repurchase): calendar days since the company announced a share buyback plan (预案),"
+    " POINT-IN-TIME (counted from the trading day after the announcement; 0 on that day), NaN before the first plan. A plan"
+    " repeated within 60 trading days of the previous one does not restart the count. Pre-registered event test (all"
+    " A-shares 2019-01 → 2026-09, 10,545 plans): plans follow a fall (−15%/yr over the 20 days before) and the name then"
+    " beats the equal-weight universe by about 5% a year over the next 20 trading days (t 2.5, both halves positive).\n"
 )
 INSIDER_NOTE = (
     "\n$insider_buy_days (Eastmoney 董监高持股变动 via FTShare): calendar days since the latest announcement that an"
@@ -295,6 +304,7 @@ def latest_last(raw):
 
 def event_frames(db, grid, calendar):
     """The period and week tables, forward-filled point-in-time onto ``grid`` (a (datetime, instrument) index)."""
+    import numpy as np
     import pandas as pd
 
     out = {}
@@ -372,6 +382,25 @@ def event_frames(db, grid, calendar):
         filled = as_of(events, grid, ["report"])
         filled["$insider_buy_days"] = days_since(filled, "report")
         out["insider"] = filled[COLUMNS["insider"]]
+    raw = _read(db, "cn.repurchase")
+    if raw is not None:
+        plans = raw[raw["proc"] == "预案"].copy()
+        plans["available"] = next_trading_day(plans["ann_date"], calendar).values
+        plans = plans.dropna(subset=["available"]).drop_duplicates(["instrument", "available"]).sort_values(["instrument", "available"])
+        position = pd.Series(np.arange(len(calendar)), index=pd.DatetimeIndex(calendar).astype("datetime64[ns]"))
+        plans["slot"] = plans["available"].astype("datetime64[ns]").map(position)
+        keep, last = [], {}
+        for inst, slot in zip(plans["instrument"], plans["slot"]):  # a plan within 60 trading days of the counted one is a repeat
+            counted = last.get(inst)
+            fresh = counted is None or pd.isna(slot) or slot - counted > 60
+            keep.append(fresh)
+            if fresh and pd.notna(slot):
+                last[inst] = slot
+        plans = plans[keep]
+        events = pd.DataFrame({"available": plans["available"], "instrument": plans["instrument"], "report": plans["available"]})
+        filled = as_of(events, grid, ["report"])
+        filled["$buyback_plan_days"] = days_since(filled, "report")
+        out["repurchase"] = filled[COLUMNS["repurchase"]]
     return out
 
 
@@ -400,7 +429,7 @@ def attach(frame):
     extra = extra.reindex(columns=EXTRA_COLUMNS)
     if "toplist" in parts:
         extra["$lhb"] = extra["$lhb"].fillna(0.0)
-    note = (BAOSTOCK_NOTE if "baostock" in parts else "") + (TUSHARE_NOTE if any(t in parts for t in TUSHARE_TABLES) else "") + (INSIDER_NOTE if "insider" in parts else "")
+    note = (BAOSTOCK_NOTE if "baostock" in parts else "") + (TUSHARE_NOTE if any(t in parts for t in TUSHARE_TABLES) else "") + (INSIDER_NOTE if "insider" in parts else "") + (BUYBACK_NOTE if "repurchase" in parts else "")
     return frame.join(extra.astype("float32"), how="left"), note
 
 

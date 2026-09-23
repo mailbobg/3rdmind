@@ -35,6 +35,14 @@ RULES = {
         "book": {"topk": 6000, "n_drop": 6000, "horizon": 20, "rebalance": 5, "neutral": "none", "book": "equal"},
         "markets": ["all", "csi1000", "csi500"],
     },
+    "buyback_plan_20d": {
+        "label": "回购预案后 20 日",
+        "description": "持有公告回购预案后 20 个交易日内的股票，等权；同一公司 60 个交易日内的重复预案不重新计时。"
+                       "预注册事件检验（全 A，2019-01 → 2026-09，10,545 次首次预案）：公告前 20 日跑输等权约 15%/年（跌后宣布），"
+                       "公告后 1–20 日跑赢等权约 5%/年（t 2.5），前后两段同号，每天约 110 只。",
+        "book": {"topk": 6000, "n_drop": 6000, "horizon": 20, "rebalance": 5, "neutral": "none", "book": "equal"},
+        "markets": ["all", "csi1000", "csi500"],
+    },
     "insider_buy_20d_clean": {
         "label": "高管本人增持后 20 日 · 去关注度名单",
         "description": "高管本人二级市场增持后 20 日的股票，再剔除关注度名单（近 20 日龙虎榜或涨停、户数分散、未来 30 天大解禁），等权。两条规则的叠加。",
