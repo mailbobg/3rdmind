@@ -1,0 +1,8 @@
+{
+  "note": "Strategies under forward (out-of-sample) tracking, with the day tracking began. Exit rules are fixed in advance and never tuned: see scripts/forward_report.py.",
+  "strategies": {
+    "f70cd6ff-90ce-4bc3-8f78-2334563f4da2": {"label": "关注度回避", "from": "2026-09-18"},
+    "1ba1e230-1cad-49e2-b5b4-67e827faa564": {"label": "高管本人增持", "from": "2026-09-18"},
+    "3c380756-a629-4c89-9f3e-c8110f7024b3": {"label": "高管本人增持 · 去关注度", "from": "2026-09-18"}
+  }
+}
