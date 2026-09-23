@@ -5,7 +5,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import rdagent.log.server.app as server
+# The Studio's daily data sync replaces the live Qlib directory; it must never start from a test process.
+os.environ["STUDIO_NO_SCHEDULER"] = "1"
+
+import rdagent.log.server.app as server  # noqa: E402
 from rdagent.core.experiment import Experiment, FBWorkspace, Task
 from rdagent.log.server import studio as studio_module
 from rdagent.log.server.studio_worker import (
@@ -165,6 +168,7 @@ def studio_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(studio_module, "LATEST_DATA", trace_folder / "studio_data" / "daily_pv_latest.h5")
     monkeypatch.setattr(studio_module, "WORKSPACE_ROOT", workspace_root)
     monkeypatch.setattr(studio_module.studio_llm, "_settings_path", trace_folder / "studio_data" / "llm.json")
+    monkeypatch.setattr(studio_module.studio_sync, "_settings_path", trace_folder / "studio_data" / "sync.json")
     monkeypatch.setattr(studio_module.subprocess, "Popen", lambda *a, **k: type("P", (), {"poll": lambda self: None})())
     server.rdagent_processes.clear()
     studio_module.studio_jobs.reset()
@@ -3030,6 +3034,14 @@ def test_report_run_without_factors_carries_a_note(studio_client) -> None:
     assert summary["rounds"] == 1 and "没有被识别为量化因子研报" in summary["note"]
     full = ws._obj_to_json(obj={"a.pdf": {"f1": {}, "f2": {}}}, tag="Loop_0.direct_exp_gen.file_to_factor_result", id="x", timestamp="t")
     assert full["msg"]["content"] == {"files": 1, "factors": 2}
+
+
+@pytest.mark.offline
+def test_the_sync_scheduler_never_starts_in_tests() -> None:
+    from rdagent.log.server import studio_sync
+
+    assert os.environ.get("STUDIO_NO_SCHEDULER") == "1" and studio_sync._scheduler_started is False
+    assert not any(t.name == "studio-data-sync" for t in __import__("threading").enumerate())
 
 
 @pytest.mark.offline

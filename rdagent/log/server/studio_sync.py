@@ -40,11 +40,17 @@ _fields_pending = False
 
 def configure(settings_path: Path, busy_check, daily_fields=None):
     """Called once from the blueprint: where to keep sync.json, how to tell whether workers are running, and
-    what to run once a day after the prices are current (the extra-field refresh)."""
+    what to run once a day after the prices are current (the extra-field refresh).
+
+    The daily scheduler replaces the live data directory, so it starts only in a real server: STUDIO_NO_SCHEDULER=1
+    (set by the test suite before it imports the app) keeps it off. Before this guard, a test run after the
+    configured hour started a real sync from the test process (2026-09-23)."""
     global _settings_path, _busy_check, _scheduler_started, _daily_fields
     _settings_path = settings_path
     _busy_check = busy_check
     _daily_fields = daily_fields
+    if os.environ.get("STUDIO_NO_SCHEDULER") == "1":
+        return
     if not _scheduler_started:
         _scheduler_started = True
         threading.Thread(target=_scheduler, name="studio-data-sync", daemon=True).start()
