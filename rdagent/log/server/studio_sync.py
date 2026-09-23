@@ -207,7 +207,7 @@ def _find_data_root(extracted: Path) -> Path:
     raise RuntimeError("Archive does not contain a Qlib data directory (no calendars/day.txt)")
 
 
-PRICE_TABLES = ("cn.daily", "cn.adj_factor", "cn.stock_basic", "cn.index_members")
+PRICE_TABLES = ("cn.daily", "cn.adj_factor", "cn.stock_basic", "cn.index_members", "cn.index_daily")
 EXPORT_START = os.environ.get("QLIB_EXPORT_START", "2019-01-01")
 
 

@@ -2283,7 +2283,8 @@ def test_sync_from_quantdb_refreshes_then_exports(studio_client, tmp_path: Path,
         __import__("time").sleep(0.02)
     state = studio_sync.status()
     assert state["sync"]["phase"] == "done" and state["local"]["calendar_end"] == "2026-09-22" and state["local"]["release"] == "quantdb 2026-09-22"
-    assert [c[4] for c in calls[:4]] == list(studio_sync.PRICE_TABLES) and calls[4][3:5] == ["export-qlib", str(provider)]
+    n = len(studio_sync.PRICE_TABLES)
+    assert [c[4] for c in calls[:n]] == list(studio_sync.PRICE_TABLES) and calls[n][3:5] == ["export-qlib", str(provider)]
     assert studio_client.put("/studio/data/sync/settings", json={"source": "nowhere"}).status_code == 400
 
 
