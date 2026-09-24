@@ -3068,6 +3068,36 @@ def test_the_sync_scheduler_never_starts_in_tests() -> None:
 
 
 @pytest.mark.offline
+def test_daily_refresh_brings_the_tracked_strategies_to_the_latest_day(studio_client, quantdb_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the daily field refresh rebuilds the exports, every strategy in tracked.json gets an update job, so the
+    signal export shows tomorrow's target holdings without a click. Unknown ids are skipped, not fatal."""
+    evidence = studio_module.ROOT / "33333333-3333-3333-3333-333333333333"
+    evidence.mkdir(parents=True)
+    studio_module.write_json(evidence / "config.json", {"start": "2025-01-02", "end": "2025-06-30", "factors": [{"name": "STR_5"}]})
+    studio_module.write_json(evidence / "result.json", {"status": "completed", "metrics": {"total_return": 0.05, "sharpe": 0.5, "max_drawdown": -0.1}})
+    body = {"name": "跟踪中", "factors": [{"name": "STR_5", "weight": 1, "trace": "Finance Data Building/demo", "loop_id": 0}], "model": {"method": "rank"},
+            "params": {"market": "csi300", "benchmark": "SH000300", "topk": 10, "n_drop": 2, "account": 1000000, "open_cost": 0.0005, "close_cost": 0.0015},
+            "evidence": {"backtest_id": "33333333-3333-3333-3333-333333333333", "start": "2025-01-02", "end": "2025-06-30"}}
+    sid = studio_client.post("/studio/strategies", json=body).get_json()["id"]
+    tracked = tmp_path / "tracked.json"
+    tracked.write_text(json.dumps({"strategies": {sid: {"label": "跟踪中", "from": "2025-07-01"}, "00000000-0000-0000-0000-000000000000": {"label": "已删除", "from": "2025-07-01"}}}))
+    monkeypatch.setattr(studio_module, "TRACKED_STRATEGIES", tracked)
+    monkeypatch.setattr(studio_module, "run_refresh", lambda *a, **k: None)
+    launched = []
+    monkeypatch.setattr(studio_module, "launch_backtest", lambda config: launched.append(config) or "44444444-4444-4444-4444-444444444444")
+    (tmp_path / "ws" / "f0" / "factor.py").write_text("print(1)")
+    monkeypatch.setattr(studio_module, "workers_busy", lambda app: False)
+    monkeypatch.setattr(studio_module.subprocess, "Popen", fake_popen([], {"status": "completed", "planned": 1, "done": 1, "failed": [], "failed_count": 0}))
+    job = studio_module.start_extra_job(studio_client.application, ["csi300"], ["tushare"])
+    result = wait_job(studio_client, job["id"])
+    assert result["status"] == "completed" and result["result"]["strategies_updated"] == [sid] and result["result"]["strategies_missing"] == ["00000000-0000-0000-0000-000000000000"]
+    update = next(j for j in studio_client.get("/studio/jobs?region=cn").get_json()["items"] if j["kind"] == "strategy_update")
+    assert wait_job(studio_client, update["id"])["status"] == "completed" and launched and launched[0]["start"] == "2025-01-02"
+    detail = studio_client.get(f"/studio/strategies/{sid}").get_json()
+    assert [r["kind"] for r in detail["run_details"]] == ["evidence", "update"]
+
+
+@pytest.mark.offline
 def test_quantdb_home_setting(studio_client, quantdb_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from rdagent.log.server import studio_fields
 

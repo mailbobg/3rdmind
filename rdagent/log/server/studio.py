@@ -1882,20 +1882,27 @@ def strategy_item(strategy_id):
     return jsonify(strategy_view(save_strategy(updated)))
 
 
-@studio.post("/strategies/<strategy_id>/update")
-def strategy_update(strategy_id):
-    """更新到最新: recompute every member factor on the latest data, then backtest the strategy from its evidence
-    start (or the given start) to the last day of market data, and append the run to its history. Runs as a
-    job; the response names it and the job's result carries backtest_id, refreshed, failures, start, end."""
+TRACKED_STRATEGIES = Path(__file__).resolve().parents[3] / "docs" / "research" / "forward" / "tracked.json"
+
+
+def tracked_strategy_ids():
+    """The strategies under forward tracking (docs/research/forward/tracked.json), in file order."""
     try:
-        strategy = load_strategy(strategy_id)
-    except (ValueError, FileNotFoundError):
-        return jsonify({"error": "Strategy not found"}), 404
-    body = request.get_json() or {}
+        return list((json.loads(TRACKED_STRATEGIES.read_text()).get("strategies") or {}).keys())
+    except (OSError, ValueError):
+        return []
+
+
+def start_strategy_update(app, strategy_id, refresh=True, start=None, end=None):
+    """更新到最新 as a job: recompute every member factor on the latest data, then backtest the strategy from its
+    evidence start (or ``start``) to the last day of market data (or ``end``), appending the run to its history.
+    Returns the job, or the one already running for this strategy."""
+    app = getattr(app, "_get_current_object", lambda: app)()
+    strategy = load_strategy(strategy_id)
     existing = studio_jobs.find("strategy_update", id=strategy_id)
     if existing:
-        return jsonify({"job": existing["id"]}), 202
-    members = [f for f in strategy["factors"] if f.get("kind", "factor") in ("factor", "rule")] if body.get("refresh", True) else []
+        return existing
+    members = [f for f in strategy["factors"] if f.get("kind", "factor") in ("factor", "rule")] if refresh else []
     market = str((strategy.get("params") or {}).get("market") or "csi300")
 
     def work(job):
@@ -1919,23 +1926,33 @@ def strategy_update(strategy_id):
             except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                 failures.append(f"{f['name']}: {error}")
         studio_jobs.update(job["id"], done=len(members), total=len(members) + 1, message="启动跟踪回测")
-        end = str(body.get("end") or "")
-        if not end:
+        last = str(end or "")
+        if not last:
             calendar = Path(studio_markets.universe(market)["provider_uri"]) / "calendars" / "day.txt"
-            end = calendar.read_text().strip().splitlines()[-1]
-        start = str(body.get("start") or (strategy.get("evidence") or {}).get("start") or "")
-        if not start:
+            last = calendar.read_text().strip().splitlines()[-1]
+        first = str(start or (strategy.get("evidence") or {}).get("start") or "")
+        if not first:
             raise ValueError("No start date: pass one or save the strategy with its evidence window")
-        request_body = {"factors": strategy["factors"], "model": strategy["model"], **strategy["params"], "start": start, "end": end}
+        request_body = {"factors": strategy["factors"], "model": strategy["model"], **strategy["params"], "start": first, "end": last}
         config = prepare_backtest_config(request_body)
         backtest_id = launch_backtest(config)
         current = load_strategy(strategy_id)
         current.setdefault("runs", []).append({"backtest_id": backtest_id, "kind": "update"})
         save_strategy(current)
-        return {"backtest_id": backtest_id, "refreshed": refreshed, "failures": failures, "start": start, "end": end}
+        return {"backtest_id": backtest_id, "refreshed": refreshed, "failures": failures, "start": first, "end": last}
 
-    job = studio_jobs.run("strategy_update", f"更新策略 {strategy.get('name') or strategy_id[:8]}", in_app(work), market=market,
-                          link={"page": "strategies", "id": strategy_id}, total=len(members) + 1)
+    return studio_jobs.run("strategy_update", f"更新策略 {strategy.get('name') or strategy_id[:8]}", in_app(work, app), market=market,
+                           link={"page": "strategies", "id": strategy_id}, total=len(members) + 1)
+
+
+@studio.post("/strategies/<strategy_id>/update")
+def strategy_update(strategy_id):
+    """更新到最新, by hand from the strategy page; see start_strategy_update."""
+    body = request.get_json() or {}
+    try:
+        job = start_strategy_update(current_app, strategy_id, refresh=body.get("refresh", True), start=body.get("start"), end=body.get("end"))
+    except (ValueError, FileNotFoundError):
+        return jsonify({"error": "Strategy not found"}), 404
     return jsonify({"job": job["id"]}), 202
 
 
@@ -2239,7 +2256,16 @@ def run_extra_fetch(job, markets, sources=("baostock",)):
         for key in ("planned", "done", "failed_count"):
             totals[key] += int(status.get(key) or 0)
         totals["failed"] = (totals["failed"] + list(status.get("failed") or []))[:20]
-    return {**totals, "rebuilt": rebuild_exports(job, markets, start)}
+    rebuilt = rebuild_exports(job, markets, start)
+    # The tracked strategies follow: their newest run is what the signal export hands to tomorrow's open.
+    updated, skipped = [], []
+    for strategy_id in tracked_strategy_ids():
+        try:
+            start_strategy_update(current_app, strategy_id)
+            updated.append(strategy_id)
+        except (ValueError, FileNotFoundError):
+            skipped.append(strategy_id)
+    return {**totals, "rebuilt": rebuilt, "strategies_updated": updated, "strategies_missing": skipped}
 
 
 def relay_fetch(job, command):
