@@ -1976,9 +1976,13 @@ def signal_export(strategy):
         holdings = result.get("holdings") or {}
         signal = result.get("latest_signal") or {}
         rows = []
+        whole = config.get("fills") == "real"  # a real-fill book holds whole shares; adjustment drift is rounded away
         for row in holdings.get("positions", []):
+            amount = row.get("amount")
+            if whole and amount is not None:
+                amount = float(round(amount))
             rows.append({"date": signal.get("date") or config.get("end"), "type": "holding", "instrument": row["instrument"], "weight": row.get("weight"),
-                         "amount": row.get("amount"), "price": row.get("price"), "value": row.get("value"), "score": None, "rank": None})
+                         "amount": amount, "price": row.get("price"), "value": row.get("value"), "score": None, "rank": None})
         held = {row["instrument"] for row in holdings.get("positions", [])}
         for row in signal.get("scores", []):
             rows.append({"date": signal.get("date"), "type": "score", "instrument": row["instrument"], "weight": None, "amount": None, "price": None,
