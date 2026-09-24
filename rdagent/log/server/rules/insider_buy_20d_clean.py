@@ -44,7 +44,9 @@ def main():
     flagged = attention(df).reindex(df.index).fillna(False).astype(bool)
     days = df["$insider_buy_days"]
     held = (days >= 0) & (days <= WINDOW) & df["$close"].notna() & ~flagged
-    score = pd.Series(np.where(held, 1.0, np.nan), index=df.index, name="insider_buy_20d_clean")
+    # The score carries freshness (2 on the first tradable day, falling to 1 at the window's end): the book buys
+    # in score order, so a cash-constrained account fills the newest announcements first, where the effect is strongest.
+    score = pd.Series(np.where(held, 2.0 - days / WINDOW, np.nan), index=df.index, name="insider_buy_20d_clean")
     score.to_frame().to_hdf("result.h5", key="data")
 
 

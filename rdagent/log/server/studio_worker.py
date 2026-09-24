@@ -1018,7 +1018,9 @@ def real_book(score, config):
                         if not sell(inst, excess_units):
                             pending[inst] = -excess_units
                 wants = {}
-                for inst in sorted(chosen):
+                # Buy in score order (a rule's score carries the signal's freshness), so when cash runs out it is the
+                # weakest names that go unbought rather than whichever sort last by code.
+                for inst in sorted(chosen, key=lambda i: (-float(cross.get(i, 0.0)), i)):
                     now = float(units.get(inst, 0.0)) * float(marks.get(inst, np.nan)) if inst in units.index else 0.0
                     if inst not in units.index or now < target * (1 - REBALANCE_BAND):
                         wants[inst] = target - now

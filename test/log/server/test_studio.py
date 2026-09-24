@@ -1886,7 +1886,7 @@ def test_insider_rule_holds_the_window_after_a_buy(tmp_path: Path, monkeypatch: 
     assert subprocess.run([sys.executable, str(studio_rules.rule_file("insider_buy_20d"))], cwd=tmp_path, capture_output=True, text=True).returncode == 0
     score = pd.read_hdf(tmp_path / "result.h5")["insider_buy_20d"]
     held = score.xs("SH600000", level="instrument")
-    assert pd.isna(held.iloc[4]) and held.iloc[5] == 1.0 and held.loc[days[5] + pd.Timedelta(days=27)] == 1.0
+    assert pd.isna(held.iloc[4]) and held.iloc[5] == 2.0 and held.loc[days[5] + pd.Timedelta(days=27)] == pytest.approx(1.0)  # freshest scores highest
     assert pd.isna(held.loc[days[5] + pd.Timedelta(days=28):].iloc[0]) and score.xs("SH600004", level="instrument").isna().all()
     assert "insider_buy_20d" in studio_rules.RULES and "all" in studio_rules.RULES["insider_buy_20d"]["markets"]
 
@@ -1951,6 +1951,21 @@ def test_real_book_fills_like_an_a_share_account(monkeypatch: pytest.MonkeyPatch
     assert {p["instrument"] for p in holdings["positions"]} == {"SH600000", "SH600005"}
     # the report stays in Qlib's shape: gross return and cost separate; the day's cost is the two fee floors over the start value
     assert report.loc[days[1], "cost"] == pytest.approx(5 / 15000) and len(report) == 5
+
+
+@pytest.mark.offline
+def test_real_book_spends_scarce_cash_on_the_highest_scores_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rdagent.log.server.studio_worker import equal_book
+
+    days = pd.bdate_range("2025-01-01", periods=4)
+    names = ["SH600000", "SZ300001"]  # alphabetical order would buy SH600000 first
+    closes = pd.DataFrame({n: [10.0] * 4 for n in names}, index=days)
+    _fake_market(monkeypatch, closes)
+    score = pd.Series([1.0, 2.0] * 4, index=pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"]))
+    config = {"start": str(days[1].date()), "end": str(days[-1].date()), "topk": 2, "rebalance": 20, "account": 2000.0,  # one lot plus fee, not two
+              "open_cost": 0.0005, "close_cost": 0.0015, "min_cost": 5, "execution": "close", "fills": "real", "limit_threshold": 0.095}
+    _, trades, holdings, _, _ = equal_book(score, config)
+    assert [t["instrument"] for t in trades if t["direction"] == "buy"] == ["SZ300001"] and holdings["fills"]["cash_short"] >= 1
 
 
 @pytest.mark.offline

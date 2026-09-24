@@ -6,7 +6,7 @@ beats the equal-weight universe by about 11% a year over the next 20 trading day
 2023-01 → 2026-09, 8,379 announcements, t 4.3, both halves positive, about 80 names a day). Large buys and
 buys by relatives or controlled entities do not carry the effect, and sells carry nothing.
 
-The rule scores a name 1.0 on the trading days that fall within WINDOW calendar days (about 20 trading days) of
+The rule scores a name 2→1 (newest first) on the trading days that fall within WINDOW calendar days (about 20 trading days) of
 the first tradable day after such an announcement, NaN otherwise; an equal-weight book with the position count
 set to the whole universe holds all of them.
 """
@@ -24,7 +24,9 @@ def main():
         raise ValueError("daily_pv.h5 has no $insider_buy_days column: refresh the extra fields first")
     days = df["$insider_buy_days"]
     held = (days >= 0) & (days <= WINDOW) & df["$close"].notna()
-    score = pd.Series(np.where(held, 1.0, np.nan), index=df.index, name="insider_buy_20d")
+    # The score carries freshness (2 on the first tradable day, falling to 1 at the window's end): the book buys
+    # in score order, so a cash-constrained account fills the newest announcements first, where the effect is strongest.
+    score = pd.Series(np.where(held, 2.0 - days / WINDOW, np.nan), index=df.index, name="insider_buy_20d")
     score.to_frame().to_hdf("result.h5", key="data")
 
 
