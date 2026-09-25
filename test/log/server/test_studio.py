@@ -3135,6 +3135,23 @@ def test_report_run_without_factors_carries_a_note(studio_client) -> None:
 
 
 @pytest.mark.offline
+def test_the_sync_scheduler_stays_off_in_child_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A research run is a spawned child that re-imports the app: it must not run its own daily sync (on
+    2026-09-25 an orphaned child exported A-share prices into the US data directory)."""
+    import multiprocessing
+    from rdagent.log.server import studio_sync
+
+    saved = (studio_sync._settings_path, studio_sync._busy_check, studio_sync._daily_fields)
+    monkeypatch.delenv("STUDIO_NO_SCHEDULER", raising=False)
+    monkeypatch.setattr(multiprocessing, "current_process", lambda: type("P", (), {"name": "SpawnProcess-1"})())
+    monkeypatch.setattr(studio_sync.threading, "Thread", lambda *a, **k: pytest.fail("scheduler thread started in a child process"))
+    try:
+        studio_sync.configure(tmp_path / "sync.json", lambda: False)
+        assert studio_sync._scheduler_started is False
+    finally:
+        studio_sync._settings_path, studio_sync._busy_check, studio_sync._daily_fields = saved
+
+
 def test_the_sync_scheduler_never_starts_in_tests() -> None:
     from rdagent.log.server import studio_sync
 

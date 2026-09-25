@@ -51,6 +51,14 @@ def configure(settings_path: Path, busy_check, daily_fields=None):
     _daily_fields = daily_fields
     if os.environ.get("STUDIO_NO_SCHEDULER") == "1":
         return
+    # Research runs are multiprocessing children that re-import this app on start (spawn); they carry their run's
+    # QLIB_PROVIDER_URI, so a scheduler in one of them would export A-share prices into another region's data
+    # directory. That happened on 2026-09-25 from an orphaned child of a stopped backend. Only the server process
+    # schedules.
+    import multiprocessing
+
+    if multiprocessing.current_process().name != "MainProcess" or multiprocessing.parent_process() is not None:
+        return
     if not _scheduler_started:
         _scheduler_started = True
         threading.Thread(target=_scheduler, name="studio-data-sync", daemon=True).start()
