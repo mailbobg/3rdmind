@@ -2091,7 +2091,7 @@ def workers_busy(app):
 @studio.record_once
 def _configure_sync(state):
     app = state.app
-    studio_sync.configure(TRACE_ROOT / "studio_data" / "sync.json", lambda: workers_busy(app), daily_fields=lambda: start_extra_job(app, list(EXTRA_MARKETS), list(EXTRA_SOURCES)) is not None)
+    studio_sync.configure(TRACE_ROOT / "studio_data" / "sync.json", lambda: workers_busy(app), daily_fields=lambda: start_extra_job(app, list(EXTRA_MARKETS), list(DAILY_SOURCES)) is not None)
     studio_llm.configure(TRACE_ROOT / "studio_data" / "llm.json")
     from rdagent.log.server import studio_fields
 
@@ -2202,6 +2202,9 @@ def data_build_status():
 
 EXTRA_MARKETS = tuple(studio_markets.CN_ORDER)  # every A-share universe: its export carries the fields
 EXTRA_SOURCES = ("baostock", "tushare")
+# The daily chain fetches Tushare only: baostock walks every instrument one by one (16 hours for the whole market)
+# and its columns are covered by Tushare daily_basic; the baostock fetch stays available from the data sheet.
+DAILY_SOURCES = ("tushare",)
 
 
 def export_carries(column):
