@@ -1986,6 +1986,27 @@ def test_real_book_spends_scarce_cash_on_the_highest_scores_first(monkeypatch: p
 
 
 @pytest.mark.offline
+@pytest.mark.parametrize("fills", ["ideal", "real"])
+def test_books_go_to_cash_when_the_signal_empties(monkeypatch: pytest.MonkeyPatch, fills: str) -> None:
+    """A rule that is NaN everywhere between its windows (index additions, held nine days twice a year) must
+    leave the book in cash, not hold the last names until the next window."""
+    from rdagent.log.server.studio_worker import equal_book
+
+    days = pd.bdate_range("2025-01-01", periods=6)
+    names = ["SH600000", "SH600004"]
+    closes = pd.DataFrame({n: [10.0] * 6 for n in names}, index=days)
+    _fake_market(monkeypatch, closes)
+    score = pd.Series([1.0] * 6 + [float("nan")] * 6, index=pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"]))  # held on days 0-2
+    config = {"start": str(days[1].date()), "end": str(days[-1].date()), "topk": 2, "rebalance": 1, "account": 100000.0,
+              "open_cost": 0.0005, "close_cost": 0.0015, "min_cost": 5, "execution": "close", "fills": fills, "limit_threshold": 0.095}
+    _, trades, holdings, _, blocks = equal_book(score, config)
+    sells = [t for t in trades if t["direction"] == "sell"]
+    assert {t["instrument"] for t in sells} == set(names) and {t["date"] for t in sells} == {str(days[4].date())}  # day 3's empty signal is traded on day 4
+    assert holdings["positions"] == [] and holdings["total"] == pytest.approx(100000.0, rel=0.01)
+    assert [b["names"] for b in blocks][-2:] == [0, 0] or [b["names"] for b in blocks][-1] == 0
+
+
+@pytest.mark.offline
 def test_real_book_cannot_sell_at_the_down_limit_or_trade_a_suspended_name(monkeypatch: pytest.MonkeyPatch) -> None:
     from rdagent.log.server.studio_worker import equal_book
 

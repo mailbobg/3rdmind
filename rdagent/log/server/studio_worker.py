@@ -805,8 +805,8 @@ def equal_book(score, config, universe=None):
             priced = cross.index.intersection(closes.columns[closes.loc[day].notna()])
             cross = cross.reindex(priced)
             chosen = set(cross.index) if universe else set(cross.nlargest(topk).index)
-            if chosen and chosen != current_set:
-                target = pd.Series(value / len(chosen), index=sorted(chosen))
+            if chosen != current_set:  # an empty cross-section means cash: the book sells what it holds
+                target = pd.Series(value / len(chosen), index=sorted(chosen)) if chosen else pd.Series(dtype="float64")
                 merged = pd.concat([weights.rename("now"), target.rename("target")], axis=1).fillna(0.0)
                 delta = merged["target"] - merged["now"]
                 sold, bought = float(-delta[delta < 0].sum()), float(delta[delta > 0].sum())
@@ -1001,11 +1001,11 @@ def real_book(score, config):
             priced = cross.index.intersection(closes.columns[closes.loc[day].notna()])
             cross = cross.reindex(priced)
             chosen = set(cross.nlargest(topk).index)
-            if chosen:
+            if chosen or len(units):  # an empty cross-section means cash: the book sells what it holds
                 pending = {}
                 marks = price_row.reindex(units.index).fillna(closes.loc[day].reindex(units.index))
                 book_value = cash + float((units * marks).sum())
-                target = book_value / len(chosen)
+                target = book_value / len(chosen) if chosen else 0.0
                 for inst in sorted(set(units.index) - chosen):  # leavers: sell everything
                     tally["orders"] += 1
                     if not sell(inst, float(units[inst])):
