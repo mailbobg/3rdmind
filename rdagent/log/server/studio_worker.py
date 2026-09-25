@@ -522,6 +522,9 @@ def prepare(config):
     if config.get("feature_start"):
         feature_start = min(feature_start, pd.Timestamp(config["feature_start"]))
     frames = [load_factor_frame(f, feature_start, config["end"]) for f in factors]
+    # Each signal's own row span, NaN or not: a rule that is deliberately out of the market on a day still has
+    # a row for it, so coverage is judged on rows, not on non-NaN values (see combine()).
+    coverage = {frame.columns[0]: (frame.index.get_level_values("datetime").min(), frame.index.get_level_values("datetime").max()) for frame in frames}
     features = pd.concat(frames, axis=1).sort_index()
     if features.empty:
         raise ValueError("No factor observations for this date range")
@@ -559,7 +562,7 @@ def prepare(config):
             if not industry:
                 notes.append("行业中性未做：没有行业表（instrument_names.json），只做了规模中性")
     return {"calendar": calendar, "prior_day": prior[-1], "end_day": trading_day_on_or_before(calendar, config["end"]), "config": config, "notes": notes,
-            "factors": factors, "model": model, "ranks": ranks, "label": label, "size": size, "industry": industry}
+            "factors": factors, "model": model, "ranks": ranks, "coverage": coverage, "label": label, "size": size, "industry": industry}
 
 
 def members_only(frame, spans, calendar):
@@ -644,6 +647,19 @@ def combine(prepared, columns, weights, model, log=print):
     score = score.dropna().sort_index()
     if score.empty:
         raise ValueError("Selected factors have no complete observations")
+    coverage = prepared.get("coverage")
+    if coverage:
+        # Rows, not values: a sparse rule (index additions, held nine days twice a year) is NaN on most days and
+        # would otherwise be "stale" from its last window on. A signal whose file stops early is still caught.
+        import pandas as pd
+
+        prior, end = pd.Timestamp(prepared["prior_day"]), pd.Timestamp(prepared["end_day"])
+        short = [c for c in columns if coverage[c][0] > prior or coverage[c][1] < end]
+        if short:
+            spans = "；".join(f"{c} {coverage[c][0].date()} → {coverage[c][1].date()}" for c in short)
+            raise ValueError(f"信号 {'、'.join(short)} 没有覆盖到 {end.date()}：把它重算到最新（因子库 → 重算到最新），或把结束日改到它的最后一天之前。"
+                             f" Signal rows: {spans}; the backtest needs a row on the trading day before its start ({prior.date()}).")
+        return score, report
     try:
         require_signal_coverage(score.index.get_level_values("datetime"), prepared["prior_day"], prepared["end_day"])
     except ValueError as error:

@@ -954,6 +954,21 @@ def test_cross_universe_backtest_recomputes_the_factor_on_that_universe(studio_c
 
 
 @pytest.mark.offline
+def test_combine_judges_coverage_on_rows_for_sparse_signals() -> None:
+    """A rule that is NaN on most days (index additions) covers a day when its file has a row for it; a signal
+    whose file stops early is still rejected."""
+    from rdagent.log.server.studio_worker import combine
+
+    days = pd.bdate_range("2025-01-01", periods=5)
+    index = pd.MultiIndex.from_product([days, ["A", "B"]], names=["datetime", "instrument"])
+    ranks = pd.DataFrame({"rule": [1.0, 1.0, float("nan"), float("nan"), 0.5, 1.0, float("nan"), float("nan"), float("nan"), float("nan")]}, index=index)
+    prepared = {"ranks": ranks, "label": None, "prior_day": days[0], "end_day": days[-1], "calendar": days, "coverage": {"rule": (days[0], days[-1])}}
+    score, _ = combine(prepared, ["rule"], [1.0], {"method": "rank"}, log=lambda *_: None)
+    assert set(score.index.get_level_values("datetime").unique()) == {days[0], days[2]}  # only the scored days, cash elsewhere
+    with pytest.raises(ValueError, match="没有覆盖到"):
+        combine({**prepared, "coverage": {"rule": (days[0], days[-2])}}, ["rule"], [1.0], {"method": "rank"}, log=lambda *_: None)
+
+
 def test_signal_shortfall_names_the_short_signal() -> None:
     from rdagent.log.server.studio_worker import signal_shortfall
 
