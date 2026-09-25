@@ -15,6 +15,7 @@ their rows become ``$`` columns on the (datetime, instrument) frames the Studio 
     cn.unlock     $unlock_30d $unlock_ratio_30d $unlock_past_30d
     cn.insider    $insider_buy_days   (days since an officer's own open-market buy was announced)
     cn.repurchase $buyback_plan_days  (days since the company first announced a buyback plan)
+    cn.index_members $index_add_days (days since a net addition to CSI 300/500/1000 was announced)
 
 Report-dated tables are laid on point-in-time: visible from the trading day after the announcement, forward
 filled. Refreshing runs as a subprocess so the Flask server never imports the fetch clients:
@@ -31,6 +32,7 @@ from pathlib import Path
 BAOSTOCK_COLUMNS = ["$turnover", "$pe_ttm", "$pb", "$ps_ttm", "$pcf_ttm", "$float_cap", "$amount", "$is_st"]
 TUSHARE_TABLES = ["moneyflow", "margin", "chips", "basic", "toplist", "block", "fina", "forecast", "express", "holders", "unlock"]
 EVENT_TABLES = ["insider", "repurchase"]  # other event tables (FTShare), laid on point-in-time like the report tables
+DERIVED_TABLES = ["index_members"]  # kept current by the price sync; only derived into columns here
 COLUMNS = {
     "baostock": BAOSTOCK_COLUMNS,
     "moneyflow": ["$mf_net_xl", "$mf_net_lg", "$mf_net_md", "$mf_net_sm"],
@@ -46,11 +48,14 @@ COLUMNS = {
     "unlock": ["$unlock_30d", "$unlock_ratio_30d", "$unlock_past_30d"],
     "insider": ["$insider_buy_days"],
     "repurchase": ["$buyback_plan_days"],
+    "index_members": ["$index_add_days"],
 }
 TUSHARE_COLUMNS = [column for table in TUSHARE_TABLES for column in COLUMNS[table]]
-EVENT_COLUMNS = [column for table in EVENT_TABLES for column in COLUMNS[table]]
+EVENT_COLUMNS = [column for table in EVENT_TABLES + DERIVED_TABLES for column in COLUMNS[table]]
 EXTRA_COLUMNS = BAOSTOCK_COLUMNS + TUSHARE_COLUMNS + EVENT_COLUMNS
-TABLES = ["cn.baostock"] + [f"cn.{name}" for name in TUSHARE_TABLES + EVENT_TABLES]
+TABLES = ["cn.baostock"] + [f"cn.{name}" for name in TUSHARE_TABLES + EVENT_TABLES + DERIVED_TABLES]
+INDEX_CODES = ("000300.SH", "000905.SH", "000852.SH")
+ADDS_FILE = "index_adds.json"  # in the store root: {"YYYY-MM-DD announcement day": ["SH600000", ...]} for lists the store has not seen yet
 DAY_TABLES = {"cn.moneyflow", "cn.margin", "cn.chips", "cn.basic", "cn.toplist", "cn.block"}  # their end date is "data through"
 
 BAOSTOCK_NOTE = (
@@ -90,6 +95,15 @@ BUYBACK_NOTE = (
     " repeated within 60 trading days of the previous one does not restart the count. Pre-registered event test (all"
     " A-shares 2019-01 → 2026-09, 10,545 plans): plans follow a fall (−15%/yr over the 20 days before) and the name then"
     " beats the equal-weight universe by about 5% a year over the next 20 trading days (t 2.5, both halves positive).\n"
+)
+INDEX_ADD_NOTE = (
+    "\n$index_add_days (Tushare index_weight, month-end constituents): calendar days since it was announced that the name"
+    " enters the CSI 300 / 500 / 1000 family at the June or December review (a net addition: not a move between the three),"
+    " POINT-IN-TIME (counted from the trading day after the announcement Friday, 17 calendar days before the effective day;"
+    " 0 on that Monday, 11 on the second Friday when index funds trade the change), NaN otherwise. Pre-registered event test"
+    " (2019-06 → 2026-06, 15 reviews, 1,556 additions): from that Monday's close to the second Friday's close the name beats"
+    " the equal-weight universe by +1.8% per event (monthly t 3.0, both halves positive), most of it on the Friday itself;"
+    " after the effective day the excess fades. Upcoming lists can be entered by hand in QUANTDB_HOME/index_adds.json.\n"
 )
 INSIDER_NOTE = (
     "\n$insider_buy_days (Eastmoney 董监高持股变动 via FTShare): calendar days since the latest announcement that an"
@@ -396,12 +410,47 @@ def event_frames(db, grid, calendar):
             keep.append(fresh)
             if fresh and pd.notna(slot):
                 last[inst] = slot
-        plans = plans[keep]
+        plans = plans[np.array(keep, dtype=bool)]  # a boolean array: an empty list would select columns instead of rows
         events = pd.DataFrame({"available": plans["available"], "instrument": plans["instrument"], "report": plans["available"]})
         filled = as_of(events, grid, ["report"])
         filled["$buyback_plan_days"] = days_since(filled, "report")
         out["repurchase"] = filled[COLUMNS["repurchase"]]
+    adds = index_add_events(db, calendar)
+    if adds is not None:
+        filled = as_of(adds, grid, ["report"])
+        filled["$index_add_days"] = days_since(filled, "report")
+        out["index_members"] = filled[COLUMNS["index_members"]]
     return out
+
+
+def index_add_events(db, calendar):
+    """Net additions to the CSI 300/500/1000 family at the June and December reviews, dated by their announcement:
+    the review takes effect on the trading day after the month's second Friday and is announced two weeks before,
+    after the close of that Friday. Month-end constituents only show a review once it has happened, so lists that
+    are announced but not yet effective can be entered by hand in ``ADDS_FILE``. Announcements more than a few
+    days before ``calendar`` starts are dropped rather than pinned to its first day."""
+    import pandas as pd
+
+    events = []
+    if has(db, "cn.index_members"):
+        raw = db.read("cn.index_members", where="symbol IN ({})".format(", ".join(f"'{code}'" for code in INDEX_CODES)))
+        if not raw.empty:
+            members = raw.groupby(pd.to_datetime(raw["date"]).dt.to_period("M"))["con_code"].apply(set)
+            for month, now in members.items():
+                if month.month not in (6, 12) or (month - 1) not in members.index:
+                    continue
+                second_friday = pd.date_range(month.start_time, month.end_time, freq="W-FRI")[1]
+                events += [(second_friday - pd.Timedelta(days=14), code) for code in now - members[month - 1]]
+    path = Path(db.root) / ADDS_FILE
+    if path.is_file():
+        for day, codes in json.loads(path.read_text()).items():
+            events += [(pd.Timestamp(day), code) for code in codes]
+    if not events:
+        return None
+    frame = pd.DataFrame(events, columns=["announced", "instrument"])
+    frame = frame[frame["announced"] >= pd.Timestamp(calendar[0]) - pd.Timedelta(days=4)]
+    frame["available"] = next_trading_day(frame["announced"].dt.strftime("%Y%m%d"), calendar).values
+    return pd.DataFrame({"available": frame["available"], "instrument": frame["instrument"], "report": frame["available"]}).drop_duplicates()
 
 
 def attach(frame):
@@ -429,7 +478,7 @@ def attach(frame):
     extra = extra.reindex(columns=EXTRA_COLUMNS)
     if "toplist" in parts:
         extra["$lhb"] = extra["$lhb"].fillna(0.0)
-    note = (BAOSTOCK_NOTE if "baostock" in parts else "") + (TUSHARE_NOTE if any(t in parts for t in TUSHARE_TABLES) else "") + (INSIDER_NOTE if "insider" in parts else "") + (BUYBACK_NOTE if "repurchase" in parts else "")
+    note = (BAOSTOCK_NOTE if "baostock" in parts else "") + (TUSHARE_NOTE if any(t in parts for t in TUSHARE_TABLES) else "") + (INSIDER_NOTE if "insider" in parts else "") + (BUYBACK_NOTE if "repurchase" in parts else "") + (INDEX_ADD_NOTE if "index_members" in parts else "")
     return frame.join(extra.astype("float32"), how="left"), note
 
 

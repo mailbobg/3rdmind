@@ -1891,6 +1891,23 @@ def test_insider_rule_holds_the_window_after_a_buy(tmp_path: Path, monkeypatch: 
     assert "insider_buy_20d" in studio_rules.RULES and "all" in studio_rules.RULES["insider_buy_20d"]["markets"]
 
 
+@pytest.mark.offline
+def test_index_add_rule_holds_until_the_second_friday(tmp_path: Path) -> None:
+    import subprocess, sys
+    from rdagent.log.server import studio_rules
+
+    days = pd.bdate_range("2024-11-25", periods=30)
+    index = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
+    df = pd.DataFrame({"$close": 10.0, "$index_add_days": float("nan")}, index=index)
+    monday = pd.Timestamp("2024-12-02")
+    df.loc[(slice(None), "SH600000"), "$index_add_days"] = [(d - monday).days if d >= monday else float("nan") for d in days]
+    df.to_hdf(tmp_path / "daily_pv.h5", key="data")
+    assert subprocess.run([sys.executable, str(studio_rules.rule_file("index_add_window"))], cwd=tmp_path, capture_output=True, text=True).returncode == 0
+    score = pd.read_hdf(tmp_path / "result.h5")["index_add_window"].xs("SH600000", level="instrument")
+    assert pd.isna(score.loc["2024-11-29"]) and score.loc["2024-12-02"] == 1.0 and score.loc["2024-12-13"] == 1.0 and pd.isna(score.loc["2024-12-16"])
+    assert studio_rules.RULES["index_add_window"]["book"]["rebalance"] == 1
+
+
 def _fake_market(monkeypatch, closes, opens=None, factors=None, volume=None, bench=None):
     """Stand in for Qlib inside studio_worker: prices as (datetime × instrument) frames, the calendar their index."""
     import sys, types
@@ -2931,6 +2948,10 @@ def quantdb_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                                           row("2025-01-06", "SH600000", ann_date=20250106, proc="预案", amount=1e7),
                                           row("2025-01-02", "SH600004", ann_date=20250102, proc="完成", amount=1e7)]),
               done=["20241230"], source="tushare")
+    # CSI 1000 month-end constituents: SH600000 enters at the December 2024 review (second Friday 12-13, announced 11-29)
+    db.upsert("cn.index_members", pd.concat([row("2024-11-29", "000852.SH", con_code="SH600004", weight=1.0),
+                                             row("2024-12-31", "000852.SH", con_code="SH600004", weight=0.5), row("2024-12-31", "000852.SH", con_code="SH600000", weight=0.5)]),
+              keys=("symbol",), done=["000852.SH"], source="tushare")
     return db
 
 
@@ -2961,9 +2982,27 @@ def test_extra_fields_attach_point_in_time(quantdb_store) -> None:
     assert joined.loc[:, "$insider_buy_days"].xs("SH600004", level="instrument").isna().all() and "$insider_buy_days" in note
     assert pd.isna(first["$buyback_plan_days"]) and second["$buyback_plan_days"] == 0 and joined.loc[(days[2], "SH600000"), "$buyback_plan_days"] == 3
     assert joined.loc[:, "$buyback_plan_days"].xs("SH600004", level="instrument").isna().all() and "$buyback_plan_days" in note  # 完成 is not a plan
+    assert joined["$index_add_days"].isna().all()  # the December review was announced a month before this frame starts
     # a foreign universe gets the columns but nothing in them; a missing store attaches nothing
     us = pd.DataFrame({"$close": 1.0}, index=pd.MultiIndex.from_product([days, ["AAPL"]], names=["datetime", "instrument"]))
     assert studio_fields.attach(us)[0]["$turnover"].isna().all()
+
+
+@pytest.mark.offline
+def test_index_add_field_counts_from_the_announcement(quantdb_store) -> None:
+    from rdagent.log.server import studio_fields
+
+    (Path(quantdb_store.root) / studio_fields.ADDS_FILE).write_text(json.dumps({"2025-05-30": ["SH600004"]}))  # a list entered by hand
+    calendar = pd.bdate_range("2024-11-25", "2025-06-20")
+    days = pd.to_datetime(["2024-12-02", "2024-12-13", "2024-12-16", "2025-06-02"])
+    grid = pd.MultiIndex.from_product([days, ["SH600000", "SH600004"]], names=["datetime", "instrument"])
+    field = studio_fields.event_frames(quantdb_store, grid, calendar)["index_members"]["$index_add_days"]
+    added = field.xs("SH600000", level="instrument")
+    assert added.tolist()[:3] == [0.0, 11.0, 14.0]  # the Monday after the 11-29 announcement, the second Friday, the effective day
+    hand = field.xs("SH600004", level="instrument")
+    assert hand.iloc[:3].isna().all() and hand.iloc[3] == 0.0
+    joined, note = studio_fields.attach(pd.DataFrame({"$close": 1.0}, index=grid[:2]))
+    assert joined.loc[(days[0], "SH600000"), "$index_add_days"] == 0 and "$index_add_days" in note
 
 
 @pytest.mark.offline
