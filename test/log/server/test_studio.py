@@ -1996,7 +1996,7 @@ def test_books_go_to_cash_when_the_signal_empties(monkeypatch: pytest.MonkeyPatc
     names = ["SH600000", "SH600004"]
     closes = pd.DataFrame({n: [10.0] * 6 for n in names}, index=days)
     _fake_market(monkeypatch, closes)
-    score = pd.Series([1.0] * 6 + [float("nan")] * 6, index=pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"]))  # held on days 0-2
+    score = pd.Series([1.0] * 6 + [float("nan")] * 6, index=pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"])).dropna()  # held on days 0-2; the worker drops NaN rows before the book
     config = {"start": str(days[1].date()), "end": str(days[-1].date()), "topk": 2, "rebalance": 1, "account": 100000.0,
               "open_cost": 0.0005, "close_cost": 0.0015, "min_cost": 5, "execution": "close", "fills": fills, "limit_threshold": 0.095}
     _, trades, holdings, _, blocks = equal_book(score, config)

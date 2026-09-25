@@ -765,11 +765,14 @@ def equal_book(score, config, universe=None):
 
     rebalance = int(config.get("rebalance", 1))
     held = hold_scores(score, rebalance)
-    days = held.index.get_level_values("datetime").unique().sort_values()
-    refresh_days = set(days[::rebalance])  # the block starts hold_scores() uses
     start, end = pd.Timestamp(config["start"]), pd.Timestamp(config["end"])
     calendar = pd.DatetimeIndex(D.calendar(freq="day"))
     trade_days = calendar[(calendar >= start) & (calendar <= end)]
+    # The score arrives without NaN rows, so a sparse rule has no row at all on the days it is out of the market;
+    # the refresh cadence therefore runs on the trading calendar, and a day without a score means cash.
+    scored_days = set(held.index.get_level_values("datetime").unique())
+    days = calendar[(calendar >= min(scored_days)) & (calendar <= end)]
+    refresh_days = set(days[::rebalance])  # the block starts hold_scores() uses
     names = held.index.get_level_values("instrument").unique()
     first = calendar[max(0, calendar.searchsorted(start) - 1)]
     closes = daily_closes(names, first, end)
@@ -801,7 +804,7 @@ def equal_book(score, config, universe=None):
         signal_day = calendar[calendar.searchsorted(day) - 1]
         cost, turnover = 0.0, 0.0
         if signal_day in refresh_days or (current_set is None and signal_day in days):
-            cross = held.xs(signal_day, level="datetime").dropna()
+            cross = held.xs(signal_day, level="datetime").dropna() if signal_day in scored_days else pd.Series(dtype="float64")
             priced = cross.index.intersection(closes.columns[closes.loc[day].notna()])
             cross = cross.reindex(priced)
             chosen = set(cross.index) if universe else set(cross.nlargest(topk).index)
@@ -885,11 +888,12 @@ def real_book(score, config):
 
     rebalance = int(config.get("rebalance", 1))
     held = hold_scores(score, rebalance)
-    days = held.index.get_level_values("datetime").unique().sort_values()
-    refresh_days = set(days[::rebalance])
     start, end = pd.Timestamp(config["start"]), pd.Timestamp(config["end"])
     calendar = pd.DatetimeIndex(D.calendar(freq="day"))
     trade_days = calendar[(calendar >= start) & (calendar <= end)]
+    scored_days = set(held.index.get_level_values("datetime").unique())  # see equal_book: no score on a day means cash
+    days = calendar[(calendar >= min(scored_days)) & (calendar <= end)]
+    refresh_days = set(days[::rebalance])
     names = held.index.get_level_values("instrument").unique()
     first = calendar[max(0, calendar.searchsorted(start) - 1)]
     closes = daily_closes(names, first, end)
@@ -997,7 +1001,7 @@ def real_book(score, config):
         signal_day = calendar[calendar.searchsorted(day) - 1]
         refreshed = signal_day in refresh_days or (current_set is None and signal_day in days)
         if refreshed:
-            cross = held.xs(signal_day, level="datetime").dropna()
+            cross = held.xs(signal_day, level="datetime").dropna() if signal_day in scored_days else pd.Series(dtype="float64")
             priced = cross.index.intersection(closes.columns[closes.loc[day].notna()])
             cross = cross.reindex(priced)
             chosen = set(cross.nlargest(topk).index)
