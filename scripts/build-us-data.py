@@ -9,8 +9,9 @@ every symbol that was ever a member (plus the benchmark) via yahooquery; qlib's 
 instruments/<market>.txt from the intervals; and a studio-universe.json so the Studio lists the market.
 
 Run it once per universe into the same target and work directory: the dump covers every symbol downloaded
-so far, the manifest keeps the markets already declared (with each one's benchmark), and ``--redownload``
-refreshes the cached price files so every universe ends on the same day. Known indexes: NDX (Nasdaq-100,
+so far and the manifest keeps the markets already declared (with each one's benchmark). Cached price files
+older than STALE_HOURS are fetched again on every run, so a rebuild ends on the latest close; ``--redownload``
+drops them all first. Known indexes: NDX (Nasdaq-100,
 snapshots from 2008), NQUS500LC (Nasdaq US 500 Large Cap, from 2017), NQUSM (Nasdaq US Mid Cap, from 2017).
 
 Needs `pip install yahooquery` and the qlib source checkout next to this repository (for scripts/dump_bin.py).
@@ -91,11 +92,15 @@ def membership(index: str, first_month: str, cache: Path) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["symbol", "start", "end"])
 
 
+STALE_HOURS = 20  # a cached price file older than this is fetched again, so a rebuild ends on the latest close
+
+
 def download(symbols: list[str], start: str, source: Path) -> list[str]:
     from yahooquery import Ticker
 
     source.mkdir(parents=True, exist_ok=True)
-    todo = [s for s in symbols if not (source / f"{s}.csv").exists()]
+    cutoff = time.time() - STALE_HOURS * 3600
+    todo = [s for s in symbols if not ((source / f"{s}.csv").exists() and (source / f"{s}.csv").stat().st_mtime >= cutoff)]
     missing = []
     for i in range(0, len(todo), 25):
         batch = todo[i:i + 25]
@@ -165,7 +170,9 @@ def main() -> int:
 
     intervals = membership(args.index, args.members_from, work / "snapshots")
     intervals.to_csv(work / f"{args.market}_intervals.csv", index=False)
-    symbols = sorted(set(intervals.symbol) | (known if args.redownload else set())) + [BENCHMARKS.get(args.index, f"^{args.index}")]
+    # Every symbol the shared work directory holds is a candidate, so stale files of the other universes refresh too
+    # and the dump (which covers them all) ends on the same day.
+    symbols = sorted(set(intervals.symbol) | known) + [BENCHMARKS.get(args.index, f"^{args.index}")]
     missing = download(symbols, args.start, work / "source")
     print(f"{len(symbols) - len(missing)} symbols downloaded, {len(missing)} not on Yahoo: {' '.join(missing)}", file=sys.stderr)
     normalize(work / "source", work / "normalized")
