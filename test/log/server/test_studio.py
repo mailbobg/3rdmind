@@ -1959,6 +1959,13 @@ def test_tax_loss_rule_holds_the_worst_decile_through_mid_january(tmp_path: Path
     assert worst.loc["2025-12-12"] == 1.0 and worst.loc["2026-01-13"] == 1.0 and pd.isna(worst.loc["2026-01-14"]) and pd.isna(worst.loc["2025-12-11"])
     assert score.xs("S01", level="instrument").loc["2025-12-12"] == 1.0 and other.isna().all()
     assert "usall" in studio_rules.RULES["tax_loss_rebound"]["markets"]
+    # A daily recompute inside the window: the frame ends on 12-22, before the exit, so the signal must still be
+    # on for the last days (it used to drop out two days before whatever the frame's last day was and sell).
+    inside = days[days <= "2025-12-22"]
+    df.loc[(inside, slice(None)), :].to_hdf(tmp_path / "daily_pv.h5", key="data")
+    assert subprocess.run([sys.executable, str(studio_rules.rule_file("tax_loss_rebound"))], cwd=tmp_path, capture_output=True, text=True).returncode == 0
+    live = pd.read_hdf(tmp_path / "result.h5")["tax_loss_rebound"].xs("S00", level="instrument")
+    assert live.loc["2025-12-19"] == 1.0 and live.loc["2025-12-22"] == 1.0
 
 
 @pytest.mark.offline
@@ -2439,16 +2446,31 @@ def test_sync_from_quantdb_fails_loudly_when_a_price_day_is_missing(studio_clien
 
     calls = []
 
-    def run_missing(cmd, **kwargs):
+    def run_missing(cmd, **kwargs):  # quantdb exits 2 when a key failed and prints the FAIL line on stderr
         calls.append(cmd)
-        out = "cn.daily: 1 keys, 0 rows, 1 failed" if cmd[4] == "cn.daily" else "cn.x: 1 keys, 10 rows, 0 failed"
-        return type("R", (), {"returncode": 0, "stdout": "  20260922 失败: Remote end closed connection\n" + out, "stderr": ""})()
+        if cmd[4] == "cn.daily":
+            return type("R", (), {"returncode": 2, "stdout": "cn.daily: 0 keys, 0 rows, 1 failed", "stderr": "  FAIL 20260922: Remote end closed connection"})()
+        return type("R", (), {"returncode": 0, "stdout": "cn.x: 1 keys, 10 rows, 0 failed", "stderr": ""})()
 
     monkeypatch.setattr(studio_sync.subprocess, "run", run_missing)
     assert studio_client.post("/studio/data/sync", json={}).status_code == 202
     state = wait()
     assert state["phase"] == "failed" and "cn.daily" in state["error"] and "Remote end closed" in state["error"]
     assert not any("export-qlib" in c for c in calls)
+
+    def run_master_short(cmd, **kwargs):  # a failed key in the stock master is logged and the sync goes on
+        if cmd[4] == "cn.stock_basic":
+            return type("R", (), {"returncode": 2, "stdout": "cn.stock_basic: 0 keys, 0 rows, 1 failed", "stderr": "  FAIL all: 502"})()
+        if "export-qlib" in cmd:
+            (provider / "calendars" / "day.txt").write_text("2026-09-18\n2026-09-21\n2026-09-22\n")
+        return type("R", (), {"returncode": 0, "stdout": "cn.x: 1 keys, 10 rows, 0 failed", "stderr": ""})()
+
+    monkeypatch.setattr(studio_sync.subprocess, "run", run_master_short)
+    assert studio_client.post("/studio/data/sync", json={}).status_code == 202
+    state = wait()
+    assert state["phase"] == "done" and any("cn.stock_basic：有键没取到" in line for line in state["log"])
+    followed.clear()
+    (provider / "calendars" / "day.txt").write_text("2026-09-18\n2026-09-21\n")
 
     def run_short(cmd, **kwargs):  # every table fine, but the export stops before the expected day
         return type("R", (), {"returncode": 0, "stdout": "cn.x: 0 keys, 0 rows, 0 failed", "stderr": ""})()

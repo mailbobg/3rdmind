@@ -508,7 +508,7 @@ def attach_us(frame, provider):
     start = names.map(listed)
     days = np.where(pd.notna(start), (dates - pd.DatetimeIndex(pd.to_datetime(start))).days, np.nan)
     days = np.where(np.isfinite(days) & (days >= 0), days, np.nan)
-    frame = frame.copy(); frame["$spinoff_days"] = days.astype("float32")
+    frame["$spinoff_days"] = days.astype("float32")  # in place: both callers hand over a frame they built
     return frame, (SPINOFF_NOTE if listed else "")
 
 

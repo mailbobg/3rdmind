@@ -10,7 +10,6 @@ An optional daily schedule (``sync.json``: {"auto": bool, "hour": int}) does the
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -229,6 +228,7 @@ def _find_data_root(extracted: Path) -> Path:
 
 
 PRICE_TABLES = ("cn.daily", "cn.adj_factor", "cn.stock_basic", "cn.index_members", "cn.index_daily")
+CRITICAL_TABLES = ("cn.daily", "cn.adj_factor", "cn.index_daily")  # a day missing here makes the export wrong or the benchmark short
 EXPORT_START = os.environ.get("QLIB_EXPORT_START", "2019-01-01")
 
 
@@ -270,21 +270,20 @@ def _quantdb_worker():
     and swap it in; the calendar's last day is what the data sheet reports."""
     root = provider_dir()
     python = os.environ.get("STUDIO_PYTHON", sys.executable)
+    succeeded = False
     try:
         _log("更新 quantdb 的价格表", phase="downloading")
         for table in PRICE_TABLES:
             done = subprocess.run([python, "-m", "quantdb.cli", "refresh", table], capture_output=True, text=True, timeout=3600)
-            lines = done.stdout.strip().splitlines() or [""]
-            tail = lines[-1]
+            tail = (done.stdout.strip().splitlines() or [""])[-1]
             _log(f"{table}：{tail}" if tail else f"{table}：完成")
-            if done.returncode != 0:
-                raise RuntimeError(f"{table} 刷新失败：{(done.stderr.strip().splitlines() or [''])[-1][:200]}")
-            failed = re.search(r"(\d+) failed", tail)
-            if failed and int(failed.group(1)) > 0 and table in ("cn.daily", "cn.adj_factor"):
-                # A price day that did not arrive must stop the sync here: exporting without it would report an old
-                # day as current and every strategy would quietly run on stale data (2026-09-28).
-                detail = next((line for line in reversed(lines[:-1]) if "失败" in line or "fail" in line.lower()), tail)
-                raise RuntimeError(f"{table} 有 {failed.group(1)} 个交易日没取到：{detail[:200]}")
+            detail = (done.stderr.strip().splitlines() or [""])[-1][:200]
+            if done.returncode == 2 and table not in CRITICAL_TABLES:
+                _log(f"{table}：有键没取到（{detail}），下次再补")  # the master and the month-end weights do not move the calendar
+            elif done.returncode != 0:
+                # quantdb exits 2 when a key failed. A missing price or benchmark day must stop the sync here: exporting
+                # without it would report an old day as current and every strategy would run on stale data (2026-09-28).
+                raise RuntimeError(f"{table} 没有取全：{detail}")
         _log("从 quantdb 导出 Qlib 数据目录", phase="extracting")
         if _busy_check():
             raise RuntimeError("导出前发现有任务在运行，已中止；稍后重试即可")
@@ -303,7 +302,6 @@ def _quantdb_worker():
         succeeded = True
     except Exception as error:  # noqa: BLE001 - shown to the user
         _log(f"失败：{error}", phase="failed", error=str(error))
-        succeeded = False
     finally:
         with _lock:
             _state["running"] = False

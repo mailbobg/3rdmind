@@ -34,7 +34,11 @@ def main():
             continue
         worst = ytd.index[ytd.rank(pct=True) <= 0.1]
         start = days.get_loc(p1)
-        end = days.get_loc(exit_days[-1]) - 1 if len(exit_days) and exit_days[-1] > p1 else len(days)  # signal ends two days before the exit close
+        exit_boundary = pd.Timestamp(f"{year + 1}-01-15")
+        if days[-1] < exit_boundary:
+            end = len(days)  # the data has not reached the exit yet (a daily recompute inside the window): keep holding
+        else:
+            end = days.get_loc(exit_days[-1]) - 1  # the signal ends two days before the exit close (trade day = signal day + 1)
         held_days = days[start:end]
         score.loc[held_days, worst] = 1.0
     out = score.stack(future_stack=True).rename("tax_loss_rebound")

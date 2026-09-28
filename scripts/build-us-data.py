@@ -129,10 +129,9 @@ def download(symbols: list[str], start: str, source: Path) -> list[str]:
 
 def spinoff_filings() -> pd.DataFrame:
     """quantdb's ``us.spinoffs`` rows that carry a US ticker: ticker and first Form 10-12B filing date."""
-    import re
-
     try:
         import quantdb
+        from quantdb.sources.sec import TICKER_RE
     except ImportError:
         print("quantdb is not installed: no spin-off list", file=sys.stderr)
         return pd.DataFrame(columns=["ticker", "file_date"])
@@ -141,7 +140,7 @@ def spinoff_filings() -> pd.DataFrame:
         print("quantdb has no us.spinoffs yet (quantdb refresh us.spinoffs)", file=sys.stderr)
         return pd.DataFrame(columns=["ticker", "file_date"])
     rows = db.sql("select ticker, file_date from us.spinoffs where ticker <> ''")
-    rows = rows[rows.ticker.str.fullmatch(r"[A-Z][A-Z.\-]{0,5}")].copy()
+    rows = rows[rows.ticker.str.fullmatch(TICKER_RE)].copy()
     rows["ticker"] = rows.ticker.str.replace(".", "-", regex=False)
     rows["file_date"] = pd.to_datetime(rows["file_date"])
     return rows.drop_duplicates("ticker").reset_index(drop=True)
@@ -177,7 +176,8 @@ def main() -> int:
     parser.add_argument("--target", default="~/.qlib/qlib_data/us_ndx")
     parser.add_argument("--work", default="~/.qlib/stock_data/us_build")
     parser.add_argument("--redownload", action="store_true", help="drop the cached price files first, so every symbol ends on the same day")
-    parser.add_argument("--spinoffs", action="store_true", help="also download quantdb's us.spinoffs tickers and declare the 'spinoffs' market (benchmark IWM)")
+    parser.add_argument("--spinoffs", action=argparse.BooleanOptionalAction, default=True,
+                        help="download quantdb's us.spinoffs tickers and declare the 'spinoffs' market (benchmark IWM); on by default so the Studio's rebuild picks up new spin-offs")
     args = parser.parse_args()
     target, work = Path(args.target).expanduser(), Path(args.work).expanduser()
     (work / "snapshots").mkdir(parents=True, exist_ok=True)
