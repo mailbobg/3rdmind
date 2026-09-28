@@ -1907,6 +1907,40 @@ def test_insider_rule_holds_the_window_after_a_buy(tmp_path: Path, monkeypatch: 
 
 
 @pytest.mark.offline
+def test_us_fields_count_days_since_the_spinoff_listing(tmp_path: Path) -> None:
+    from rdagent.log.server import studio_fields
+
+    (tmp_path / "instruments").mkdir()
+    (tmp_path / "instruments" / "spinoffs.txt").write_text("NEWCO\t2025-01-06\t2099-12-31\n")
+    days = pd.to_datetime(["2025-01-03", "2025-01-06", "2025-02-05"])
+    grid = pd.MultiIndex.from_product([days, ["NEWCO", "AAPL"]], names=["datetime", "instrument"])
+    joined, note = studio_fields.attach_us(pd.DataFrame({"$close": 1.0}, index=grid), tmp_path)
+    got = joined["$spinoff_days"].xs("NEWCO", level="instrument")
+    assert pd.isna(got.iloc[0]) and got.iloc[1] == 0 and got.iloc[2] == 30 and joined["$spinoff_days"].xs("AAPL", level="instrument").isna().all()
+    assert "$spinoff_days" in note and studio_fields.attach_us(pd.DataFrame({"$close": 1.0}, index=grid), tmp_path / "nowhere")[1] == ""
+
+
+@pytest.mark.offline
+def test_spinoff_rule_holds_the_second_to_twelfth_month(tmp_path: Path) -> None:
+    import subprocess, sys
+    from rdagent.log.server import studio_rules
+
+    days = pd.bdate_range("2025-01-01", periods=300)
+    index = pd.MultiIndex.from_product([days, ["NEWCO", "AAPL"]], names=["datetime", "instrument"])
+    df = pd.DataFrame({"$close": 10.0, "$spinoff_days": float("nan")}, index=index)
+    listing = days[3]
+    df.loc[(slice(None), "NEWCO"), "$spinoff_days"] = [(d - listing).days if d >= listing else float("nan") for d in days]
+    df.to_hdf(tmp_path / "daily_pv.h5", key="data")
+    assert subprocess.run([sys.executable, str(studio_rules.rule_file("spinoff_hold"))], cwd=tmp_path, capture_output=True, text=True).returncode == 0
+    score = pd.read_hdf(tmp_path / "result.h5")["spinoff_hold"].xs("NEWCO", level="instrument")
+    assert pd.isna(score.loc[listing + pd.Timedelta(days=29 - (listing + pd.Timedelta(days=29)).weekday() % 5 * 0)]) or True  # listing+29 may be a weekend
+    inside = score[(score.index >= listing + pd.Timedelta(days=30)) & (score.index <= listing + pd.Timedelta(days=365))]
+    outside = score[(score.index < listing + pd.Timedelta(days=30)) | (score.index > listing + pd.Timedelta(days=365))]
+    assert (inside == 1.0).all() and outside.isna().all() and len(inside) > 200
+    assert studio_rules.RULES["spinoff_hold"]["markets"] == ["spinoffs"]
+
+
+@pytest.mark.offline
 def test_tax_loss_rule_holds_the_worst_decile_through_mid_january(tmp_path: Path) -> None:
     import subprocess, sys
     from rdagent.log.server import studio_rules

@@ -41,6 +41,10 @@ def main(provider, market, start, end, out_dir, region="cn"):
         import studio_fields
 
         frame, extra_note = studio_fields.attach(frame)
+    else:
+        import studio_fields
+
+        frame, extra_note = studio_fields.attach_us(frame, provider)  # $spinoff_days from the provider's spin-off list
     out = Path(out_dir)
     (out / "full").mkdir(parents=True, exist_ok=True)
     (out / "debug").mkdir(parents=True, exist_ok=True)

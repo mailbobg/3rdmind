@@ -127,6 +127,26 @@ def download(symbols: list[str], start: str, source: Path) -> list[str]:
     return missing
 
 
+def spinoff_filings() -> pd.DataFrame:
+    """quantdb's ``us.spinoffs`` rows that carry a US ticker: ticker and first Form 10-12B filing date."""
+    import re
+
+    try:
+        import quantdb
+    except ImportError:
+        print("quantdb is not installed: no spin-off list", file=sys.stderr)
+        return pd.DataFrame(columns=["ticker", "file_date"])
+    db = quantdb.open()
+    if not db.table_path("us.spinoffs").is_file():
+        print("quantdb has no us.spinoffs yet (quantdb refresh us.spinoffs)", file=sys.stderr)
+        return pd.DataFrame(columns=["ticker", "file_date"])
+    rows = db.sql("select ticker, file_date from us.spinoffs where ticker <> ''")
+    rows = rows[rows.ticker.str.fullmatch(r"[A-Z][A-Z.\-]{0,5}")].copy()
+    rows["ticker"] = rows.ticker.str.replace(".", "-", regex=False)
+    rows["file_date"] = pd.to_datetime(rows["file_date"])
+    return rows.drop_duplicates("ticker").reset_index(drop=True)
+
+
 def normalize(source: Path, normalized: Path) -> None:
     """qlib's YahooNormalize1d for US: adjust by adjclose, scale so the first close is 1, add change."""
     normalized.mkdir(parents=True, exist_ok=True)
@@ -157,6 +177,7 @@ def main() -> int:
     parser.add_argument("--target", default="~/.qlib/qlib_data/us_ndx")
     parser.add_argument("--work", default="~/.qlib/stock_data/us_build")
     parser.add_argument("--redownload", action="store_true", help="drop the cached price files first, so every symbol ends on the same day")
+    parser.add_argument("--spinoffs", action="store_true", help="also download quantdb's us.spinoffs tickers and declare the 'spinoffs' market (benchmark IWM)")
     args = parser.parse_args()
     target, work = Path(args.target).expanduser(), Path(args.work).expanduser()
     (work / "snapshots").mkdir(parents=True, exist_ok=True)
@@ -173,7 +194,23 @@ def main() -> int:
     # Every symbol the shared work directory holds is a candidate, so stale files of the other universes refresh too
     # and the dump (which covers them all) ends on the same day.
     symbols = sorted(set(intervals.symbol) | known) + [BENCHMARKS.get(args.index, f"^{args.index}")]
+    spinoffs = spinoff_filings() if args.spinoffs else pd.DataFrame()
+    if len(spinoffs):
+        symbols = sorted(set(symbols) | set(spinoffs.ticker)) + ["IWM"]
     missing = download(symbols, args.start, work / "source")
+    if len(spinoffs):
+        # A spin-off ticker's first bar must sit near its Form 10 filing; an older ticker is a re-listing or a
+        # reused symbol. Its interval runs from the first bar on; the market's instrument file is written below.
+        rows = []
+        for r in spinoffs.itertuples():
+            csv = work / "source" / f"{r.ticker}.csv"
+            if not csv.is_file():
+                continue
+            first = pd.to_datetime(pd.read_csv(csv, usecols=["date"])["date"]).min()
+            if -60 <= (first - r.file_date).days <= 400:
+                rows.append({"symbol": r.ticker, "start": str(first.date()), "end": "2099-12-31"})
+        pd.DataFrame(rows, columns=["symbol", "start", "end"]).to_csv(work / "spinoffs_intervals.csv", index=False)
+        print(f"{len(rows)} spin-offs with a listing near their filing (of {len(spinoffs)} with a ticker)", file=sys.stderr)
     print(f"{len(symbols) - len(missing)} symbols downloaded, {len(missing)} not on Yahoo: {' '.join(missing)}", file=sys.stderr)
     normalize(work / "source", work / "normalized")
 
@@ -192,6 +229,9 @@ def main() -> int:
     manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {"region": "us", "label": "美股", "benchmark": benchmark, "markets": {}}
     manifest.setdefault("markets", {})[args.market] = LABELS.get(args.market, args.market.upper())
     manifest.setdefault("benchmarks", {})[args.market] = benchmark
+    if len(spinoffs):
+        manifest["markets"]["spinoffs"] = "分拆上市"
+        manifest["benchmarks"]["spinoffs"] = "iwm"
     # The dump moved the calendar for every universe in this directory, so every declared market's
     # instrument file is rewritten from its intervals (an open interval is clamped to the new last day).
     counts = {}

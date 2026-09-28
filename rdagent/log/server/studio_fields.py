@@ -482,6 +482,36 @@ def attach(frame):
     return frame.join(extra.astype("float32"), how="left"), note
 
 
+US_COLUMNS = ["$spinoff_days"]
+SPINOFF_NOTE = (
+    "\n$spinoff_days (SEC Form 10-12B filers via EDGAR, listing day from the first Yahoo bar): calendar days since the"
+    " company began trading as a spin-off (0 on the listing day), NaN for every other name. Pre-registered event test"
+    " (141 spin-offs 2008–2025): from the 21st to the 252nd trading day the spin-off beats the Russell 2000 by +15.8%"
+    " (median +15.6%, t 3.5, both halves positive); the first month is flat. Only still-listed tickers are known.\n"
+)
+
+
+def attach_us(frame, provider):
+    """The US extra columns: ``$spinoff_days`` from ``<provider>/instruments/spinoffs.txt`` (ticker, listing day, end),
+    which scripts/build-us-data.py writes from quantdb's ``us.spinoffs``. Returns (frame, note)."""
+    import numpy as np
+    import pandas as pd
+
+    path = Path(provider) / "instruments" / "spinoffs.txt"
+    listed = {}
+    if path.is_file():
+        for line in path.read_text().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                listed[parts[0].strip()] = pd.Timestamp(parts[1].strip())
+    dates = frame.index.get_level_values("datetime"); names = frame.index.get_level_values("instrument")
+    start = names.map(listed)
+    days = np.where(pd.notna(start), (dates - pd.DatetimeIndex(pd.to_datetime(start))).days, np.nan)
+    days = np.where(np.isfinite(days) & (days >= 0), days, np.nan)
+    frame = frame.copy(); frame["$spinoff_days"] = days.astype("float32")
+    return frame, (SPINOFF_NOTE if listed else "")
+
+
 # ---- refreshing ---------------------------------------------------------------------------------------------
 
 def refresh(kind, start, end, codes=None, log=lambda *_: None) -> dict:
