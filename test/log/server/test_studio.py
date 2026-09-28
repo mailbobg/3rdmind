@@ -2412,6 +2412,49 @@ def test_sync_from_quantdb_refreshes_then_exports(studio_client, tmp_path: Path,
 
 
 @pytest.mark.offline
+def test_sync_from_quantdb_fails_loudly_when_a_price_day_is_missing(studio_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed cn.daily key or an export that stops short of the last trading day ends the sync as failed
+    (2026-09-28: a truncated day was exported and reported as current)."""
+    from rdagent.log.server import studio_sync
+
+    provider = tmp_path / "qlib"
+    (provider / "calendars").mkdir(parents=True)
+    (provider / "calendars" / "day.txt").write_text("2026-09-18\n2026-09-21\n")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", str(provider))
+    monkeypatch.setattr(studio_sync, "_settings_path", tmp_path / "sync.json")
+    studio_sync.save_settings({"source": "quantdb"})
+    monkeypatch.setattr(studio_sync, "expected_last_day", lambda: "2026-09-22")
+    monkeypatch.setattr(studio_sync, "_busy_check", lambda: False)
+
+    def wait():
+        deadline = __import__("time").time() + 5
+        while studio_sync.status()["sync"]["running"] and __import__("time").time() < deadline:
+            __import__("time").sleep(0.02)
+        return studio_sync.status()["sync"]
+
+    calls = []
+
+    def run_missing(cmd, **kwargs):
+        calls.append(cmd)
+        out = "cn.daily: 1 keys, 0 rows, 1 failed" if cmd[4] == "cn.daily" else "cn.x: 1 keys, 10 rows, 0 failed"
+        return type("R", (), {"returncode": 0, "stdout": "  20260922 失败: Remote end closed connection\n" + out, "stderr": ""})()
+
+    monkeypatch.setattr(studio_sync.subprocess, "run", run_missing)
+    assert studio_client.post("/studio/data/sync", json={}).status_code == 202
+    state = wait()
+    assert state["phase"] == "failed" and "cn.daily" in state["error"] and "Remote end closed" in state["error"]
+    assert not any("export-qlib" in c for c in calls)
+
+    def run_short(cmd, **kwargs):  # every table fine, but the export stops before the expected day
+        return type("R", (), {"returncode": 0, "stdout": "cn.x: 0 keys, 0 rows, 0 failed", "stderr": ""})()
+
+    monkeypatch.setattr(studio_sync.subprocess, "run", run_short)
+    assert studio_client.post("/studio/data/sync", json={}).status_code == 202
+    state = wait()
+    assert state["phase"] == "failed" and "2026-09-21" in state["error"] and "2026-09-22" in state["error"]
+
+
+@pytest.mark.offline
 def test_sync_remote_check_falls_back_when_the_api_is_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
     import urllib.error
     from rdagent.log.server import studio_sync

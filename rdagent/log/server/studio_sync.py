@@ -10,6 +10,7 @@ An optional daily schedule (``sync.json``: {"auto": bool, "hour": int}) does the
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -129,6 +130,18 @@ def expected_last_day() -> str:
     day = now.date()
     if now.hour < 17 or (now.hour == 17 and now.minute < 30) or day.weekday() >= 5:
         day = (pd_bdate_before(day))
+    # The exchange calendar (quantdb cn.trade_cal) turns a holiday into the last open day before it, so a sync
+    # on a holiday is not reported as stale.
+    try:
+        import quantdb
+
+        db = quantdb.open()
+        if db.table_path("cn.trade_cal").is_file():
+            rows = db.sql(f"SELECT max(date) AS d FROM cn.trade_cal WHERE exchange = 'SSE' AND is_open = 1 AND date <= '{day.isoformat()}'")
+            if len(rows) and rows["d"].iloc[0] is not None:
+                return str(rows["d"].iloc[0])[:10]
+    except Exception:  # noqa: BLE001 - the weekday rule stands in
+        pass
     return day.strftime("%Y-%m-%d")
 
 
@@ -256,10 +269,17 @@ def _quantdb_worker():
         _log("更新 quantdb 的价格表", phase="downloading")
         for table in PRICE_TABLES:
             done = subprocess.run([python, "-m", "quantdb.cli", "refresh", table], capture_output=True, text=True, timeout=3600)
-            tail = (done.stdout.strip().splitlines() or [""])[-1]
+            lines = done.stdout.strip().splitlines() or [""]
+            tail = lines[-1]
             _log(f"{table}：{tail}" if tail else f"{table}：完成")
             if done.returncode != 0:
                 raise RuntimeError(f"{table} 刷新失败：{(done.stderr.strip().splitlines() or [''])[-1][:200]}")
+            failed = re.search(r"(\d+) failed", tail)
+            if failed and int(failed.group(1)) > 0 and table in ("cn.daily", "cn.adj_factor"):
+                # A price day that did not arrive must stop the sync here: exporting without it would report an old
+                # day as current and every strategy would quietly run on stale data (2026-09-28).
+                detail = next((line for line in reversed(lines[:-1]) if "失败" in line or "fail" in line.lower()), tail)
+                raise RuntimeError(f"{table} 有 {failed.group(1)} 个交易日没取到：{detail[:200]}")
         _log("从 quantdb 导出 Qlib 数据目录", phase="extracting")
         if _busy_check():
             raise RuntimeError("导出前发现有任务在运行，已中止；稍后重试即可")
@@ -267,6 +287,9 @@ def _quantdb_worker():
         if done.returncode != 0:
             raise RuntimeError(f"导出失败：{(done.stderr.strip().splitlines() or [''])[-1][:200]}")
         calendar = (root / "calendars" / "day.txt").read_text().splitlines()
+        expected = expected_last_day()
+        if expected and calendar[-1] < expected:
+            raise RuntimeError(f"导出只到 {calendar[-1]}，交易日历上最近的交易日是 {expected}：那天的行情没有完整取到，策略没有更新")
         (root / "studio-data-source.json").write_text(json.dumps({
             "source": "quantdb", "release": f"quantdb {calendar[-1]}", "published_at": None, "downloaded_at": datetime.now(timezone.utc).isoformat(),
             "calendar_start": calendar[0], "calendar_end": calendar[-1], "kind": "exported from quantdb (Tushare daily + adj_factor + index_weight)",
