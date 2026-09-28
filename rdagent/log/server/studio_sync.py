@@ -242,9 +242,14 @@ def run_sync(force: bool = False) -> dict:
     if _busy_check():
         return {"started": False, "reason": "有回测或研究正在运行，等它们结束再同步"}
     if settings().get("source", "quantdb") == "quantdb":
+        global _fields_pending
         with _lock:
             _state.update({"running": True, "phase": "starting", "progress": None, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                            "finished_at": None, "error": None, "log": []})
+        # Every price sync, scheduled or clicked, is followed by the field refresh and the tracked strategies'
+        # updates: a manual sync that left the strategies on the old day is how "data updated, strategies
+        # stale" happened (2026-09-28).
+        _fields_pending = True
         threading.Thread(target=_quantdb_worker, name="studio-data-sync-run", daemon=True).start()
         return {"started": True, "release": "quantdb"}
     try:
@@ -295,8 +300,10 @@ def _quantdb_worker():
             "calendar_start": calendar[0], "calendar_end": calendar[-1], "kind": "exported from quantdb (Tushare daily + adj_factor + index_weight)",
         }, indent=2))
         _log(f"完成：数据到 {calendar[-1]}（来自 quantdb）", phase="done", progress=1.0)
+        succeeded = True
     except Exception as error:  # noqa: BLE001 - shown to the user
         _log(f"失败：{error}", phase="failed", error=str(error))
+        succeeded = False
     finally:
         with _lock:
             _state["running"] = False
@@ -304,7 +311,8 @@ def _quantdb_worker():
         global _fields_pending
         if _fields_pending:
             _fields_pending = False
-            _start_fields()
+            if succeeded:  # fields and strategies follow the prices only when the prices actually landed
+                _start_fields()
 
 
 def _sync_worker(remote: dict):

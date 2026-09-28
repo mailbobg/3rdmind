@@ -2400,12 +2400,15 @@ def test_sync_from_quantdb_refreshes_then_exports(studio_client, tmp_path: Path,
 
     monkeypatch.setattr(studio_sync.subprocess, "run", run)
     monkeypatch.setattr(studio_sync, "_busy_check", lambda: False)
+    followed = []
+    monkeypatch.setattr(studio_sync, "_daily_fields", lambda: followed.append(1) or True)
     assert studio_client.post("/studio/data/sync", json={}).status_code == 202
     deadline = __import__("time").time() + 5
     while studio_sync.status()["sync"]["running"] and __import__("time").time() < deadline:
         __import__("time").sleep(0.02)
     state = studio_sync.status()
     assert state["sync"]["phase"] == "done" and state["local"]["calendar_end"] == "2026-09-22" and state["local"]["release"] == "quantdb 2026-09-22"
+    assert followed == [1]  # a clicked sync is followed by the field refresh and the strategy updates too
     n = len(studio_sync.PRICE_TABLES)
     assert [c[4] for c in calls[:n]] == list(studio_sync.PRICE_TABLES) and calls[n][3:5] == ["export-qlib", str(provider)]
     assert studio_client.put("/studio/data/sync/settings", json={"source": "nowhere"}).status_code == 400
@@ -2425,6 +2428,8 @@ def test_sync_from_quantdb_fails_loudly_when_a_price_day_is_missing(studio_clien
     studio_sync.save_settings({"source": "quantdb"})
     monkeypatch.setattr(studio_sync, "expected_last_day", lambda: "2026-09-22")
     monkeypatch.setattr(studio_sync, "_busy_check", lambda: False)
+    followed = []
+    monkeypatch.setattr(studio_sync, "_daily_fields", lambda: followed.append(1) or True)
 
     def wait():
         deadline = __import__("time").time() + 5
@@ -2452,6 +2457,7 @@ def test_sync_from_quantdb_fails_loudly_when_a_price_day_is_missing(studio_clien
     assert studio_client.post("/studio/data/sync", json={}).status_code == 202
     state = wait()
     assert state["phase"] == "failed" and "2026-09-21" in state["error"] and "2026-09-22" in state["error"]
+    assert followed == []  # a failed sync never refreshes fields or strategies on the stale data
 
 
 @pytest.mark.offline
