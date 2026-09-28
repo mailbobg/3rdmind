@@ -35,7 +35,10 @@ def ensure_data(provider, data_path, start, market="csi300", region="cn"):
         existing = pd.read_hdf(data_path)
         dates = existing.index.get_level_values("datetime")
         import studio_fields
-        extra_ready = region != "cn" or not studio_fields.installed() or all(c in existing.columns for c in studio_fields.EXTRA_COLUMNS)
+        if region == "cn":
+            extra_ready = not studio_fields.installed() or all(c in existing.columns for c in studio_fields.EXTRA_COLUMNS)
+        else:
+            extra_ready = all(c in existing.columns for c in studio_fields.US_COLUMNS)
         if pd.Timestamp(dates.max()) >= last and pd.Timestamp(dates.min()) <= pd.Timestamp(start) and extra_ready:
             return str(dates.min().date()), str(dates.max().date()), int(len(existing))
     frame = D.features(D.instruments(market), FIELDS, start_time=start, end_time=str(last.date()), freq="day")
@@ -48,6 +51,10 @@ def ensure_data(provider, data_path, start, market="csi300", region="cn"):
         import studio_fields
 
         frame, _ = studio_fields.attach(frame)
+    else:
+        import studio_fields
+
+        frame, _ = studio_fields.attach_us(frame, provider)  # $spinoff_days, see studio_universe
     data_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_hdf(data_path, key="data", mode="w")
     dates = frame.index.get_level_values("datetime")
