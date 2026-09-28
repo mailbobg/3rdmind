@@ -51,6 +51,13 @@ RULES = {
         "book": {"topk": 6000, "n_drop": 6000, "horizon": 10, "rebalance": 1, "neutral": "none", "book": "equal"},
         "markets": ["all"],
     },
+    "tax_loss_rebound": {
+        "label": "年末税损反弹（美股）",
+        "description": "每年 12 月 14 日前最后一个交易日按年初至今收益排名，持有最差的十分位到次年 1 月 15 日前最后一个交易日收盘，等权，其余时间空仓。"
+                       "预注册检验（美股大中盘 1,357 只，2008–2025，18 年）：相对全池等权 +2.0%/年（t 2.6，14/18 年为正，两半段同正），单独看每次净 +4.8%（t 3.1），2021 年后减弱。",
+        "book": {"topk": 6000, "n_drop": 6000, "horizon": 20, "rebalance": 1, "neutral": "none", "book": "equal"},
+        "markets": ["usall", "us500", "usmid", "nasdaq100"],
+    },
     "insider_buy_20d_clean": {
         "label": "高管本人增持后 20 日 · 去关注度名单",
         "description": "高管本人二级市场增持后 20 日的股票，再剔除关注度名单（近 20 日龙虎榜或涨停、户数分散、未来 30 天大解禁），等权。两条规则的叠加。",

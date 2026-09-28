@@ -1907,6 +1907,27 @@ def test_insider_rule_holds_the_window_after_a_buy(tmp_path: Path, monkeypatch: 
 
 
 @pytest.mark.offline
+def test_tax_loss_rule_holds_the_worst_decile_through_mid_january(tmp_path: Path) -> None:
+    import subprocess, sys
+    from rdagent.log.server import studio_rules
+
+    days = pd.bdate_range("2024-12-20", "2026-02-10")  # covers the 2025 ranking day (12-12) and exit (2026-01-15)
+    names = [f"S{i:02d}" for i in range(20)]
+    index = pd.MultiIndex.from_product([days, names], names=["datetime", "instrument"])
+    close = pd.DataFrame({n: 100.0 for n in names}, index=days)
+    for i, n in enumerate(names):  # S00 and S01 lose 50% and 40% during 2025, the rest drift up
+        close.loc[days >= "2025-01-02", n] = 100.0 * (0.5 if i == 0 else 0.6 if i == 1 else 1.0 + i / 50)
+    df = pd.DataFrame({"$close": close.stack(future_stack=True).reindex(index).values}, index=index)
+    df.to_hdf(tmp_path / "daily_pv.h5", key="data")
+    assert subprocess.run([sys.executable, str(studio_rules.rule_file("tax_loss_rebound"))], cwd=tmp_path, capture_output=True, text=True).returncode == 0
+    score = pd.read_hdf(tmp_path / "result.h5")["tax_loss_rebound"]
+    worst = score.xs("S00", level="instrument"); other = score.xs("S05", level="instrument")
+    assert worst.loc["2025-12-12"] == 1.0 and worst.loc["2026-01-13"] == 1.0 and pd.isna(worst.loc["2026-01-14"]) and pd.isna(worst.loc["2025-12-11"])
+    assert score.xs("S01", level="instrument").loc["2025-12-12"] == 1.0 and other.isna().all()
+    assert "usall" in studio_rules.RULES["tax_loss_rebound"]["markets"]
+
+
+@pytest.mark.offline
 def test_index_add_rule_holds_until_the_second_friday(tmp_path: Path) -> None:
     import subprocess, sys
     from rdagent.log.server import studio_rules
